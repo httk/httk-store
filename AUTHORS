@@ -1,0 +1,5 @@
+# This file lists significant contributions to the implementation and design of httk-store.
+# The source control revision history keeps the full list of direct code contributions.
+# httk can print the references relevant for the routines used in a specific program by: print(httk.core.credits)
+
+Rickard Armiento <rickard-gpg@armiento.net>

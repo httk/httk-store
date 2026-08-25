@@ -12,7 +12,7 @@ Both run fully offline — no network, no server, no registry lookup.
 each wrap a plain `{id: record}` mapping of one of httk-core's stdlib-only
 record models (`Reference`, `File`, `Calculation`) and serve it as the
 corresponding OPTIMADE entry type. A record may be given as a model instance or
-as a mapping — the provider calls `Reference.create(...)` on whatever it gets,
+as a mapping — the provider calls `Reference.from_obj(...)` on whatever it gets,
 so the two forms below are interchangeable.
 
 Reading a provider is always the same three steps, and this example does them

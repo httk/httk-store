@@ -163,15 +163,15 @@ class _StoreFactory:
         self._postgres_isolated = []
         self._stores = {}
 
-    def __call__(self, *, entry_records=None):
+    def __call__(self, *, entry_records=None, entry_ids=None):
         if self._backend == "sqlite":
             database = Backend.sqlite()
             declaration = entry_records if entry_records is not None else {}
-            store = SqlStore(database, entry_records=declaration)
+            store = SqlStore(database, entry_records=declaration, entry_ids=entry_ids)
         elif self._backend == "duckdb":
             database = Backend.duckdb()
             declaration = entry_records if entry_records is not None else {}
-            store = SqlStore(database, entry_records=declaration)
+            store = SqlStore(database, entry_records=declaration, entry_ids=entry_ids)
         elif self._backend == "postgresql":
             from postgres_support import IsolatedPostgresDatabase
 
@@ -179,7 +179,7 @@ class _StoreFactory:
             self._postgres_isolated.append(isolated)
             database = Backend.postgresql(isolated.uri)
             declaration = entry_records if entry_records is not None else {}
-            store = SqlStore(database, entry_records=declaration)
+            store = SqlStore(database, entry_records=declaration, entry_ids=entry_ids)
         else:
             from httk.store.backend.mongo import MongoDatabase, MongoStore
 

@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import sqlalchemy
+from httk.core.entry_ids import check_entry_id, check_immutable_id
 from httk.core.storage import StorageProjectionCycleError, resolve_storage_record
 
 from httk.store.backend.schema import TableSchema, resolve_schema
@@ -82,6 +83,7 @@ from httk.store.backend.sql.store import (
 )
 from httk.store.store_common import (
     EntryDispatchIntegrityError,
+    EntryIdConflictError,
     EntryMetadataConflictError,
     SaveProjection,
     _metadata_plan,
@@ -677,6 +679,18 @@ class _WorkerEncoder:
                     return existing
 
         values = _encode_parent_row(schema, source, projected, path, resolve_sid)
+        if record_type in self._store._entry_record_types:
+            entry_id = values.get("id")
+            immutable_id = values.get("immutable_id")
+            if entry_id is None and self._store._entry_ids is None:
+                raise ValueError(
+                    f"{record_type.__name__} has no id and SqlStore(entry_ids=EntryIdScheme(...)) was not declared; "
+                    "pass an explicit id or declare a scheme"
+                )
+            if entry_id is not None:
+                check_entry_id(entry_id)
+            if immutable_id is not None:
+                check_immutable_id(immutable_id)
 
         if schema.dedup == "by_value":
             value_tuple = tuple(sorted(values.items()))
@@ -1233,6 +1247,7 @@ class _Merger:
                 break
         self._promote_late_roles()
         self._sweep_orphans()
+        self._verify_entry_id_conflicts()
         # A declared family whose table was never written stays uncreated (deferred DDL only
         # happens on write); the compaction pass must treat such a missing table as empty
         # rather than querying it, matching the module's lazy-DDL read-path principle.
@@ -1243,6 +1258,53 @@ class _Merger:
                 self._compact(table)
         self._merge_dispatch()
         self._populate_resolved_map()
+
+    def _verify_entry_id_conflicts(self) -> None:
+        """Check surviving staged explicit ids across every backing of each family."""
+        existing_names = actual_table_names(self._connection)
+        for family in self._store.layout.families:
+            if family.definition_id is None:
+                continue
+            tables = [
+                self._store._table(resolve_schema(record).table_name)
+                for record in family.records
+                if resolve_schema(record).table_name in existing_names
+            ]
+            if not tables:
+                continue
+            for field_name in ("id", "immutable_id"):
+                staged = sqlalchemy.union_all(
+                    *(
+                        sqlalchemy.select(table.c[field_name].label("value")).where(
+                            table.c[SID_COLUMN] >= _SID_BLOCK, table.c[field_name].is_not(None)
+                        )
+                        for table in tables
+                    )
+                ).subquery()
+                duplicate = self._connection.execute(
+                    sqlalchemy.select(staged.c.value)
+                    .group_by(staged.c.value)
+                    .having(sqlalchemy.func.count() > 1)
+                    .limit(1)
+                ).first()
+                if duplicate is not None:
+                    raise EntryIdConflictError(family.name, str(duplicate[0]), None, None)
+                for staged_table in tables:
+                    for owned_table in tables:
+                        staged_alias = staged_table.alias("staged")
+                        owned_alias = owned_table.alias("owned")
+                        conflict = self._connection.execute(
+                            sqlalchemy.select(staged_alias.c[field_name])
+                            .join(owned_alias, staged_alias.c[field_name] == owned_alias.c[field_name])
+                            .where(
+                                staged_alias.c[SID_COLUMN] >= _SID_BLOCK,
+                                staged_alias.c[field_name].is_not(None),
+                                owned_alias.c[SID_COLUMN] < _SID_BLOCK,
+                            )
+                            .limit(1)
+                        ).first()
+                        if conflict is not None:
+                            raise EntryIdConflictError(owned_table.name, str(conflict[0]), None, None)
 
     def _populate_resolved_map(self) -> None:
         """Map every sid ``save`` returned (a synthetic token) to its durable stored sid."""
@@ -1681,8 +1743,57 @@ class _Merger:
             # whose logical_id may differ from their sid after replace(), carry
             # ids below that floor and are never matched, hence never disturbed.
             self._remap_column(name, LOGICAL_ID_COLUMN, map_table)
+            self._mint_compacted_entry_ids(table)
         finally:
             self._drop_map_table(map_table)
+
+    def _mint_compacted_entry_ids(self, table: sqlalchemy.Table) -> None:
+        """Fill ids after block-sid compaction, when final numbers are known."""
+        record_type = next(
+            (record for record in self._store._entry_record_types if resolve_schema(record).table_name == table.name),
+            None,
+        )
+        if record_type is None:
+            return
+        scheme = self._store._entry_ids
+        has_missing_id = self._connection.execute(
+            sqlalchemy.select(table.c[SID_COLUMN])
+            .where(
+                table.c[SID_COLUMN] >= self._ingest._initial_next_sid.get(table.name, 1),
+                table.c.id.is_(None),
+            )
+            .limit(1)
+        ).first()
+        if scheme is None and has_missing_id is not None:
+            raise ValueError(
+                f"{record_type.__name__} has no id and SqlStore(entry_ids=EntryIdScheme(...)) was not declared; "
+                "pass an explicit id or declare a scheme"
+            )
+        entry_id: sqlalchemy.ColumnElement[Any]
+        if scheme is None:
+            entry_id = table.c.id
+        else:
+            base = scheme.base
+            if scheme.type_in_base:
+                base = f"{base}.{self._store._entry_record_types[record_type][0]}"
+            prefix = f"{base}-{self._ingest._id_series or scheme.series}-"
+            _entry_type, backing_count, backing_index = self._store._entry_record_types[record_type]
+            number = table.c[SID_COLUMN] * backing_count + backing_index
+            generated = sqlalchemy.literal(prefix).op("||")(sqlalchemy.cast(number, sqlalchemy.Text))
+            entry_id = sqlalchemy.case((table.c.id.is_(None), generated), else_=table.c.id)
+        self._connection.execute(
+            sqlalchemy.update(table)
+            .where(table.c[SID_COLUMN] >= self._ingest._initial_next_sid.get(table.name, 1))
+            .values(
+                {
+                    "id": entry_id,
+                    "immutable_id": sqlalchemy.case(
+                        (table.c.immutable_id.is_(None), entry_id.op("||")(sqlalchemy.literal("~1"))),
+                        else_=table.c.immutable_id,
+                    ),
+                }
+            )
+        )
 
     # -- dispatch
 

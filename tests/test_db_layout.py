@@ -418,7 +418,8 @@ def test_schema_fingerprint_is_deterministic_and_covers_the_closure() -> None:
     first = schema_fingerprint_json(layout)
     assert first == schema_fingerprint_json(layout)
     document = json.loads(first)
-    assert set(document) == {"tables"}
+    assert set(document) == {"entry_id_tables", "tables"}
+    assert document["entry_id_tables"] == []
     # The referenced child class is pulled in through the closure.
     assert set(document["tables"]) == {"layout_ref_parent", "layout_ref_child"}
     assert schema_fingerprint_diff(first, first) == {}

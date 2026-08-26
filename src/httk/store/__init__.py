@@ -88,7 +88,7 @@ from .query.optimade_filters import (
     filter_searcher,
 )
 from .storage_layout import EntryFamilyDeclaration, EntryLayoutBindingError, EntryRecordDeclaration
-from .store_common import EntryStore
+from .store_common import EntryIdConflictError, EntryIdScheme, EntryStore
 from .validation import PropertyValidationError, validate_property, validate_record
 
 __all__ = [
@@ -98,6 +98,8 @@ __all__ = [
     "CountUnavailableError",
     "DataRecordEntryProvider",
     "EntryFamilyDeclaration",
+    "EntryIdConflictError",
+    "EntryIdScheme",
     "EntryLayoutBindingError",
     "EntryRecordDeclaration",
     "EntryStore",

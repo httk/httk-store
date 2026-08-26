@@ -68,6 +68,7 @@ HTTK_EXAMPLE_REQUIRES = ["sqlalchemy", "httk.serve.optimade"]
 class Writer:
     name: str
     born: int
+    id: str
 
 
 @dataclass(frozen=True)
@@ -80,15 +81,16 @@ class Book:
     cover: bytes  # no OPTIMADE representation: not served
     keywords: list[str]
     author: Annotated[Writer | None, Related(role="author", description="Wrote the book")] = None
+    id: str | None = None
 
     @stored_property
     def nkeywords(self) -> int:
         return len(self.keywords)
 
 
-ADA = Writer("Ada", 1815)
-BOOLE = Writer("Boole", 1815)
-CARA = Writer("Cara", 1820)
+ADA = Writer("Ada", 1815, "writers-1")
+BOOLE = Writer("Boole", 1815, "writers-2")
+CARA = Writer("Cara", 1820, "writers-3")
 
 BOOKS = [
     Book(
@@ -100,6 +102,7 @@ BOOKS = [
         cover=b"\x00\xff",
         keywords=["computing", "history"],
         author=ADA,
+        id="books-1",
     ),
     Book(
         title="Laws of Thought",
@@ -110,6 +113,7 @@ BOOKS = [
         cover=b"",
         keywords=["logic"],
         author=BOOLE,
+        id="books-2",
     ),
     Book(
         title="Silence",
@@ -119,6 +123,7 @@ BOOKS = [
         published=datetime.datetime(2020, 1, 1, 0, 0, 0),  # noqa: DTZ001 (naive datetime is the storage contract)
         cover=b"",
         keywords=[],
+        id="books-3",
     ),
 ]
 

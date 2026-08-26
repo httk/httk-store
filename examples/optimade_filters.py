@@ -78,6 +78,7 @@ HTTK_EXAMPLE_REQUIRES = ["sqlalchemy"]
 class Publication:
     doi: str
     year: int
+    id: str
 
 
 @dataclass(frozen=True)
@@ -86,15 +87,16 @@ class Material:
     x: Fraction
     symbols: list[str]
     ref: Publication | None = None
+    id: str | None = None
 
 
-PUB_A = Publication("10.1000/alpha", 1999)
-PUB_B = Publication("10.2000/beta", 2005)
+PUB_A = Publication("10.1000/alpha", 1999, "publications-1")
+PUB_B = Publication("10.2000/beta", 2005, "publications-2")
 
 MATERIALS = [
-    Material("alpha oxide", Fraction(1, 2), ["O", "H"], PUB_A),
-    Material("beta metal", Fraction(5, 2), ["Fe"], PUB_B),
-    Material("gamma oxide", Fraction(7, 2), ["O"], None),
+    Material("alpha oxide", Fraction(1, 2), ["O", "H"], PUB_A, "materials-1"),
+    Material("beta metal", Fraction(5, 2), ["Fe"], PUB_B, "materials-2"),
+    Material("gamma oxide", Fraction(7, 2), ["O"], None, "materials-3"),
 ]
 
 #: Plain filters over the material's own (prefixed) properties.
@@ -127,7 +129,6 @@ RELATED_FILTERS = [
 #: Filters that cannot be translated, and the category each reports.
 REJECTED_FILTERS = [
     "_httk_bananas = 3",
-    'id = "materials-1"',
     "refs.other._httk_custom_x = 1",
 ]
 

@@ -412,8 +412,8 @@ def test_by_value_reuse_discards_nested_no_dedup_insert(projection_database, mon
     assert leaf_sid is not None
     original_parent_row = store._parent_row
 
-    def reuse_original_leaf(connection, schema, source, projected, projection, path):
-        values = original_parent_row(connection, schema, source, projected, projection, path)
+    def reuse_original_leaf(connection, schema, source, projected, projection, path, **kwargs):
+        values = original_parent_row(connection, schema, source, projected, projection, path, **kwargs)
         if schema.cls is ByValueHolder:
             values["leaf_sid"] = leaf_sid
         return values

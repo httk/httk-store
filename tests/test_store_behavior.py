@@ -30,6 +30,7 @@ from httk.core.storage import (
     stored_property,
 )
 
+from httk.store import EntryIdScheme
 from httk.store.store_common import EntryMetadataConflictError
 
 
@@ -407,7 +408,7 @@ def test_implicit_rollback_clears_recursively_saved_child_caches(store_factory):
     store = store_factory()
     store.save(RollbackParent(RollbackChild("kept"), "unique"))
     rolled_back = RollbackChild("rolled back")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017 - backend-specific uniqueness error
         store.save(RollbackParent(rolled_back, "unique"))
     assert store.sid_of(rolled_back) is None
 
@@ -616,7 +617,7 @@ def test_concrete_record_save_round_trips(store_factory):
 
 
 def test_file_entry_dispatch_round_trips(store_factory):
-    store = store_factory(entry_records={FileEntry: FileRecord})
+    store = store_factory(entry_records={FileEntry: FileRecord}, entry_ids=EntryIdScheme("httk.test", "1"))
     record = FileRecord(
         url="https://example.org/files/data.json",
         name="data.json",
@@ -634,8 +635,8 @@ def test_file_entry_dispatch_round_trips(store_factory):
 
     source = DomainFile(**record.__dict__)
     sid = store.save(source, as_record=FileRecord)
-    fetched = store_factory.reopen(store).fetch_entry(FileEntry, record.id)
-    assert fetched == replace(record, checksums=None)
+    fetched = store_factory.reopen(store).fetch_entry(FileEntry, content_id(record))
+    assert fetched == replace(record, checksums=None, id=f"httk.test-1-{sid}")
     assert fetched.url == record.url
     assert fetched.name == record.name
     assert fetched.size == record.size
@@ -648,9 +649,14 @@ def test_file_entry_dispatch_round_trips(store_factory):
     with pytest.raises(EntryMetadataConflictError):
         store.save(replace(record, immutable_id="different"))
     assert store.save(record) == sid
-    other = replace(record, url="https://mirror.example.org/files/data.json")
-    assert store.save(other) != sid
-    assert other.id != record.id
+    other = replace(
+        record,
+        url="https://mirror.example.org/files/data.json",
+        immutable_id="file-immutable-other",
+    )
+    other_sid = store.save(other)
+    assert other_sid != sid
+    assert store_factory.reopen(store).fetch(FileRecord, other_sid, eager=True).id != fetched.id
 
 
 # Keep this record declaration local to the behavior module: it is used only

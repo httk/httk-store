@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import sqlalchemy
 
+from httk.store.backend.schema import resolve_schema
 from httk.store.backend.sql.mapping import (
     CONTENT_ID_COLUMN,
     LOGICAL_ID_COLUMN,
@@ -22,7 +23,7 @@ from httk.store.backend.sql.mapping import (
     SID_COLUMN,
     STORE_TIMESTAMP_COLUMN,
 )
-from httk.store.store_common import EntryMetadataConflictError
+from httk.store.store_common import EntryIdConflictError, EntryMetadataConflictError
 
 if TYPE_CHECKING:
     from httk.store.backend.sql.bulk import BulkIngest
@@ -64,6 +65,7 @@ class DeferredFinalizer:
         self._timed("conflicts", self._verify_metadata)
         self._timed("survivors", self._make_survivors)
         self._timed("final_sids", self._make_final_sids)
+        self._timed("entry_ids", self._verify_entry_id_conflicts)
         self._timed("load", self._load_real_tables)
         self._timed("resolved_sids", self._populate_returned_sids)
         self._timed("dispatch", self._rebuild_dispatch)
@@ -590,6 +592,60 @@ class DeferredFinalizer:
             self._index_relation(final, "canonical_sid", unique=True)
             self.finals[table] = final
 
+    def _surviving_entry_id_sql(self, table: str, field: str, *, include_null: bool) -> str:
+        """Return the canonical surviving staged values for one entry-id field."""
+        null_filter = "" if include_null else f" AND s.{self._q(field)} IS NOT NULL"
+        return (
+            f"SELECT s.{self._q(field)} AS value FROM {self._q(self.stage_views[table])} s "
+            f"JOIN {self._q(self.maps[table])} m ON s.{self._q(SID_COLUMN)} = m.stage_sid "
+            f"JOIN {self._q(self.finals[table])} f ON m.canonical_sid = f.canonical_sid "
+            f"WHERE m.stage_sid = m.canonical_sid{null_filter}"
+        )
+
+    def _verify_entry_id_conflicts(self) -> None:
+        """Check final staged ids against every backing before loading real tables."""
+        for family in self.store.layout.families:
+            if family.definition_id is None:
+                continue
+            backings = [
+                (record, resolve_schema(record).table_name)
+                for record in family.records
+                if resolve_schema(record).table_name in self.stage_views
+                and resolve_schema(record).table_name in self.maps
+                and resolve_schema(record).table_name in self.finals
+            ]
+            if not backings:
+                continue
+            id_queries = [self._surviving_entry_id_sql(table, "id", include_null=True) for _record, table in backings]
+            missing = self.connection.execute(
+                sqlalchemy.text(f"SELECT value FROM ({' UNION ALL '.join(id_queries)}) ids WHERE value IS NULL LIMIT 1")
+            ).first()
+            if missing is not None and self.store._entry_ids is None:
+                record = backings[0][0]
+                raise ValueError(
+                    f"{record.__name__} has no id and SqlStore(entry_ids=EntryIdScheme(...)) was not declared; "
+                    "pass an explicit id or declare a scheme"
+                )
+            for field in ("id", "immutable_id"):
+                candidates = [
+                    self._surviving_entry_id_sql(table, field, include_null=False) for _record, table in backings
+                ]
+                values = " UNION ALL ".join(candidates)
+                duplicate = self.connection.execute(
+                    sqlalchemy.text(f"SELECT value FROM ({values}) ids GROUP BY value HAVING count(*) > 1 LIMIT 1")
+                ).first()
+                if duplicate is not None:
+                    raise EntryIdConflictError(family.name, str(duplicate[0]), None, None)
+                for _record, owned_table in backings:
+                    conflict = self.connection.execute(
+                        sqlalchemy.text(
+                            f"SELECT ids.value FROM ({values}) ids JOIN {self._q(owned_table)} owned "
+                            f"ON owned.{self._q(field)} = ids.value LIMIT 1"
+                        )
+                    ).first()
+                    if conflict is not None:
+                        raise EntryIdConflictError(owned_table, str(conflict[0]), None, None)
+
     # ------------------------------------------------------------------ one-shot projection and dispatch
 
     def _load_real_tables(self) -> None:
@@ -673,6 +729,28 @@ class DeferredFinalizer:
     def _projection_columns(self, table: str, source: str, own_map: str, own_final: str) -> tuple[list[str], list[str]]:
         real = self.store._table(table)
         refs = {column: target for column, target in self.graph.sid_columns().get(table, ())}
+        entry_record = next(
+            (record for record in self.store._entry_record_types if resolve_schema(record).table_name == table), None
+        )
+        entry_id_expression: str | None = None
+        if entry_record is not None:
+            scheme = self.store._entry_ids
+            if scheme is None:
+                entry_id_expression = f"{source}.{self._q('id')}"
+            else:
+                base = scheme.base
+                if scheme.type_in_base:
+                    base = f"{base}.{self.store._entry_record_types[entry_record][0]}"
+                prefix = f"{base}-{self.ingest._id_series or scheme.series}-"
+                _entry_type, backing_count, backing_index = self.store._entry_record_types[entry_record]
+                number = f"({own_final}.final_sid * {backing_count} + {backing_index})"
+                if self.connection.dialect.name == "clickhousedb":
+                    generated_id = f"concat('{prefix}', toString({number}))"
+                else:
+                    generated_id = f"'{prefix}' || CAST({number} AS TEXT)"
+                entry_id_expression = (
+                    f"CASE WHEN {source}.{self._q('id')} IS NULL THEN {generated_id} ELSE {source}.{self._q('id')} END"
+                )
         expressions: list[str] = []
         joins: list[str] = []
         for index, column in enumerate(real.columns):
@@ -682,6 +760,20 @@ class DeferredFinalizer:
             # A bulk row is its own lineage root, so logical_id is the final sid.
             if column.name == LOGICAL_ID_COLUMN:
                 expressions.append(f"{own_final}.final_sid")
+                continue
+            if entry_id_expression is not None and column.name == "id":
+                expressions.append(entry_id_expression)
+                continue
+            if entry_id_expression is not None and column.name == "immutable_id":
+                suffix = (
+                    f"concat({entry_id_expression}, '~1')"
+                    if self.connection.dialect.name == "clickhousedb"
+                    else f"{entry_id_expression} || '~1'"
+                )
+                expressions.append(
+                    f"CASE WHEN {source}.{self._q('immutable_id')} IS NULL THEN "
+                    f"{suffix} ELSE {source}.{self._q('immutable_id')} END"
+                )
                 continue
             target = refs.get(column.name)
             if target is None or target not in self.maps:

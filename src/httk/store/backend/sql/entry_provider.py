@@ -59,7 +59,7 @@ from httk.core import (
 from httk.core.storage import RelationshipLink
 
 from httk.store.backend.codecs import codec_named
-from httk.store.backend.schema import FieldSpec, TableSchema, resolve_schema
+from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
 from httk.store.backend.sql.mapping import SID_COLUMN
 from httk.store.backend.sql.searcher import SqlColumn, _query_index
 from httk.store.backend.sql.store import SqlStore, _as_fixed_tensor
@@ -77,7 +77,13 @@ __all__ = [
 
 
 def _default_id(entry_type: str, sid: int, obj: Any) -> str:
-    return f"{entry_type}-{sid}"
+    """Return the store-minted identifier carried by ``obj``."""
+    value = getattr(obj, "id", None)
+    if value is None:
+        raise ValueError(f"{entry_type} record sid {sid} has no stored id")
+    if not isinstance(value, str):
+        raise ValueError(f"{entry_type} record sid {sid} has a non-string stored id")
+    return value
 
 
 @dataclasses.dataclass(frozen=True)
@@ -154,8 +160,8 @@ class StoreEntryProvider(EntryProvider):
     class's schema, with every schema-derived property name carrying
     ``prefix`` (which must be registered, see
     :func:`~httk.core.register_definition_prefix`). ``id_of`` maps
-    ``(entry_type, sid, instance)`` to the served entry id; the default is
-    ``"<entry_type>-<sid>"``. ``link_classes`` supplies additional storable
+    ``(entry_type, sid, instance)`` to the served entry id; the default reads
+    the record's store-minted ``id`` field. ``link_classes`` supplies additional storable
     classes for link metadata validation.
 
     See the module docstring for which stored fields are served as properties
@@ -180,13 +186,18 @@ class StoreEntryProvider(EntryProvider):
         prefix: str = "_httk_",
         id_of: Callable[[str, int, Any], str] | None = None,
         link_classes: Iterable[type] = (),
-        only_latest: bool = False,
+        only_latest: bool = True,
     ) -> None:
         if prefix not in known_definition_prefixes():
             raise ValueError(
                 f"the property-name prefix {prefix!r} is not registered; register it with "
                 f"httk.core.register_definition_prefix() (registered prefixes: "
                 f"{', '.join(known_definition_prefixes())})"
+            )
+        if id_of is None and not only_latest:
+            raise ValueError(
+                "StoreEntryProvider(only_latest=False) requires an id_of override; "
+                "all-revision serving must use immutable ids"
             )
         self._store = store
         self._classes: dict[str, type] = dict(classes)
@@ -195,6 +206,15 @@ class StoreEntryProvider(EntryProvider):
         self._id_of: Callable[[str, int, Any], str] = id_of if id_of is not None else _default_id
         self._entry_type_of: dict[type, str] = {cls: name for name, cls in self._classes.items()}
         self._schemas: dict[str, TableSchema] = {name: resolve_schema(cls) for name, cls in self._classes.items()}
+        if id_of is None:
+            required = "id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)"
+            for cls, schema in zip(self._classes.values(), self._schemas.values(), strict=True):
+                try:
+                    spec = schema.field("id")
+                except SchemaError:
+                    spec = None
+                if spec is None or spec.role != "scalar" or spec.python_type is not str:
+                    raise TypeError(f"{cls.__name__} must declare {required} when served without id_of")
         self._links_by_from: dict[str, list[_LinkScan]] = self._build_link_inventory(tuple(link_classes))
         self._definitions: dict[str, EntryTypeDefinition] = dict(definitions or {})
         unknown = sorted(name for name in self._definitions if name not in self._classes)
@@ -372,9 +392,9 @@ class StoreEntryProvider(EntryProvider):
         table = store._table(schema.table_name)
         reference_specs = [(spec, related) for spec, related in relation_specs if spec.role == "reference"]
         child_specs = [(spec, related) for spec, related in relation_specs if spec.role == "child"]
-        # With the default id function in use, ids depend only on (entry type,
-        # sid) and per-object fetches would be pure overhead.
-        fast_ids = self._id_of is _default_id
+        # The default id lives on the stored object, so relationships must
+        # hydrate related records just like a custom id function does.
+        fast_ids = False
 
         def stored_id(connection: Any, related_type: str, related_cls: type, sid: int) -> str:
             return self._id_of(

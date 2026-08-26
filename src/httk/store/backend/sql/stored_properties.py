@@ -34,7 +34,6 @@ from httk.core.optimade import FilterAst, parse_optimade_filter
 from httk.core.storage import (
     QueryLiteralError,
     StoredPropertyProjection,
-    content_id,
     stored_property_projections,
 )
 from sqlalchemy.sql.elements import Null
@@ -43,7 +42,7 @@ from sqlalchemy.sql.visitors import replacement_traverse
 
 from httk.store.backend.codecs import ValueCodec, codec_named
 from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
-from httk.store.backend.sql.mapping import CONTENT_ID_COLUMN, LOGICAL_ID_COLUMN, SID_COLUMN, STORE_TIMESTAMP_COLUMN
+from httk.store.backend.sql.mapping import LOGICAL_ID_COLUMN, SID_COLUMN, STORE_TIMESTAMP_COLUMN
 from httk.store.backend.sql.rows import RowHydrator
 from httk.store.backend.sql.searcher import SqlColumn, SqlExpression, SqlSearcher, SqlVariable, _bool_clause
 from httk.store.backend.sql.store import SqlStore
@@ -65,6 +64,7 @@ __all__ = [
 
 
 _CORE_PROPERTIES: Final[frozenset[str]] = frozenset(("id", "type"))
+_INTRINSIC_PROPERTIES: Final[frozenset[str]] = frozenset(("id", "type", "immutable_id", "_httk_id"))
 _EXACT_CODEC_NAMES: Final = frozenset(("float", "fraction", "fracscalar", "surdscalar"))
 _NO_LITERAL: Final = object()
 _RFC3339_TIMESTAMP: Final = re.compile(
@@ -552,7 +552,7 @@ class _BackingPlan:
 class StoredPropertySqlCandidateStream:
     """One raw, SQL-bounded backing stream for a later federation merge.
 
-    ``searcher`` outputs only ``sid``, canonical ``content_id``, and one raw
+    ``searcher`` outputs only ``sid``, stored ``id``, stored ``immutable_id``, and one raw
     SQL value per requested sort property.  Iterating it therefore never
     hydrates a record; a federation can select its final page before fetching
     any object graph.
@@ -626,6 +626,7 @@ class StoredPropertySqlPlan:
         public_id_prefix: str = "",
         as_of: object = None,
         only_latest: bool = False,
+        revisions: bool = False,
     ) -> tuple[SqlSearcher, ...]:
         """Return one concrete-backing SQL searcher for an OPTIMADE filter and sort list.
 
@@ -638,7 +639,7 @@ class StoredPropertySqlPlan:
         """
         ast = parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string
         return tuple(
-            self._filter_searcher(backing, ast, sort, public_id_prefix, as_of, only_latest)
+            self._filter_searcher(backing, ast, sort, public_id_prefix, as_of, only_latest, revisions)
             for backing in self._backings
         )
 
@@ -650,6 +651,7 @@ class StoredPropertySqlPlan:
         public_id_prefix: str = "",
         as_of: object = None,
         only_latest: bool = False,
+        revisions: bool = False,
     ) -> tuple[StoredPropertySqlCandidateStream, ...]:
         """Return ID-only concrete streams for a bounded federated page.
 
@@ -669,10 +671,11 @@ class StoredPropertySqlPlan:
         streams: list[StoredPropertySqlCandidateStream] = []
         for backing, backing_name in zip(self._backings, self.layout.record_names, strict=True):
             searcher, variable, sort_values = self._candidate_searcher(
-                backing, ast, sort, public_id_prefix, as_of, only_latest
+                backing, ast, sort, public_id_prefix, as_of, only_latest, revisions
             )
             searcher.output(SqlColumn(searcher, variable._alias.c[SID_COLUMN]), "sid")
-            searcher.output(SqlColumn(searcher, variable._alias.c[CONTENT_ID_COLUMN]), "content_id")
+            searcher.output(SqlColumn(searcher, variable._alias.c["id"]), "id")
+            searcher.output(SqlColumn(searcher, variable._alias.c["immutable_id"]), "immutable_id")
             for index, value in enumerate(sort_values):
                 searcher.output(
                     SqlColumn(
@@ -702,6 +705,8 @@ class StoredPropertySqlPlan:
         record: object,
         *,
         public_id: str | None = None,
+        httk_id: str | None = None,
+        revisions: bool = False,
         store_timestamp: int | None = None,
         fields: Collection[str] | None = None,
     ) -> Mapping[str, Any]:
@@ -720,12 +725,14 @@ class StoredPropertySqlPlan:
             raise StoredPropertySqlConfigurationError(
                 f"{backing.__name__} is not a configured backing for {self.family.__name__}"
             )
-        row: dict[str, Any] = {"id": content_id(record) if public_id is None else public_id, "type": self.entry_type}
+        row: dict[str, Any] = {"id": cast(Any, record).id if public_id is None else public_id, "type": self.entry_type}
         names = (
-            self.definition.properties
+            list(self.definition.properties)
             if fields is None
             else [name for name in self.definition.properties if name in fields]
         )
+        if revisions and "_httk_id" not in names and (fields is None or "_httk_id" in fields):
+            names.append("_httk_id")
         for name in names:
             if name in _CORE_PROPERTIES:
                 continue
@@ -765,6 +772,12 @@ class StoredPropertySqlPlan:
                         ).scalar_one_or_none()
                     row[name] = None if value is None else int(value)
                 continue
+            if name == "immutable_id":
+                row[name] = cast(Any, record).immutable_id
+                continue
+            if name == "_httk_id":
+                row[name] = cast(Any, record).id if httk_id is None else httk_id
+                continue
             projection = configured.projections.get(name)
             row[name] = None if projection is None else _response_json_value(projection.response(record))
         return row
@@ -787,9 +800,10 @@ class StoredPropertySqlPlan:
         public_id_prefix: str,
         as_of: object,
         only_latest: bool = False,
+        revisions: bool = False,
     ) -> SqlSearcher:
         searcher, variable, _sort_values = self._candidate_searcher(
-            backing, ast, sort, public_id_prefix, as_of, only_latest
+            backing, ast, sort, public_id_prefix, as_of, only_latest, revisions
         )
         searcher.output(variable, "record")
         return searcher
@@ -802,6 +816,7 @@ class StoredPropertySqlPlan:
         public_id_prefix: str,
         as_of: object,
         only_latest: bool = False,
+        revisions: bool = False,
     ) -> tuple[SqlSearcher, SqlVariable, tuple[_SqlValue, ...]]:
         searcher = self.store.searcher(as_of=as_of, only_latest=only_latest)
         variable = searcher.variable(backing.backing)
@@ -809,12 +824,12 @@ class StoredPropertySqlPlan:
         if ast is None:
             searcher.add(cast(SqlExpression, context.always_true()))
         else:
-            handlers = self._handlers(backing, context, public_id_prefix)
+            handlers = self._handlers(backing, context, public_id_prefix, revisions)
             try:
                 predicate = translate_filter_ast(
                     ast,
                     cast(Any, variable),
-                    _property_fulltypes(self.definition),
+                    _property_fulltypes(self.definition, revisions=revisions),
                     handlers,
                     known_definition_prefixes(),
                 )
@@ -824,7 +839,7 @@ class StoredPropertySqlPlan:
             searcher.add(cast(SqlExpression, predicate))
         sort_values: list[_SqlValue] = []
         for name, descending in sort:
-            value = self._sort_value(backing, context, name, public_id_prefix)
+            value = self._sort_value(backing, context, name, public_id_prefix, revisions)
             self._validate_clickhouse_correlation(value)
             # SQLite orders nulls first in ascending order while DuckDB's
             # default differs.  Make the cross-dialect NULLS LAST contract
@@ -861,13 +876,22 @@ class StoredPropertySqlPlan:
         backing: _BackingPlan,
         context: _SqlQueryContext,
         public_id_prefix: str,
+        revisions: bool,
     ) -> HandlerTable:
         handlers: dict[str, Mapping[str, Callable[..., Any]]] = {
-            "id": _id_handlers(context, public_id_prefix),
+            "id": _id_handlers(context, public_id_prefix, revisions=revisions),
             "type": _type_handlers(self.entry_type),
         }
+        if revisions:
+            handlers["_httk_id"] = _id_handlers(context, public_id_prefix, revisions=False)
         for name, definition in self.definition.properties.items():
             if name in _CORE_PROPERTIES:
+                continue
+            if name == "immutable_id":
+                handlers[name] = _column_handlers(context, "immutable_id")
+                continue
+            if name == "_httk_id":
+                handlers[name] = _id_handlers(context, public_id_prefix, revisions=not revisions)
                 continue
             projection = backing.projections.get(name)
             if projection is None:
@@ -883,11 +907,18 @@ class StoredPropertySqlPlan:
         context: _SqlQueryContext,
         name: str,
         public_id_prefix: str,
+        revisions: bool,
     ) -> _SqlValue:
         if name == "id":
-            return _public_id_value(context, public_id_prefix)
+            return _public_id_value(context, public_id_prefix, revisions=revisions)
         if name == "type":
             return context.constant(self.entry_type)
+        if name == "immutable_id":
+            return _column_value(context, "immutable_id")
+        if name == "_httk_id":
+            if not revisions and name not in self.definition.properties:
+                raise StoredPropertySqlConfigurationError(f"{self.entry_type} has no property {name!r} to sort")
+            return _public_id_value(context, public_id_prefix, revisions=not revisions)
         if name not in self.definition.properties:
             raise StoredPropertySqlConfigurationError(f"{self.entry_type} has no property {name!r} to sort")
         projection = backing.projections.get(name)
@@ -910,9 +941,9 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
 
     The family must be present in ``store.entry_layout``; unconfigured family
     classes and their records cannot accidentally become part of a durable
-    entry source.  ``id`` and ``type`` are intrinsic: a concrete backing's
-    canonical ``content_id`` and the family's fixed entry type respectively.
-    Backings must not try to redeclare either property.
+    entry source. ``id``, ``type``, ``immutable_id``, and ``_httk_id`` are
+    intrinsic: a concrete backing's store-minted identifiers and the family's
+    fixed entry type. Backings must not redeclare any intrinsic property.
 
     :param store: The SQL store containing the configured family.
     :param family: The logical entry-family class to validate.
@@ -954,7 +985,7 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
     definition_names = set(definition.properties)
     for backing in layout.records:
         projections = stored_property_projections(backing)
-        reserved = sorted(_CORE_PROPERTIES & set(projections))
+        reserved = sorted(_INTRINSIC_PROPERTIES & set(projections))
         if reserved:
             raise StoredPropertySqlConfigurationError(
                 f"{backing.__name__} must not declare intrinsic properties: {', '.join(reserved)}"
@@ -967,7 +998,7 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
         required = sorted(
             name
             for name, property_definition in definition.properties.items()
-            if name not in _CORE_PROPERTIES and not property_definition.nullable and name not in projections
+            if name not in _INTRINSIC_PROPERTIES and not property_definition.nullable and name not in projections
         )
         if required:
             raise StoredPropertySqlConfigurationError(
@@ -977,8 +1008,11 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
     return StoredPropertySqlPlan(store, family, layout, entry_type, definition, tuple(backing_plans))
 
 
-def _property_fulltypes(definition: EntryTypeDefinition) -> Mapping[str, str]:
-    return MappingProxyType({name: _definition_fulltype(item) for name, item in definition.properties.items()})
+def _property_fulltypes(definition: EntryTypeDefinition, *, revisions: bool = False) -> Mapping[str, str]:
+    result = {name: _definition_fulltype(item) for name, item in definition.properties.items()}
+    if revisions:
+        result["_httk_id"] = "string"
+    return MappingProxyType(result)
 
 
 def _definition_fulltype(definition: PropertyDefinition) -> str:
@@ -1033,15 +1067,38 @@ def _null_handlers(context: _SqlQueryContext) -> Mapping[str, Callable[..., Any]
     }
 
 
-def _public_id_value(context: _SqlQueryContext, prefix: str) -> _SqlValue:
+def _column_value(context: _SqlQueryContext, name: str) -> _SqlValue:
+    """Return one store-managed root column value."""
+    return _SqlValue(context._root.alias.c[name])
+
+
+def _public_id_value(context: _SqlQueryContext, prefix: str, *, revisions: bool = False) -> _SqlValue:
     """The source-prefixed public id as one portable SQL string expression."""
+    column = "immutable_id" if revisions else "id"
     if not prefix:
-        return _SqlValue(context._root.alias.c[CONTENT_ID_COLUMN])
-    return _SqlValue(sqlalchemy.literal(prefix) + context._root.alias.c[CONTENT_ID_COLUMN])
+        return _column_value(context, column)
+    return _SqlValue(sqlalchemy.literal(prefix) + context._root.alias.c[column])
 
 
-def _id_handlers(context: _SqlQueryContext, prefix: str) -> Mapping[str, Callable[..., Any]]:
-    value = _public_id_value(context, prefix)
+def _column_handlers(context: _SqlQueryContext, name: str) -> Mapping[str, Callable[..., Any]]:
+    value = _column_value(context, name)
+    return {
+        "comparison": lambda entry, operator, literal, variable: context.compare(
+            value, operator, context.constant(literal)
+        ),
+        "stringmatching": lambda entry, literal, operator, variable: context.compare(
+            value, operator, context.constant(literal)
+        ),
+        "unknown": lambda entry, variable, operator: (
+            context.always_false() if operator == "IS_UNKNOWN" else context.always_true()
+        ),
+    }
+
+
+def _id_handlers(
+    context: _SqlQueryContext, prefix: str, *, revisions: bool = False
+) -> Mapping[str, Callable[..., Any]]:
+    value = _public_id_value(context, prefix, revisions=revisions)
     return {
         "comparison": lambda entry, operator, literal, variable: context.compare(
             value, operator, context.constant(literal)

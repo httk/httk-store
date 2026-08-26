@@ -40,18 +40,19 @@ import time
 import typing
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 import sqlalchemy
 from httk.core import (
     FracVector,
 )
+from httk.core.entry_ids import check_entry_id, check_immutable_id, format_entry_id, format_immutable_id
 from httk.core.storage import (
     Shape,
     StorageProjectionCycleError,
     resolve_storage_record,
 )
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from httk.store.backend.codecs import (
     codec_named,
@@ -107,6 +108,8 @@ from httk.store.storage_layout import (
 from httk.store.store_common import (
     _MISSING_METADATA,
     EntryDispatchIntegrityError,
+    EntryIdConflictError,
+    EntryIdScheme,
     EntryMetadataConflictError,
     EntryReplacementError,
     IdentityCaches,
@@ -135,6 +138,7 @@ type SidResolver = Callable[[type, Any, str], int]
 
 __all__ = [
     "EntryDispatchIntegrityError",
+    "EntryIdConflictError",
     "EntryMetadataConflictError",
     "EntryReplacementError",
     "SqlStore",
@@ -189,6 +193,7 @@ class SqlStore:
     :param database: The database used for storage.
     :param entry_records: The required entry-family declaration when first opening a database.
     :param entry_families: Application-owned declarations which bypass global registration.
+    :param entry_ids: Optional scheme used to mint ids for defined entry families.
     :param store_timestamps: Whether parent rows carry store-managed timestamps.
     :param store_timestamp_resolution: Nanoseconds represented by one stored unit.
     :param allow_clock_regression: Whether to disable the process-local clock guard.
@@ -212,6 +217,7 @@ class SqlStore:
         *,
         entry_records: Mapping[type, type | tuple[type, ...]] | None = None,
         entry_families: Sequence[EntryFamilyDeclaration] | None = None,
+        entry_ids: EntryIdScheme | None = None,
         store_timestamps: bool = True,
         store_timestamp_resolution: int = 1000,
         allow_clock_regression: bool = False,
@@ -225,6 +231,7 @@ class SqlStore:
         ):
             raise ValueError("store_timestamp_resolution must be a positive integer")
         self._database = database
+        self._entry_ids = entry_ids
         self._upgrade = upgrade
         self._store_timestamps = store_timestamps
         self._store_timestamp_resolution = store_timestamp_resolution
@@ -262,9 +269,29 @@ class SqlStore:
             self._register_degraded_lifecycle_fence()
         supplied = normalize_entry_declaration(entry_records, entry_families)
         self._initialize_layout(supplied)
+        self._entry_record_types: dict[type, tuple[str, int, int]] = {
+            record: (self._family_entry_type(family.family), len(family.records), backing_index)
+            for family in self.layout.families
+            if family.definition_id is not None
+            for backing_index, record in enumerate(family.records)
+        }
 
     def __repr__(self) -> str:
         return f"SqlStore(database={self._database!r}, write_profile={self._write_profile!r})"
+
+    @staticmethod
+    def _family_entry_type(family: type) -> str:
+        """Return the validated served entry type declared by ``family``."""
+        entry_type = getattr(family, "type", None)
+        if not isinstance(entry_type, str) or not entry_type or entry_type != entry_type.strip():
+            raise ValueError(f"{family.__name__}.type must be a non-empty stripped entry type")
+        return entry_type
+
+    def _entry_id_number(self, record_type: type, logical_id: int) -> int:
+        """Return the family-unique numeric component for a record lineage."""
+        # ponytail: number = logical_id*B+index keeps family-wide uniqueness with no allocator table; switch to a per-family sequence table if backings can be added to a family after data exists
+        _entry_type, backing_count, backing_index = self._entry_record_types[record_type]
+        return logical_id * backing_count + backing_index
 
     @property
     def layout(self) -> StorageLayout:
@@ -848,6 +875,7 @@ class SqlStore:
         workers: int = 1,
         finalize: Literal["auto", "parity", "deferred"] = "auto",
         track_sids: bool = True,
+        id_series: str | None = None,
     ) -> "BulkIngest":
         """Return a context manager that appends a stream of objects into this store.
 
@@ -890,6 +918,7 @@ class SqlStore:
             physically empty, supported serial ingest and otherwise selects parity (including ``workers>1``). A
             subclass may override :attr:`bulk_ingest_finalize_default` for ``"auto"`` calls.
         :param track_sids: Whether to retain provisional-to-durable sid mappings.
+        :param id_series: Override the configured entry-id series for minted bulk rows.
         :return: A bulk-ingest context manager bound to this store.
         """
         from httk.store.backend.sql.bulk import BulkIngest
@@ -903,6 +932,7 @@ class SqlStore:
             workers=workers,
             finalize=finalize,
             track_sids=track_sids,
+            id_series=id_series,
         )
 
     def ensure_tables(self, *classes: type) -> None:
@@ -1439,7 +1469,7 @@ class SqlStore:
 
     # ------------------------------------------------------------------ saving
 
-    def save(self, obj: Any, *, as_record: type | None = None) -> int:
+    def save(self, obj: Any, *, as_record: type | None = None, id_series: str | None = None) -> int:
         """Store ``obj`` (deduplicating per its class's policy) and return its integer sid.
 
         An opted-in domain object is projected through its exact
@@ -1455,15 +1485,24 @@ class SqlStore:
 
         :param obj: The object to store.
         :param as_record: The alternate record representation to use, if any.
+        :param id_series: Override the configured entry-id series for minted ids.
         :return: The stored row's sid.
         :raises TypeError: If ``obj`` is a cursor row that must be materialized first.
         :raises httk.store.backend.sql.store.EntryMetadataConflictError: If a deduplication hit has conflicting metadata.
         :raises httk.core.storage.identity.StorageProjectionCycleError: If projection reaches a reference cycle.
         :raises RuntimeError: If a :meth:`bulk_ingest` context is currently open.
         """
-        return self._save_top(obj, as_record=as_record, replace_logical_id=None)
+        return self._save_top(obj, as_record=as_record, replace_logical_id=None, id_series=id_series)
 
-    def _save_top(self, obj: Any, *, as_record: type | None, replace_logical_id: int | None) -> int:
+    def _save_top(
+        self,
+        obj: Any,
+        *,
+        as_record: type | None,
+        replace_logical_id: int | None,
+        id_series: str | None = None,
+        replacement_entry_id: str | None = None,
+    ) -> int:
         """Run one top-level save, optionally as a replacement carrying ``replace_logical_id``."""
         self._check_mutation_policy("save")
         self._reject_during_bulk()
@@ -1487,7 +1526,15 @@ class SqlStore:
             else:
                 projection.store_timestamp = timestamp_state["captured"]
             sid = self._save(
-                connection, record_type, obj, projection, "", top_level=True, replace_logical_id=replace_logical_id
+                connection,
+                record_type,
+                obj,
+                projection,
+                "",
+                top_level=True,
+                replace_logical_id=replace_logical_id,
+                id_series=id_series,
+                replacement_entry_id=replacement_entry_id,
             )
             family = self._family_for_backing(record_type)
             if family is not None:
@@ -1518,6 +1565,8 @@ class SqlStore:
         *,
         top_level: bool = False,
         replace_logical_id: int | None = None,
+        id_series: str | None = None,
+        replacement_entry_id: str | None = None,
     ) -> int:
         active_key = (record_type, id(source))
         if active_key in projection.active:
@@ -1532,6 +1581,8 @@ class SqlStore:
                 path,
                 top_level=top_level,
                 replace_logical_id=replace_logical_id,
+                id_series=id_series,
+                replacement_entry_id=replacement_entry_id,
             )
         finally:
             projection.active.remove(active_key)
@@ -1546,6 +1597,8 @@ class SqlStore:
         *,
         top_level: bool,
         replace_logical_id: int | None = None,
+        id_series: str | None = None,
+        replacement_entry_id: str | None = None,
     ) -> int:
         # The replacement lineage applies ONLY to the top-level parent row; a
         # nested record reached through references/ownership keeps its own-sid
@@ -1554,6 +1607,8 @@ class SqlStore:
         schema = resolve_schema(record_type)
         table = self._table(schema.table_name)
         projected = projection.projector(record_type, source)
+        if record_type in self._entry_record_types:
+            self._validate_projected_entry_ids(record_type, projected)
         validation_key = (record_type, id(source))
         if type(source) is record_type and validation_key not in projection.validated:
             validator = vars(record_type).get("__httk_validate__")
@@ -1588,7 +1643,19 @@ class SqlStore:
                 return sid
 
         checkpoint = len(projection.inserted)
-        values = self._parent_row(connection, schema, source, projected, projection, path)
+        values = self._parent_row(connection, schema, source, projected, projection, path, id_series=id_series)
+        enforced_entry = record_type in self._entry_record_types
+        if enforced_entry:
+            self._prepare_entry_ids(
+                connection,
+                table,
+                record_type,
+                values,
+                lineage=replacement,
+                sid=None,
+                id_series=id_series,
+                replacement_entry_id=replacement_entry_id if top_level else None,
+            )
 
         if schema.dedup == "by_value":
             # v1 semantics: a by_value match compares the parent table's stored
@@ -1625,6 +1692,17 @@ class SqlStore:
             # directly: a replacement copies its predecessor's, a fresh row uses
             # its own sid.
             values[LOGICAL_ID_COLUMN] = replacement if replacement is not None else sid
+            if enforced_entry:
+                self._prepare_entry_ids(
+                    connection,
+                    table,
+                    record_type,
+                    values,
+                    lineage=values[LOGICAL_ID_COLUMN],
+                    sid=sid,
+                    id_series=id_series,
+                    replacement_entry_id=replacement_entry_id if top_level else None,
+                )
             if projection.store_timestamp is not None:
                 values[STORE_TIMESTAMP_COLUMN] = projection.store_timestamp
             if key is not None:
@@ -1639,8 +1717,12 @@ class SqlStore:
                         self._projected_value(record_type, source, projected, spec),
                         projection,
                         _field_path(path, spec.field),
+                        id_series=id_series,
                     )
-            connection.execute(sqlalchemy.insert(table).values(values))
+            try:
+                connection.execute(sqlalchemy.insert(table).values(values))
+            except IntegrityError as error:
+                self._raise_entry_id_integrity(table, values, error)
             self._after_degraded_write(f"parent-row-write:{table.name}")
             projection.inserted.append((record_type, sid))
             self._remember(record_type, sid, source, cache_instance=type(source) is record_type)
@@ -1655,7 +1737,10 @@ class SqlStore:
             # DB-allocated by the ON CONFLICT ... RETURNING below, so it inserts
             # a placeholder and is filled in the same transaction just after.
             values[LOGICAL_ID_COLUMN] = replacement if replacement is not None else 0
-            sid, inserted = self._insert_content_row(connection, table, values, key)
+            try:
+                sid, inserted = self._insert_content_row(connection, table, values, key)
+            except IntegrityError as error:
+                self._raise_entry_id_integrity(table, values, error)
             if not inserted:
                 self._discard_inserted(connection, projection, checkpoint)
                 if replacement is not None:
@@ -1672,9 +1757,42 @@ class SqlStore:
             if replacement is None:
                 # The only sanctioned write-after-insert: fill the fresh row's
                 # own-sid lineage inside the same transaction as its insert.
-                connection.execute(
-                    sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values({LOGICAL_ID_COLUMN: sid})
+                update_values: dict[str, Any] = {LOGICAL_ID_COLUMN: sid}
+                if enforced_entry:
+                    self._prepare_entry_ids(
+                        connection,
+                        table,
+                        record_type,
+                        values,
+                        lineage=sid,
+                        sid=sid,
+                        id_series=id_series,
+                        replacement_entry_id=None,
+                    )
+                    update_values.update({"id": values["id"], "immutable_id": values["immutable_id"]})
+                try:
+                    connection.execute(sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values(update_values))
+                except IntegrityError as error:
+                    self._raise_entry_id_integrity(table, values, error)
+            elif enforced_entry:
+                self._prepare_entry_ids(
+                    connection,
+                    table,
+                    record_type,
+                    values,
+                    lineage=replacement,
+                    sid=sid,
+                    id_series=id_series,
+                    replacement_entry_id=replacement_entry_id if top_level else None,
                 )
+                try:
+                    connection.execute(
+                        sqlalchemy.update(table)
+                        .where(table.c[SID_COLUMN] == sid)
+                        .values({"id": values["id"], "immutable_id": values["immutable_id"]})
+                    )
+                except IntegrityError as error:
+                    self._raise_entry_id_integrity(table, values, error)
         else:
             values[ROLE_COLUMN] = int(top_level)
             if projection.store_timestamp is not None:
@@ -1683,14 +1801,50 @@ class SqlStore:
             # DB-allocated, so it inserts a placeholder and is filled in the same
             # transaction just after.
             values[LOGICAL_ID_COLUMN] = replacement if replacement is not None else 0
-            result = connection.execute(sqlalchemy.insert(table).values(values))
+            try:
+                result = connection.execute(sqlalchemy.insert(table).values(values))
+            except IntegrityError as error:
+                self._raise_entry_id_integrity(table, values, error)
             sid = int(cast(Any, result.inserted_primary_key)[0])
             if replacement is None:
                 # The only sanctioned write-after-insert: fill the fresh row's
                 # own-sid lineage inside the same transaction as its insert.
-                connection.execute(
-                    sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values({LOGICAL_ID_COLUMN: sid})
+                update_values = {LOGICAL_ID_COLUMN: sid}
+                if enforced_entry:
+                    self._prepare_entry_ids(
+                        connection,
+                        table,
+                        record_type,
+                        values,
+                        lineage=sid,
+                        sid=sid,
+                        id_series=id_series,
+                        replacement_entry_id=None,
+                    )
+                    update_values.update({"id": values["id"], "immutable_id": values["immutable_id"]})
+                try:
+                    connection.execute(sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values(update_values))
+                except IntegrityError as error:
+                    self._raise_entry_id_integrity(table, values, error)
+            elif enforced_entry:
+                self._prepare_entry_ids(
+                    connection,
+                    table,
+                    record_type,
+                    values,
+                    lineage=replacement,
+                    sid=sid,
+                    id_series=id_series,
+                    replacement_entry_id=replacement_entry_id if top_level else None,
                 )
+                try:
+                    connection.execute(
+                        sqlalchemy.update(table)
+                        .where(table.c[SID_COLUMN] == sid)
+                        .values({"id": values["id"], "immutable_id": values["immutable_id"]})
+                    )
+                except IntegrityError as error:
+                    self._raise_entry_id_integrity(table, values, error)
         projection.inserted.append((record_type, sid))
         for spec in schema.fields:
             if spec.role == "child":
@@ -1702,9 +1856,107 @@ class SqlStore:
                     self._projected_value(record_type, source, projected, spec),
                     projection,
                     _field_path(path, spec.field),
+                    id_series=id_series,
                 )
         self._remember(record_type, sid, source, cache_instance=type(source) is record_type)
         return sid
+
+    def _prepare_entry_ids(
+        self,
+        connection: sqlalchemy.Connection,
+        table: sqlalchemy.Table,
+        record_type: type,
+        values: dict[str, Any],
+        *,
+        lineage: int | None,
+        sid: int | None,
+        id_series: str | None,
+        replacement_entry_id: str | None,
+    ) -> None:
+        """Validate or mint the entry-id columns for one parent-row write."""
+        entry_id = values.get("id")
+        immutable_id = values.get("immutable_id")
+        if replacement_entry_id is not None:
+            if entry_id is None:
+                entry_id = replacement_entry_id
+                values["id"] = entry_id
+            elif entry_id != replacement_entry_id:
+                raise EntryIdConflictError(table.name, str(entry_id), lineage, lineage)
+        if entry_id is not None:
+            # ponytail: these checks are advisory under concurrent transactions; a
+            # family-owned id-ownership table with unique constraints is the upgrade
+            # path if cross-transaction family-wide ownership must be serialized.
+            for sibling in self._entry_family_tables(record_type):
+                existing = connection.execute(
+                    sqlalchemy.select(sibling.c[LOGICAL_ID_COLUMN], sibling.c[SID_COLUMN])
+                    .where(sibling.c.id == entry_id)
+                    .limit(1)
+                ).one_or_none()
+                if existing is None:
+                    continue
+                if sibling is not table or (
+                    int(existing[1]) != sid and (lineage is None or int(existing[0]) != lineage)
+                ):
+                    raise EntryIdConflictError(sibling.name, entry_id, int(existing[0]), lineage)
+        else:
+            if self._entry_ids is None:
+                raise ValueError(
+                    f"{record_type.__name__} has no id and SqlStore(entry_ids=EntryIdScheme(...)) was not declared; "
+                    "pass an explicit id or declare a scheme"
+                )
+            if lineage is not None:
+                base = self._entry_ids.base
+                if self._entry_ids.type_in_base:
+                    base = f"{base}.{self._entry_record_types[record_type][0]}"
+                entry_id = format_entry_id(
+                    base, id_series or self._entry_ids.series, self._entry_id_number(record_type, lineage)
+                )
+                values["id"] = entry_id
+        if immutable_id is not None:
+            for sibling in self._entry_family_tables(record_type):
+                existing = connection.execute(
+                    sqlalchemy.select(sibling.c[SID_COLUMN]).where(sibling.c.immutable_id == immutable_id).limit(1)
+                ).one_or_none()
+                if existing is not None and (sibling is not table or int(existing[0]) != sid):
+                    raise EntryIdConflictError(sibling.name, immutable_id, int(existing[0]), sid)
+            return
+        if lineage is None or sid is None:
+            return
+        count_query = (
+            sqlalchemy.select(sqlalchemy.func.count()).select_from(table).where(table.c[LOGICAL_ID_COLUMN] == lineage)
+        )
+        if sid is not None:
+            count_query = count_query.where(table.c[SID_COLUMN] != sid)
+        revision = 1 + int(connection.execute(count_query).scalar_one())
+        values["immutable_id"] = format_immutable_id(str(entry_id), revision)
+
+    @staticmethod
+    def _validate_projected_entry_ids(record_type: type, projected: Mapping[str, object]) -> None:
+        """Validate supplied entry ids before deduplication can write dependencies."""
+        del record_type
+        entry_id = projected.get("id")
+        immutable_id = projected.get("immutable_id")
+        if entry_id is not None:
+            check_entry_id(cast(str, entry_id))
+        if immutable_id is not None:
+            check_immutable_id(cast(str, immutable_id))
+
+    def _entry_family_tables(self, record_type: type) -> tuple[sqlalchemy.Table, ...]:
+        """Return every backing table sharing an enforced entry-id namespace."""
+        family = self._family_for_backing(record_type)
+        if family is None:
+            return (self._table(resolve_schema(record_type).table_name),)
+        return tuple(self._table(resolve_schema(backing).table_name) for backing in family.records)
+
+    @staticmethod
+    def _raise_entry_id_integrity(
+        table: sqlalchemy.Table, values: Mapping[str, Any], error: IntegrityError
+    ) -> NoReturn:
+        """Translate entry-id uniqueness failures without hiding their identifier."""
+        immutable_id = values.get("immutable_id")
+        if immutable_id is not None:
+            raise EntryIdConflictError(table.name, str(immutable_id), None, None) from error
+        raise error
 
     def _insert_content_row(
         self,
@@ -1765,11 +2017,15 @@ class SqlStore:
         projected: Mapping[str, object],
         projection: _Projection,
         path: str,
+        *,
+        id_series: str | None,
     ) -> dict[str, Any]:
         """Encode projected parent columns, saving referenced records recursively."""
 
         def resolve_sid(record_type: type, value: Any, field_path: str) -> int:
-            return self._save(connection, record_type, value, projection, field_path, top_level=False)
+            return self._save(
+                connection, record_type, value, projection, field_path, top_level=False, id_series=id_series
+            )
 
         return _encode_parent_row(schema, source, projected, path, resolve_sid)
 
@@ -1796,11 +2052,15 @@ class SqlStore:
         value: Any,
         projection: _Projection,
         path: str,
+        *,
+        id_series: str | None,
     ) -> None:
         assert spec.child is not None
 
         def resolve_sid(record_type: type, element: Any, element_path: str) -> int:
-            return self._save(connection, record_type, element, projection, element_path, top_level=False)
+            return self._save(
+                connection, record_type, element, projection, element_path, top_level=False, id_series=id_series
+            )
 
         rows = _encode_child_rows(schema, spec, sid, value, path, resolve_sid)
         if rows:
@@ -2172,7 +2432,7 @@ class SqlStore:
                 return [self._fetch(connection, cls, referring_sid) for referring_sid in found_sids]
             return self._fetch_many_lazy(cls, found_sids)
 
-    def replace(self, predecessor: Any, obj: Any) -> int:
+    def replace(self, predecessor: Any, obj: Any, *, id_series: str | None = None) -> int:
         """Store ``obj`` as a logical replacement of ``predecessor`` and return its sid.
 
         The saved row copies ``predecessor``'s ``logical_id`` (its lineage
@@ -2195,6 +2455,7 @@ class SqlStore:
 
         :param predecessor: The stored instance or lazy proxy being replaced; it must have been stored or fetched through this store.
         :param obj: The replacement object to store.
+        :param id_series: Override the configured entry-id series when an id must be minted.
         :return: The stored replacement row's sid.
         :raises ValueError: If ``predecessor`` is not known to this store, or ``obj``'s record table differs from ``predecessor``'s.
         :raises EntryReplacementError: If ``obj`` deduplicates onto a row from a different lineage.
@@ -2218,12 +2479,28 @@ class SqlStore:
         with self._read_connection() as connection:
             self._missing_tables_for_read((predecessor_type,))
             table = self._table(predecessor_table)
-            predecessor_logical_id = int(
-                connection.execute(
-                    sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(table.c[SID_COLUMN] == predecessor_sid)
-                ).scalar_one()
-            )
-        return self._save_top(obj, as_record=None, replace_logical_id=predecessor_logical_id)
+            if obj_type in self._entry_record_types:
+                predecessor_row = connection.execute(
+                    sqlalchemy.select(table.c[LOGICAL_ID_COLUMN], table.c.id).where(
+                        table.c[SID_COLUMN] == predecessor_sid
+                    )
+                ).one()
+                predecessor_logical_id = int(predecessor_row[0])
+                predecessor_entry_id = str(predecessor_row[1])
+            else:
+                predecessor_logical_id = int(
+                    connection.execute(
+                        sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(table.c[SID_COLUMN] == predecessor_sid)
+                    ).scalar_one()
+                )
+                predecessor_entry_id = None
+        return self._save_top(
+            obj,
+            as_record=None,
+            replace_logical_id=predecessor_logical_id,
+            id_series=id_series,
+            replacement_entry_id=predecessor_entry_id,
+        )
 
     def history(self, obj: Any) -> tuple[Any, ...]:
         """Return every record in ``obj``'s replacement lineage, oldest first.
@@ -2419,6 +2696,8 @@ class SqlStore:
             if spec.field in skipped_specs:
                 incoming = values[spec.field]
                 existing = decode_field(self, schema, spec, sid, row)
+                if spec.field in {"id", "immutable_id"} and incoming is None:
+                    continue
                 if not _metadata_scalar_equal(incoming, existing):
                     raise EntryMetadataConflictError(
                         f"metadata conflict for {field_path}: stored {existing!r}, received {incoming!r}"

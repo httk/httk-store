@@ -16,19 +16,51 @@ from httk.core import (
     PropertyDefinition,
     RelatedEntry,
 )
-from httk.core.storage import Related, RelationshipLink, Shape, StorageInfo, stored_property
+from httk.core.storage import (
+    IdentitySkip,
+    Indexed,
+    Related,
+    RelationshipLink,
+    Shape,
+    StorageInfo,
+    Unique,
+    stored_property,
+)
 from postgres_support import POSTGRES_PARAM, postgres_database
 
+from httk.store.backend.schema import resolve_schema
 from httk.store.backend.sql import Backend, SqlStore, StoreEntryProvider
 from httk.store.validation import validate_record
 
 pytestmark = pytest.mark.xdist_group("clickhouse_read_corpus")
 
 
+def _assign_test_ids(store: SqlStore, classes: tuple[type, ...]) -> None:
+    """Populate deterministic physical ids for legacy provider fixtures."""
+    with store._database.engine.begin() as connection:
+        for cls in classes:
+            table_name = resolve_schema(cls).table_name
+            if table_name not in store._metadata.tables:
+                continue
+            table = store._table(table_name)
+            if "id" not in table.c:
+                continue
+            for (sid,) in connection.execute(sqlalchemy.select(table.c["sid"])):
+                entry_id = f"httk.test.{cls.__name__.lower()}-1-{sid}"
+                connection.execute(
+                    sqlalchemy.update(table)
+                    .where(table.c["sid"] == sid)
+                    .values(id=entry_id, immutable_id=f"{entry_id}~1")
+                )
+    store._clear_identity_caches()
+
+
 @dataclass(frozen=True)
 class Writer:
     name: str
     born: int
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -44,6 +76,8 @@ class Book:
     keywords: list[str]
     coauthors: list[Writer]
     author: Writer | None = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
     @stored_property
     def nkeywords(self) -> int:
@@ -95,8 +129,9 @@ def store(request):
             with sql_store.transaction():
                 for writer in (ADA, BOOLE, CARA):
                     sql_store.save(writer)
-                sql_store.save(BOOK_1)
-                sql_store.save(BOOK_2)
+            sql_store.save(BOOK_1)
+            sql_store.save(BOOK_2)
+            _assign_test_ids(sql_store, (Writer, Book))
             yield sql_store
         return
     with Backend.sqlite() as database:
@@ -107,6 +142,7 @@ def store(request):
                 sql_store.save(writer)
             sql_store.save(BOOK_1)  # book sid 1
             sql_store.save(BOOK_2)  # book sid 2
+        _assign_test_ids(sql_store, (Writer, Book))
         yield sql_store
 
 
@@ -130,6 +166,8 @@ def test_auto_definition_properties_prefixed_and_core_present(provider):
     definition = provider.entry_types()["books"]
     assert isinstance(definition, EntryTypeDefinition)
     assert sorted(definition.properties) == [
+        "_httk_custom_id",
+        "_httk_custom_immutable_id",
         "_httk_custom_in_print",
         "_httk_custom_keywords",
         "_httk_custom_metric",
@@ -187,6 +225,33 @@ def test_unregistered_prefix_raises(store):
         StoreEntryProvider(store, {"books": Book}, prefix="_nope_")
 
 
+def test_default_id_provider_requires_a_physical_id_field(store):
+    @dataclass(frozen=True)
+    class MissingId:
+        value: int
+
+    with pytest.raises(TypeError, match="MissingId.*id: Annotated"):
+        StoreEntryProvider(store, {"missing": MissingId})
+
+
+def test_default_id_provider_is_latest_only_and_rejects_all_revisions() -> None:
+    @dataclass(frozen=True)
+    class Revision:
+        value: int
+        id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+        immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+    with Backend.sqlite() as database:
+        store = SqlStore(database, entry_records={})
+        first = Revision(1, "httk.test.revision-1-1", "httk.test.revision-1-1~1")
+        store.save(first)
+        store.replace(first, Revision(2, "httk.test.revision-1-1", "httk.test.revision-1-1~2"))
+        provider = StoreEntryProvider(store, {"revisions": Revision})
+        assert [row["_httk_custom_value"] for row in provider.records("revisions")] == [2]
+        with pytest.raises(ValueError, match="id_of override"):
+            StoreEntryProvider(store, {"revisions": Revision}, only_latest=False)
+
+
 def test_supplied_definitions_pass_through(store):
     generated = dict(StoreEntryProvider(store, {"books": Book, "writers": Writer}).entry_types())
     provider = StoreEntryProvider(store, {"books": Book, "writers": Writer}, definitions=generated)
@@ -223,6 +288,8 @@ def test_property_keys_id_type_and_identity_map(provider):
         "type": "type",
         "_httk_custom_name": "_httk_custom_name",
         "_httk_custom_born": "_httk_custom_born",
+        "_httk_custom_id": "_httk_custom_id",
+        "_httk_custom_immutable_id": "_httk_custom_immutable_id",
     }
     book_keys = provider.property_keys("books")
     assert book_keys["id"] == "__id" and book_keys["type"] == "type"
@@ -269,7 +336,7 @@ def test_records_batches_child_field_reads(provider):
 
 
 def test_records_values(provider):
-    row = rows_by_id(provider, "books")["books-1"]
+    row = rows_by_id(provider, "books")["httk.test.book-1-1"]
     assert row["type"] == "books"
     assert row["_httk_custom_title"] == "Analytical Engines"
     assert row["_httk_custom_pages"] == 350
@@ -284,7 +351,7 @@ def test_records_values(provider):
 
 
 def test_records_empty_containers(provider):
-    row = rows_by_id(provider, "books")["books-2"]
+    row = rows_by_id(provider, "books")["httk.test.book-1-2"]
     assert row["_httk_custom_samples"] == []
     assert row["_httk_custom_keywords"] == []
     assert row["_httk_custom_nkeywords"] == 0
@@ -293,9 +360,9 @@ def test_records_empty_containers(provider):
 
 def test_writer_records(provider):
     rows = rows_by_id(provider, "writers")
-    assert set(rows) == {"writers-1", "writers-2", "writers-3"}
-    assert rows["writers-1"]["_httk_custom_name"] == "Ada"
-    assert rows["writers-3"]["_httk_custom_born"] == 1820
+    assert set(rows) == {"httk.test.writer-1-1", "httk.test.writer-1-2", "httk.test.writer-1-3"}
+    assert rows["httk.test.writer-1-1"]["_httk_custom_name"] == "Ada"
+    assert rows["httk.test.writer-1-3"]["_httk_custom_born"] == 1820
 
 
 # --------------------------------------------------------------------- relationships
@@ -307,10 +374,10 @@ def test_relationships_across_served_classes(provider):
     # child rows in insertion order (Boole sid 2, Cara sid 3), served as one
     # flat tuple; book 2 has no related entries and is omitted.
     assert related == {
-        "books-1": (
-            RelatedEntry("writers", "writers-1"),
-            RelatedEntry("writers", "writers-2"),
-            RelatedEntry("writers", "writers-3"),
+        "httk.test.book-1-1": (
+            RelatedEntry("writers", "httk.test.writer-1-1"),
+            RelatedEntry("writers", "httk.test.writer-1-2"),
+            RelatedEntry("writers", "httk.test.writer-1-3"),
         )
     }
     assert provider.relationships("writers") == {}
@@ -344,6 +411,8 @@ def test_id_of_override_used_in_records_and_relationships(store):
 @dataclass(frozen=True)
 class Person:
     name: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -352,16 +421,22 @@ class Project:
     lead: Annotated[Person | None, Related(role="lead", description="Project lead")] = None
     backup: Annotated[Person | None, Related(serve=False)] = None
     members: Annotated[list[Person], Related(role="member")] = field(default_factory=list)
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class Compound:
     formula: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class Citation:
     doi: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -395,6 +470,8 @@ class Simulation:
 
     label: str
     compound: Compound | None = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @contextlib.contextmanager
@@ -404,6 +481,7 @@ def sqlite_store(*objects):
         with sql_store.transaction():
             for obj in objects:
                 sql_store.save(obj)
+        _assign_test_ids(sql_store, (Person, Project, Compound, Citation, Simulation))
         yield sql_store
 
 
@@ -415,10 +493,10 @@ def test_related_marker_meta_and_serve_false():
         # The suppressed 'backup' field neither becomes a property nor a relationship:
         assert "_httk_backup" not in provider.entry_types()["projects"].properties
         assert provider.relationships("projects") == {
-            "projects-1": (
-                RelatedEntry("people", "people-1", description="Project lead", role="lead"),
-                RelatedEntry("people", "people-2", role="member"),
-                RelatedEntry("people", "people-3", role="member"),
+            "httk.test.project-1-1": (
+                RelatedEntry("people", "httk.test.person-1-1", description="Project lead", role="lead"),
+                RelatedEntry("people", "httk.test.person-1-2", role="member"),
+                RelatedEntry("people", "httk.test.person-1-3", role="member"),
             )
         }
 
@@ -435,11 +513,13 @@ def test_join_class_links_via_link_classes():
         # The join class is not served as an entry type:
         assert sorted(provider.entry_types()) == ["citations", "compounds"]
         assert provider.relationships("compounds") == {
-            "compounds-1": (
-                RelatedEntry("citations", "citations-1", description="Cited by", role="citation"),
-                RelatedEntry("citations", "citations-2", description="Cited by", role="citation"),
+            "httk.test.compound-1-1": (
+                RelatedEntry("citations", "httk.test.citation-1-1", description="Cited by", role="citation"),
+                RelatedEntry("citations", "httk.test.citation-1-2", description="Cited by", role="citation"),
             ),
-            "compounds-2": (RelatedEntry("citations", "citations-1", description="Cited by", role="citation"),),
+            "httk.test.compound-1-2": (
+                RelatedEntry("citations", "httk.test.citation-1-1", description="Cited by", role="citation"),
+            ),
         }
         # Links are indexed by FROM side only; the TO side gains nothing:
         assert provider.relationships("citations") == {}
@@ -452,10 +532,12 @@ def test_served_class_link_with_none_target_is_field_inverse():
         # compounds gain the inverse relationship to the simulation entry itself;
         # the NULL-FK row (run-2) is skipped.
         assert provider.relationships("compounds") == {
-            "compounds-1": (RelatedEntry("simulations", "simulations-1", role="output"),)
+            "httk.test.compound-1-1": (RelatedEntry("simulations", "httk.test.simulation-1-1", role="output"),)
         }
         # The forward 'compound' reference field still serves as usual (no meta declared):
-        assert provider.relationships("simulations") == {"simulations-1": (RelatedEntry("compounds", "compounds-1"),)}
+        assert provider.relationships("simulations") == {
+            "httk.test.simulation-1-1": (RelatedEntry("compounds", "httk.test.compound-1-1"),)
+        }
 
 
 def test_missing_link_class_does_not_hide_direct_relationships():
@@ -468,7 +550,7 @@ def test_missing_link_class_does_not_hide_direct_relationships():
         )
 
         assert provider.relationships("compounds") == {
-            "compounds-1": (RelatedEntry("simulations", "simulations-1", role="output"),)
+            "httk.test.compound-1-1": (RelatedEntry("simulations", "httk.test.simulation-1-1", role="output"),)
         }
 
 
@@ -483,9 +565,9 @@ def test_link_ordering_and_dedup():
         # Exact duplicates collapse (first occurrence wins); entries differing
         # only in meta are both kept, in link declaration order.
         assert provider.relationships("compounds") == {
-            "compounds-1": (
-                RelatedEntry("citations", "citations-1", role="primary"),
-                RelatedEntry("citations", "citations-1", role="secondary"),
+            "httk.test.compound-1-1": (
+                RelatedEntry("citations", "httk.test.citation-1-1", role="primary"),
+                RelatedEntry("citations", "httk.test.citation-1-1", role="secondary"),
             )
         }
 
@@ -556,7 +638,7 @@ def test_optimade_adapter_end_to_end(provider):
             parse_optimade_filter("_httk_custom_pages > 200"),
         )
     )
-    assert [r.values["id"] for r in results] == ["books-1"]
+    assert [r.values["id"] for r in results] == ["httk.test.book-1-1"]
     assert results[0].values["_httk_custom_title"] == "Analytical Engines"
 
     results = list(
@@ -564,9 +646,9 @@ def test_optimade_adapter_end_to_end(provider):
             adapter, ["books"], ["id"], [], 100, 0, parse_optimade_filter('_httk_custom_keywords HAS "history"')
         )
     )
-    assert [r.values["id"] for r in results] == ["books-1"]
+    assert [r.values["id"] for r in results] == ["httk.test.book-1-1"]
 
     results = list(
         execute_query(adapter, ["writers"], ["id"], [], 100, 0, parse_optimade_filter("_httk_custom_born = 1820"))
     )
-    assert [r.values["id"] for r in results] == ["writers-3"]
+    assert [r.values["id"] for r in results] == ["httk.test.writer-1-3"]

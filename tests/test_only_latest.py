@@ -6,19 +6,34 @@ single variable output. The Mongo store is a sibling packet's concern, so the
 SQL-only cases skip it.
 """
 
-from dataclasses import dataclass
-from typing import ClassVar
+from dataclasses import dataclass, field
+from typing import Annotated, ClassVar
 
 import pytest
-from httk.core.storage import StorageInfo
+from httk.core.register import register_entry_family, register_entry_record
+from httk.core.storage import IdentitySkip, Indexed, StorageInfo, Unique
 
-from httk.store import FederatedStore
+from httk.store import EntryIdScheme, FederatedStore
 from httk.store.backend.sql import Backend, SqlStore, StoreEntryProvider
 
 
 @dataclass(frozen=True)
 class LatestWidget:
     value: int
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+class LatestWidgetEntry:
+    """Entry-family marker used to mint stored provider ids."""
+
+    type = "widgets"
+
+
+register_entry_family(name="test-only-latest-widgets", family=f"{__name__}:LatestWidgetEntry")
+register_entry_record(
+    name="test-only-latest-widget", family="test-only-latest-widgets", record=f"{__name__}:LatestWidget"
+)
 
 
 @dataclass(frozen=True)
@@ -109,7 +124,7 @@ def test_only_latest_without_timestamps() -> None:
 
 def test_only_latest_self_join_filters_each_variable_independently() -> None:
     with Backend.sqlite() as database:
-        store = SqlStore(database, entry_records={})
+        store = SqlStore(database, entry_records={}, entry_ids=EntryIdScheme("httk.test", "1"))
         # Two lineages, each replaced once.
         a = LatestPair(1)
         store.save(a)
@@ -176,14 +191,19 @@ def test_variable_logical_id_in_filter_and_output(store_factory) -> None:
 
 def test_entry_provider_only_latest_serves_only_latest_rows() -> None:
     with Backend.sqlite() as database:
-        store = SqlStore(database, entry_records={})
-        first = LatestWidget(1)
+        store = SqlStore(
+            database,
+            entry_records={LatestWidgetEntry: LatestWidget},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
+        first = LatestWidget(1, "httk.test-1-1", "httk.test-1-1~1")
         store.save(first)
-        store.replace(first, LatestWidget(2))
-        store.save(LatestWidget(99))
+        store.replace(first, LatestWidget(2, "httk.test-1-1", "httk.test-1-1~2"))
+        store.save(LatestWidget(99, "httk.test-1-3", "httk.test-1-3~1"))
+        store._clear_identity_caches()
 
         plain = StoreEntryProvider(store, {"widgets": LatestWidget})
-        assert sorted(row["_httk_custom_value"] for row in plain.records("widgets")) == [1, 2, 99]
+        assert sorted(row["_httk_custom_value"] for row in plain.records("widgets")) == [2, 99]
 
         latest = StoreEntryProvider(store, {"widgets": LatestWidget}, only_latest=True)
         assert sorted(row["_httk_custom_value"] for row in latest.records("widgets")) == [2, 99]

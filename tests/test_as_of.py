@@ -6,7 +6,7 @@ import pytest
 from httk.core.storage import StorageInfo
 from test_db_stored_federation import FederatedCalculation, FederationFirst
 
-from httk.store import FederatedSourceError, FederatedStore
+from httk.store import EntryIdScheme, FederatedSourceError, FederatedStore
 from httk.store.backend.sql import Backend, SqlStore, StoredEntryFederation, StoredEntrySource
 
 
@@ -101,7 +101,11 @@ def test_federated_store_forwards_as_of_and_rejects_disabled_child() -> None:
 
 def test_stored_entry_federation_degrades_per_source_for_as_of() -> None:
     with Backend.sqlite() as enabled_database, Backend.sqlite() as disabled_database:
-        enabled = SqlStore(enabled_database, entry_records={FederatedCalculation: FederationFirst})
+        enabled = SqlStore(
+            enabled_database,
+            entry_records={FederatedCalculation: FederationFirst},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
         enabled._clock = lambda: 1_000_000
         enabled.save(FederationFirst("enabled-old", None))
         enabled._clock = lambda: 3_000_000
@@ -111,6 +115,7 @@ def test_stored_entry_federation_degrades_per_source_for_as_of() -> None:
             disabled_database,
             entry_records={FederatedCalculation: FederationFirst},
             store_timestamps=False,
+            entry_ids=EntryIdScheme("httk.test", "1"),
         )
         disabled.save(FederationFirst("disabled-current", None))
 
@@ -121,20 +126,24 @@ def test_stored_entry_federation_degrades_per_source_for_as_of() -> None:
             )
         )
         page = federation.query(as_of=2_000_000, sort=(("immutable_id", False),))
-        assert [row["immutable_id"] for row in page.rows] == ["disabled-current", "enabled-old"]
+        assert [row["immutable_id"] for row in page.rows] == ["httk.test-1-1~1", "httk.test-1-1~1"]
 
 
 def test_stored_property_cutoff_is_per_query_not_plan_state() -> None:
     with Backend.sqlite() as database:
-        store = SqlStore(database, entry_records={FederatedCalculation: FederationFirst})
+        store = SqlStore(
+            database,
+            entry_records={FederatedCalculation: FederationFirst},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
         store._clock = lambda: 1_000_000
         store.save(FederationFirst("old", None))
         store._clock = lambda: 3_000_000
         store.save(FederationFirst("new", None))
 
         plan = store.stored_property_plan(FederatedCalculation)
-        historic = plan.filter_searchers('immutable_id = "old"', as_of=2_000_000)
+        historic = plan.filter_searchers('immutable_id = "httk.test-1-1~1"', as_of=2_000_000)
         assert [row[0][0].label for row in historic[0]] == ["old"]
-        assert plan.records().__next__().get("immutable_id") == "old"
+        assert plan.records().__next__().get("immutable_id") == "httk.test-1-1~1"
         current = plan.candidate_searchers(as_of=None)[0]
         assert current.searcher.count() == 2

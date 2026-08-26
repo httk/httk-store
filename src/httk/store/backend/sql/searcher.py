@@ -438,7 +438,12 @@ class SqlColumn:
         :param \\*values: The values of which at least one child must match.
         :return: The matching SQL condition.
         """
-        member = self._element.in_(self._encode_set_values(values))
+        members: Any = (
+            values[0]
+            if len(values) == 1 and isinstance(values[0], sqlalchemy.SelectBase)
+            else self._encode_set_values(values)
+        )
+        member = self._element.in_(members)
         return SqlExpression(
             _bool_clause(member),
             _bool_clause(self._match_count(member) > 0),
@@ -455,7 +460,12 @@ class SqlColumn:
         :param \\*values: The complete set of allowed child values.
         :return: The condition requiring every child value to match.
         """
-        outside = self._element.notin_(self._encode_set_values(values))
+        members: Any = (
+            values[0]
+            if len(values) == 1 and isinstance(values[0], sqlalchemy.SelectBase)
+            else self._encode_set_values(values)
+        )
+        outside = self._element.notin_(members)
         return SqlExpression(
             sqlalchemy.true(),
             _bool_clause(self._match_count(outside) == 0),
@@ -542,8 +552,11 @@ class SqlReference:
     def _fk_column(self) -> SqlColumn:
         return SqlColumn(self._variable._searcher, self._fk)
 
-    def _sid_value(self, value: Any) -> int:
-        return value if isinstance(value, int) else self._target_sid(value)
+    def _sid_value(self, value: Any) -> Any:
+        """Accept a stored sid, a correlated sid subquery, or a target record."""
+        if isinstance(value, (int, sqlalchemy.ClauseElement)):
+            return value
+        return self._target_sid(value)
 
     def has(self, value: Any) -> SqlExpression:
         """Match a referent equal to ``value``.

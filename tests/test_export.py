@@ -9,13 +9,17 @@ import pytest
 from httk.core.files import FileEntry, FileRecord
 from httk.core.project import initialize_project
 
-from httk.store import export_dataset
+from httk.store import EntryIdScheme, export_dataset
 from httk.store.backend.sql import Backend, SqlStore
 
 
 def _store(path: Path) -> None:
     with Backend.sqlite(path) as database:
-        store = SqlStore(database, entry_records={FileEntry: FileRecord})
+        store = SqlStore(
+            database,
+            entry_records={FileEntry: FileRecord},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
         store.save(FileRecord("file:///presentation", "presentation", size=3, sha256="abc"))
 
 
@@ -103,7 +107,11 @@ def test_structure_export_contains_extended_family_definition(tmp_path: Path) ->
         ("Na",),
     )
     with Backend.sqlite(source) as database:
-        store = SqlStore(database, entry_records={StructureEntry: UnitcellStructureRecord})
+        store = SqlStore(
+            database,
+            entry_records={StructureEntry: UnitcellStructureRecord},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
         store.save(structure)
 
     export_dataset(source, output)

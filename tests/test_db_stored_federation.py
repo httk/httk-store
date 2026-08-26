@@ -3,7 +3,7 @@
 import datetime
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
 import pytest
 import sqlalchemy
@@ -12,8 +12,9 @@ from httk.core import (
     load_entry_type_definition,
 )
 from httk.core.register import register_entry_family, register_entry_record
-from httk.core.storage import StorageInfo, StoredPropertyProjection, content_id
+from httk.core.storage import IdentitySkip, Indexed, StorageInfo, StoredPropertyProjection, Unique
 
+from httk.store import EntryIdScheme
 from httk.store.backend.schema import resolve_schema
 from httk.store.backend.sql import (
     Backend,
@@ -93,9 +94,11 @@ class FederationFirst:
     label: str
     modified: datetime.datetime | None
     tags: list[str] = field(default_factory=list)
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
     __httk_stored_properties__: ClassVar = {
-        "immutable_id": StoredPropertyProjection(
+        "_httk_label": StoredPropertyProjection(
             response=_label_response,
             query=_label_query,
             sort=lambda context: context.field("label"),
@@ -110,11 +113,6 @@ class FederationFirst:
             query=_store_timestamp_query,
             sort=lambda context: context.field("store_timestamp"),
         ),
-        "_httk_label": StoredPropertyProjection(
-            response=_label_value,
-            query=_label_query,
-            sort=lambda context: context.field("label"),
-        ),
         "_httk_tags": StoredPropertyProjection(response=lambda record: list(record.tags)),
     }
 
@@ -126,6 +124,8 @@ class FederationSecond:
     label: str
     modified: datetime.datetime | None
     tags: list[str] = field(default_factory=list)
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
     __httk_stored_properties__: ClassVar = FederationFirst.__httk_stored_properties__
 
@@ -199,6 +199,7 @@ def test_snapshot_cutoff_ns_uses_the_coarsest_capable_source_and_skips_disabled_
                 database,
                 entry_records={FederatedCalculation: (FederationFirst, FederationSecond)},
                 store_timestamp_resolution=resolution,
+                entry_ids=EntryIdScheme("httk.test", "1"),
             )
             store.save(_record(f"source-{index}"))
             sources.append(StoredEntrySource(store, FederatedCalculation, f"source-{index}", f"{index}:"))
@@ -214,6 +215,7 @@ def test_snapshot_cutoff_ns_uses_the_coarsest_capable_source_and_skips_disabled_
             database,
             entry_records={FederatedCalculation: (FederationFirst, FederationSecond)},
             store_timestamps=False,
+            entry_ids=EntryIdScheme("httk.test", "1"),
         )
         federation = StoredEntryFederation((StoredEntrySource(store, FederatedCalculation, "disabled", "disabled:"),))
         assert federation.snapshot_cutoff_ns(3_456_789_123) is None
@@ -249,11 +251,13 @@ def _federation(
         first_database,
         entry_records={FederatedCalculation: (FederationFirst, FederationSecond)},
         store_timestamp_resolution=first_resolution,
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     second_store = SqlStore(
         second_database,
         entry_records={FederatedCalculation: (FederationFirst, FederationSecond)},
         store_timestamp_resolution=second_resolution,
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     if first_clock is not None:
         first_store._clock = lambda: first_clock
@@ -282,7 +286,7 @@ def test_stored_entry_federation_filters_store_timestamp(databases):
 
     page = federation.query('_httk_store_timestamp <= "1970-01-01T00:00:00.002500Z"', limit=10)
 
-    assert [row["immutable_id"] for row in page.rows] == ["first"]
+    assert [row["_httk_label"] for row in page.rows] == ["first"]
 
 
 def test_stored_entry_federation_sorts_store_timestamp_in_nanoseconds(databases):
@@ -298,7 +302,7 @@ def test_stored_entry_federation_sorts_store_timestamp_in_nanoseconds(databases)
 
     page = federation.query(sort=(("_httk_store_timestamp", False),), limit=10)
 
-    assert [(row["immutable_id"], row["_httk_store_timestamp"]) for row in page.rows] == [
+    assert [(row["_httk_label"], row["_httk_store_timestamp"]) for row in page.rows] == [
         ("second", 1_000_000),
         ("first", 2_000_000),
     ]
@@ -323,7 +327,7 @@ def test_unsorted_page_preserves_source_backing_native_order_and_hydrates_only_v
 
     assert page.total_count == 3
     assert page.more_data_available
-    assert [row["immutable_id"] for row in page.rows] == ["alpha-second"]
+    assert [row["_httk_label"] for row in page.rows] == ["alpha-second"]
     assert _RESPONSES == ["alpha-second"]
     assert calls == []
     for source in federation._sources:
@@ -346,7 +350,11 @@ def test_unique_prefix_page_has_no_duplicate_probe_queries() -> None:
     with managers[0] as first_database, managers[1] as second_database, managers[2] as third_database:
         records = (_record("first"), _record("second"), _record("third"))
         stores = tuple(
-            SqlStore(database, entry_records={FederatedCalculation: FederationFirst})
+            SqlStore(
+                database,
+                entry_records={FederatedCalculation: FederationFirst},
+                entry_ids=EntryIdScheme("httk.test", "1"),
+            )
             for database in (first_database, second_database, third_database)
         )
         for store, record in zip(stores, records, strict=True):
@@ -377,16 +385,20 @@ def test_unique_prefix_page_has_no_duplicate_probe_queries() -> None:
 
 def test_single_source_page_skips_probes_but_audit_detects_corrupt_cross_backing_ids() -> None:
     with Backend.sqlite() as database:
-        store = SqlStore(database, entry_records={FederatedCalculation: (FederationFirst, FederationSecond)})
+        store = SqlStore(
+            database,
+            entry_records={FederatedCalculation: (FederationFirst, FederationSecond)},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
         first = _record("first")
         second = _record("second", second=True)
         store.save(first)
         second_sid = store.save(second)
-        key = content_id(first)
+        key = "httk.test-1-2"
         with database.engine.begin() as connection:
             connection.execute(
-                sqlalchemy.text("UPDATE stored_federation_second SET content_id = :content_id WHERE sid = :sid"),
-                {"content_id": key, "sid": second_sid},
+                sqlalchemy.text("UPDATE stored_federation_second SET id = :id WHERE sid = :sid"),
+                {"id": key, "sid": second_sid},
             )
         federation = StoredEntryFederation((StoredEntrySource(store, FederatedCalculation, "only", "same:"),))
         statements: list[str] = []
@@ -444,10 +456,10 @@ def test_visible_and_explicit_public_id_collision_detection_is_lazy(databases):
 
     # Both duplicate candidates sort before this visible candidate.  They are
     # wholly outside the page window, so ordinary paging does not audit them.
-    page = federation.query(sort=(("immutable_id", False),), offset=2, limit=1)
-    assert [row["immutable_id"] for row in page.rows] == ["visible"]
+    page = federation.query(sort=(("_httk_label", False),), offset=2, limit=1)
+    assert [row["_httk_label"] for row in page.rows] == ["visible"]
 
-    public_id = content_id(duplicate)
+    public_id = "httk.test-1-2"
     with pytest.raises(DuplicateEntryIdError) as caught:
         federation.fetch(public_id)
     assert caught.value.public_id == public_id
@@ -467,7 +479,7 @@ def test_sorted_heap_merge_uses_explicit_nulls_last_and_public_id_ties(databases
 
     page = federation.query(sort=(("last_modified", descending),), limit=10)
 
-    labels = [row["immutable_id"] for row in page.rows]
+    labels = [row["_httk_label"] for row in page.rows]
     if descending:
         assert labels == ["beta-late", "alpha-early", "alpha-null", "beta-null"]
     else:
@@ -519,7 +531,9 @@ def test_registered_definition_prefixes_reject_unknown_properties_but_filter_dec
 
 def test_constructor_rejects_mixed_entry_families_before_querying(databases):
     database, _unused = databases
-    store = SqlStore(database, entry_records={FederatedCalculation: (FederationFirst,)})
+    store = SqlStore(
+        database, entry_records={FederatedCalculation: (FederationFirst,)}, entry_ids=EntryIdScheme("httk.test", "1")
+    )
     incompatible_family = type("IncompatibleFederationFamily", (), {})
 
     with pytest.raises(ValueError, match="one exact entry_family"):
@@ -584,7 +598,7 @@ def test_page_render_batches_into_one_fetch_per_source(databases, monkeypatch):
     monkeypatch.setattr(SqlStore, "fetch_many", tracked_many)
     monkeypatch.setattr(SqlStore, "fetch", tracked_fetch)
     page = federation.query(limit=50)
-    assert [row["immutable_id"] for row in page.rows] == [f"row-{index:03d}" for index in range(24)]
+    assert [row["_httk_label"] for row in page.rows] == [f"row-{index:03d}" for index in range(24)]
     # One batched fetch covers the whole page's single source; never one fetch per row.
     assert fetch_many_sizes == [24]
     assert per_row_fetches == []
@@ -596,8 +610,8 @@ def test_batched_page_matches_single_id_render(databases):
         (_record("a"), _record("c")),
         (_record("b"), _record("d")),
     )
-    page = federation.query(sort=(("immutable_id", False),), limit=10)
-    assert [row["immutable_id"] for row in page.rows] == ["a", "b", "c", "d"]
+    page = federation.query(sort=(("_httk_label", False),), limit=10)
+    assert [row["_httk_label"] for row in page.rows] == ["a", "b", "c", "d"]
     assert page.total_count == 4
     assert page.more_data_available is False
     # Each batched row equals the row the single-id render path produces.
@@ -618,12 +632,12 @@ def test_fields_prunes_unrequested_child_table_selects(databases):
     for engine in engines:
         sqlalchemy.event.listen(engine, "before_cursor_execute", capture)
     try:
-        page = federation.query(fields=("id", "immutable_id"), limit=50)
+        page = federation.query(fields=("id", "_httk_label"), limit=50)
     finally:
         for engine in engines:
             sqlalchemy.event.remove(engine, "before_cursor_execute", capture)
 
-    assert [row["immutable_id"] for row in page.rows] == [f"row-{index}" for index in range(5)]
+    assert [row["_httk_label"] for row in page.rows] == [f"row-{index}" for index in range(5)]
     # The unrequested tags child table is never SELECTed: lazy rows never touch
     # the child table because no requested projection reads record.tags.
     assert all(tags_table not in statement for statement in statements)
@@ -631,22 +645,22 @@ def test_fields_prunes_unrequested_child_table_selects(databases):
 
 def test_fields_pruned_page_matches_requested_subset_of_full_render(databases):
     federation = _federation(databases, (_record("a", tags=["x"]),), (_record("b", tags=["y"]),))
-    subset = ("id", "type", "immutable_id")
-    full = federation.query(sort=(("immutable_id", False),), limit=10)
-    pruned = federation.query(sort=(("immutable_id", False),), limit=10, fields=subset)
+    subset = ("id", "type", "_httk_label")
+    full = federation.query(sort=(("_httk_label", False),), limit=10)
+    pruned = federation.query(sort=(("_httk_label", False),), limit=10, fields=subset)
     for pruned_row, full_row in zip(pruned.rows, full.rows, strict=True):
         assert dict(pruned_row) == {name: full_row[name] for name in subset}
 
 
 def test_fields_none_matches_current_full_render(databases):
     federation = _federation(databases, (_record("a", tags=["x"]),), (_record("b", tags=["y"]),))
-    implicit = federation.query(sort=(("immutable_id", False),), limit=10)
-    explicit = federation.query(sort=(("immutable_id", False),), limit=10, fields=None)
+    implicit = federation.query(sort=(("_httk_label", False),), limit=10)
+    explicit = federation.query(sort=(("_httk_label", False),), limit=10, fields=None)
     assert [dict(row) for row in explicit.rows] == [dict(row) for row in implicit.rows]
 
 
 def test_fields_including_child_property_serves_values(databases):
     federation = _federation(databases, (_record("a", tags=["x", "y"]),), (_record("b", tags=[]),))
-    page = federation.query(sort=(("immutable_id", False),), limit=10, fields=("id", "immutable_id", "_httk_tags"))
-    assert [(row["immutable_id"], row["_httk_tags"]) for row in page.rows] == [("a", ["x", "y"]), ("b", [])]
+    page = federation.query(sort=(("_httk_label", False),), limit=10, fields=("id", "_httk_label", "_httk_tags"))
+    assert [(row["_httk_label"], row["_httk_tags"]) for row in page.rows] == [("a", ["x", "y"]), ("b", [])]
     assert all("last_modified" not in row for row in page.rows)

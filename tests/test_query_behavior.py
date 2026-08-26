@@ -15,6 +15,8 @@ from httk.core.storage import StorageInfo, stored_property
 from test_db_searcher import ALL_FORMULAS, ALL_LABELS, LABELS, RECORDS, REF_A, TAGS, Rec, Reference, Tag
 from test_db_stored_properties import FIRST, SECOND, CalculationEntry, GenericCalculationFirst, GenericCalculationSecond
 
+from httk.store import EntryIdScheme
+
 pytestmark = pytest.mark.xdist_group("clickhouse_read_corpus")
 
 
@@ -412,9 +414,12 @@ def test_stored_property_predicate_preserves_three_valued_results(store_factory)
 
 def test_scaled_exact_equal_stored_property_result(store_factory):
     """The callback's exact scaled comparison selects the matching backing."""
-    store = store_factory(entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)})
+    store = store_factory(
+        entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
     store.save(FIRST)
     store.save(SECOND)
     plan = stored_property_plan(store, CalculationEntry)
-    searchers = plan.filter_searchers('immutable_id = "composition"')
+    searchers = plan.filter_searchers('_httk_selector = "composition"')
     assert [result[0][0].label for searcher in searchers for result in searcher] == ["first"]

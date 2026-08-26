@@ -362,7 +362,8 @@ def schema_fingerprint_json(layout: StorageLayout) -> str:
     identity name and resolved columns capture everything the store depends on.
 
     :param layout: The normalized storage layout to fingerprint.
-    :return: A deterministic ``sort_keys`` JSON document ``{"tables": {...}}``.
+    :return: A deterministic ``sort_keys`` JSON document describing tables and
+        definition-backed entry-id tables.
     """
     # Duplicate physical table names across the closure are already rejected by
     # each backend's physical-name validation, which walks the identical
@@ -373,7 +374,16 @@ def schema_fingerprint_json(layout: StorageLayout) -> str:
         schemas.setdefault(schema.table_name, schema)
 
     _walk_closure(layout, collect)
-    document = {"tables": {name: _table_fingerprint(schema) for name, schema in schemas.items()}}
+    entry_id_tables = sorted(
+        resolve_schema(record).table_name
+        for family in layout.families
+        if family.definition_id is not None
+        for record in family.records
+    )
+    document = {
+        "entry_id_tables": entry_id_tables,
+        "tables": {name: _table_fingerprint(schema) for name, schema in schemas.items()},
+    }
     return json.dumps(document, sort_keys=True, separators=(",", ":"))
 
 
@@ -390,7 +400,8 @@ def schema_fingerprint_diff(stored: str | None, current: str) -> dict[str, objec
         value that is not a parseable fingerprint yields a single
         ``"<fingerprint>"`` entry.
     """
-    current_tables = json.loads(current)["tables"]
+    current_document = json.loads(current)
+    current_tables = current_document["tables"]
     try:
         stored_tables = json.loads(stored)["tables"] if stored is not None else None
     except (TypeError, KeyError, json.JSONDecodeError):
@@ -502,7 +513,9 @@ def classify_schema_upgrade(stored: str | None, current: str) -> AdditiveUpgrade
     :return: An :class:`AdditiveUpgradePlan` when fully additive, otherwise a
         human-readable rejection reason naming the offending table/field/column.
     """
-    current_tables = json.loads(current)["tables"]
+    current_document = json.loads(current)
+    current_tables = current_document["tables"]
+    entry_id_tables = frozenset(current_document.get("entry_id_tables", ()))
     try:
         stored_tables = json.loads(stored)["tables"] if stored is not None else None
     except (TypeError, KeyError, json.JSONDecodeError):
@@ -535,6 +548,8 @@ def classify_schema_upgrade(stored: str | None, current: str) -> AdditiveUpgrade
         for field, field_doc in current_fields.items():
             if field in stored_fields:
                 continue
+            if name in entry_id_tables and field in {"id", "immutable_id"}:
+                return f"table {name!r} adds enforced entry-id field {field!r}; rebuild the store"
             reason, field_columns = _added_parent_columns(name, field, field_doc)
             if reason is not None:
                 return reason

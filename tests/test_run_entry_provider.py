@@ -2,6 +2,7 @@
 
 import datetime
 import json
+from dataclasses import replace
 
 import pytest
 import sqlalchemy
@@ -15,8 +16,9 @@ from httk.core import (
     RunEdge,
     RunEntry,
 )
+from httk.core.storage import content_id
 
-from httk.store import DataRecordEntryProvider, RunEntryProvider, product_relationships, validate_record
+from httk.store import DataRecordEntryProvider, EntryIdScheme, RunEntryProvider, product_relationships, validate_record
 from httk.store.backend.schema import resolve_schema
 from httk.store.backend.sql import Backend, EntryMetadataConflictError, SqlStore
 
@@ -161,11 +163,15 @@ def test_data_record_provider_serves_product_relationships() -> None:
 
 def test_sql_store_round_trips_provenance_records_and_stored_number() -> None:
     with Backend.sqlite() as database:
-        store = SqlStore(database, entry_records={RunEntry: Run, DataRecordEntry: DataRecord})
+        store = SqlStore(
+            database,
+            entry_records={RunEntry: Run, DataRecordEntry: DataRecord},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
         run = _run()
         store.save(run)
-        fetched = store.fetch_entry(RunEntry, run.id)
-        assert fetched == run
+        fetched = store.fetch_entry(RunEntry, content_id(run))
+        assert fetched == replace(run, id="httk.test-1-1")
         assert fetched.immutable_id == run.immutable_id and fetched.last_modified == run.last_modified
         assert fetched.inputs == run.inputs
 
@@ -181,7 +187,7 @@ def test_sql_store_round_trips_provenance_records_and_stored_number() -> None:
 
         record = DataRecord.from_value(ENERGY_ID, "_httk_energy", 3.5)
         store.save(record)
-        assert store.fetch_entry(DataRecordEntry, record.id).value == 3.5
+        assert store.fetch_entry(DataRecordEntry, content_id(record)).value == 3.5
         table_name = resolve_schema(DataRecord).table_name
         columns = {column["name"] for column in sqlalchemy.inspect(database.engine).get_columns(table_name)}
         assert "value_number" in columns

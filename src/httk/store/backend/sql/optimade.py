@@ -21,10 +21,12 @@ child-of-storable fields.
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import sqlalchemy
 from httk.core import EntryTypeDefinition
 from httk.core.optimade import FilterAst
 
 from httk.store.backend.schema import resolve_schema
+from httk.store.backend.sql.mapping import SID_COLUMN
 from httk.store.backend.sql.searcher import SqlColumn, SqlExpression, SqlSearcher, SqlVariable
 from httk.store.backend.sql.store import SqlStore
 from httk.store.query import Searcher, SearchExpression, SearchVariable
@@ -42,46 +44,27 @@ __all__ = [
 ]
 
 
-def _related_sid(related_type: str, value: Any) -> int:
-    """Parse a default-minted ``"<related_type>-<sid>"`` id back to its sid.
-
-    Any value not of that exact form (a foreign id format, a different entry
-    type, a non-string) parses to ``-1``, a sentinel sid that never exists —
-    such ids simply match nothing, they are not an error.
-    """
-    if isinstance(value, str) and value.startswith(related_type + "-"):
-        tail = value[len(related_type) + 1 :]
-        if tail.isdigit():
-            return int(tail)
-    return -1
-
-
-def _related_id_has_handlers(related_type: str, field: str) -> Mapping[str, Callable[..., Any]]:
+def _related_id_has_handlers(store: SqlStore, related_cls: type, field: str) -> Mapping[str, Callable[..., Any]]:
     """The ``'<related_type>.id'`` HAS handler over a reference or child-of-storable field."""
 
     def has_handler(
         entry: str, ops: Any, values: Any, search_variable: SearchVariable, has_type: str
     ) -> SearchExpression:
-        # A SqlVariable satisfies the set-handler contract here: both its
-        # reference fields (via SqlReference's set operations over the foreign
-        # key) and its child-of-storable fields (a SqlColumn over the child
-        # element column) accept sid values.
-        sids = [_related_sid(related_type, value) for value in values]
+        table = store._table(resolve_schema(related_cls).table_name)
+        sids = (sqlalchemy.select(table.c[SID_COLUMN]).where(table.c["id"].in_(values)),)
         return set_handler(field, ops, sids, has_type, search_variable)
 
     return {'HAS': has_handler}
 
 
-def _own_id_handlers(related_type: str) -> Mapping[str, Callable[..., Any]]:
+def _own_id_handlers() -> Mapping[str, Callable[..., Any]]:
     """Handlers serving the related class's own ``id`` property in a nested sub-search."""
 
     def comparison(entry: str, op: str, value: Any, search_variable: SqlVariable) -> SqlExpression:
         if op not in ('=', '!='):
             raise FilterTranslationError("Ordering comparisons on relationship ids not implemented.", "not-implemented")
-        sid_column = search_variable.sid
-        assert isinstance(sid_column, SqlColumn)
-        sid = _related_sid(related_type, value)
-        return sid_column == sid if op == '=' else sid_column != sid
+        column = SqlColumn(search_variable._searcher, search_variable._alias.c["id"])
+        return column == value if op == "=" else column != value
 
     return {'comparison': comparison, 'unknown': known_unknown_handler}
 
@@ -159,7 +142,8 @@ def optimade_filter_searcher(
     served = served_specs(schema, prefix)
     property_fulltypes = {"id": "string", "type": "string"}
     property_fulltypes.update({name: fulltype for name, _spec, fulltype in served})
-    property_keys = {name: spec.field for name, spec, _fulltype in served}
+    property_keys = {"id": "id"}
+    property_keys.update({name: spec.field for name, spec, _fulltype in served})
     if store.store_timestamps:
         property_fulltypes[f"{prefix}store_timestamp"] = "integer"
         property_keys[f"{prefix}store_timestamp"] = "store_timestamp"
@@ -175,10 +159,8 @@ def optimade_filter_searcher(
             property_fulltypes[name] = definition_fulltype(prop)
 
     handlers = simple_property_handlers(cls.__name__, property_keys, property_fulltypes)
-    # The default id/type handlers of simple_property_handlers query the
-    # serving-layer '__id' column and constant entry-type name; neither exists
-    # on an ordinary store row, so filtering needs explicit extra_handlers.
-    del handlers["id"]
+    # The default type handler is a serving-layer constant, but the stored id
+    # is a real physical column and remains queryable.
     del handlers["type"]
     entry_type = cls.__name__
 
@@ -196,7 +178,7 @@ def optimade_filter_searcher(
                     f"{'no' if not matching else str(len(matching))} reference or child-of-storable "
                     f"field{'' if len(matching) == 1 else 's'} of {cls.__name__}; exactly one is required"
                 )
-            handlers[f"{related_type}.id"] = _related_id_has_handlers(related_type, matching[0].field)
+            handlers[f"{related_type}.id"] = _related_id_has_handlers(store, related_cls, matching[0].field)
         relationship_targets = tuple(related)
 
         def resolve_related(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:
@@ -205,14 +187,22 @@ def optimade_filter_searcher(
                 related[related_type],
                 sub_ast,
                 prefix=prefix,
-                extra_handlers={"id": _own_id_handlers(related_type)},
+                extra_handlers={"id": _own_id_handlers()},
             )
             assert isinstance(nested, SqlSearcher)
             sid_column = nested._variables[0].sid
             assert isinstance(sid_column, SqlColumn)
             nested._outputs.clear()
             nested.output(sid_column, "sid")
-            return tuple(f"{related_type}-{int(values[0])}" for values, _names in nested)
+            related_table = store._table(resolve_schema(related[related_type]).table_name)
+            values = tuple(int(item[0]) for item, _names in nested)
+            with store._read_connection() as connection:
+                return tuple(
+                    str(value[0])
+                    for value in connection.execute(
+                        sqlalchemy.select(related_table.c["id"]).where(related_table.c[SID_COLUMN].in_(values))
+                    )
+                )
 
         resolver = resolve_related
 

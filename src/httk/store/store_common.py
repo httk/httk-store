@@ -1,11 +1,12 @@
 """Backend-neutral save-path machinery shared by storage backends."""
 
+import dataclasses
 import functools
+import re
 import types
 import typing
 import weakref
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Annotated, Any, Protocol, TypeVar, runtime_checkable
 
 from httk.core.storage import IdentitySkip, project_storage_record
@@ -16,6 +17,8 @@ from httk.store.storage_layout import EntryFamilyLayout
 
 __all__ = [
     "EntryDispatchIntegrityError",
+    "EntryIdConflictError",
+    "EntryIdScheme",
     "EntryMetadataConflictError",
     "EntryReplacementError",
     "EntryStore",
@@ -23,6 +26,52 @@ __all__ = [
     "SaveProjection",
     "reject_cursor_proxy",
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class EntryIdScheme:
+    """Configuration used to mint human-readable entry identifiers.
+
+    :param base: Dot-separated database namespace.
+    :param series: Campaign-series token.
+    :param type_in_base: Whether the served entry type is appended to ``base``.
+    """
+
+    base: str
+    series: str
+    type_in_base: bool = False
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*", self.base) is None:
+            raise ValueError("EntryIdScheme.base must be dot-separated alphanumeric/underscore tokens")
+        if re.fullmatch(r"[A-Za-z0-9_]+", self.series) is None:
+            raise ValueError("EntryIdScheme.series must be an alphanumeric/underscore token")
+
+
+class EntryIdConflictError(ValueError):
+    """An entry id is already owned by a different logical lineage.
+
+    :param table_name: The table containing the conflicting identifier.
+    :param entry_id: The conflicting entry identifier.
+    :param existing_logical_id: The lineage already owning the identifier.
+    :param requested_logical_id: The lineage requesting it, when known.
+    """
+
+    def __init__(
+        self,
+        table_name: str,
+        entry_id: str,
+        existing_logical_id: int | None,
+        requested_logical_id: int | None,
+    ) -> None:
+        self.table_name = table_name
+        self.entry_id = entry_id
+        self.existing_logical_id = existing_logical_id
+        self.requested_logical_id = requested_logical_id
+        super().__init__(
+            f"entry id {entry_id!r} in table {table_name!r} belongs to logical_id "
+            f"{existing_logical_id!r}, not {requested_logical_id!r}"
+        )
 
 
 _StoredRecord = TypeVar("_StoredRecord")
@@ -133,7 +182,7 @@ class SaveProjection:
         return _trusted_content_id(source, as_record=record_type, projector=self.projector)
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class _MetadataPlan:
     skipped_specs: tuple[FieldSpec, ...]
     skipped_nested: tuple[FieldSpec, ...]

@@ -99,6 +99,7 @@ from types import TracebackType
 from typing import Any, Literal, Self, cast
 
 import sqlalchemy
+from httk.core.entry_ids import check_entry_id, check_immutable_id, format_entry_id, format_immutable_id
 from httk.core.storage import (
     StorageProjectionCycleError,
     content_id,
@@ -129,6 +130,7 @@ from httk.store.backend.sql.store import (
 )
 from httk.store.store_common import (
     EntryDispatchIntegrityError,
+    EntryIdConflictError,
     EntryMetadataConflictError,
     SaveProjection,
     _metadata_plan,
@@ -222,6 +224,7 @@ class BulkIngest:
         workers: int = 1,
         finalize: Literal["auto", "parity", "deferred"] = "auto",
         track_sids: bool = True,
+        id_series: str | None = None,
     ) -> None:
         if chunk_size < 1:
             raise ValueError("chunk_size must be a positive integer")
@@ -245,9 +248,11 @@ class BulkIngest:
         self._parallel = workers > 1
         self._requested_finalize = finalize
         self._track_sids = track_sids
+        self._id_series = id_series
         self._finalize_profile = "parity"
         self._store_timestamp: int | None = None
         self._deferred = False
+        self._entry_ids_seen: dict[tuple[str, str, str], tuple[str, int]] = {}
         # Parallel-mode state (unused on the serial path).
         self._controller: Any = None
         self._serial_stage: Any = None
@@ -1232,6 +1237,7 @@ class BulkIngest:
 
         sid = self._next_sid[table_name]
         self._next_sid[table_name] = sid + 1
+        self._mint_bulk_entry_ids(record_type, schema, values, sid)
         row = {SID_COLUMN: sid, ROLE_COLUMN: 0, LOGICAL_ID_COLUMN: sid, **values}
         if projection.store_timestamp is not None:
             row[STORE_TIMESTAMP_COLUMN] = projection.store_timestamp
@@ -1268,6 +1274,47 @@ class BulkIngest:
                 row[ROLE_COLUMN] = 1
                 return True
         return False
+
+    def _mint_bulk_entry_ids(self, record_type: type, schema: TableSchema, values: dict[str, Any], sid: int) -> None:
+        """Mint ids for the serial parity encoder, whose sid is already final."""
+        if record_type not in self._store._entry_record_types:
+            return
+        entry_id = values.get("id")
+        immutable_id = values.get("immutable_id")
+        if entry_id is None:
+            scheme = self._store._entry_ids
+            if scheme is None:
+                raise ValueError(
+                    f"{record_type.__name__} has no id and SqlStore(entry_ids=EntryIdScheme(...)) was not declared; "
+                    "pass an explicit id or declare a scheme"
+                )
+            base = scheme.base
+            if scheme.type_in_base:
+                base = f"{base}.{self._store._entry_record_types[record_type][0]}"
+            entry_id = format_entry_id(
+                base, self._id_series or scheme.series, self._store._entry_id_number(record_type, sid)
+            )
+            values["id"] = entry_id
+        else:
+            check_entry_id(entry_id)
+        if immutable_id is None:
+            immutable_id = format_immutable_id(str(entry_id), 1)
+            values["immutable_id"] = immutable_id
+        else:
+            check_immutable_id(immutable_id)
+        scope = self._entry_id_scope(record_type, schema.table_name)
+        for field, value in (("id", str(entry_id)), ("immutable_id", str(immutable_id))):
+            key = (scope, field, value)
+            existing = self._entry_ids_seen.get(key)
+            owner = (schema.table_name, sid)
+            if existing is not None and existing != owner:
+                raise EntryIdConflictError(schema.table_name, value, existing[1], sid)
+            self._entry_ids_seen[key] = owner
+
+    def _entry_id_scope(self, record_type: type, table_name: str) -> str:
+        """Return the family-wide namespace used for staged entry-id checks."""
+        family = self._store._family_for_backing(record_type)
+        return table_name if family is None else family.name
 
     def _promote_occurrence(
         self,
@@ -1423,6 +1470,7 @@ class BulkIngest:
             # that save() would never have created; sweep those unreachable rows.
             self._collect_garbage(fk_columns)
         self._refresh_value_index()
+        self._verify_entry_id_conflicts()
         for name in self._logical_graph().dependency_order(store._metadata.tables):
             table = store._metadata.tables[name]
             name = table.name
@@ -1434,6 +1482,28 @@ class BulkIngest:
             self._inserted_count[name] = self._inserted_count.get(name, 0) + len(rows)
             self._rows_flushed_total += len(rows)
             rows.clear()
+
+    def _verify_entry_id_conflicts(self) -> None:
+        """Reject buffered explicit or minted ids already owned by any family backing."""
+        assert self._connection is not None
+        for table_name, rows in self._rows.items():
+            if not rows:
+                continue
+            schema = self._parent_schema.get(table_name)
+            if schema is None or schema.cls not in self._store._entry_record_types:
+                continue
+            for field in ("id", "immutable_id"):
+                values = {str(row[field]) for row in rows if row.get(field) is not None}
+                if not values:
+                    continue
+                for sibling in self._store._entry_family_tables(schema.cls):
+                    existing = self._connection.execute(
+                        sqlalchemy.select(sibling.c[LOGICAL_ID_COLUMN], sibling.c[SID_COLUMN], sibling.c[field])
+                        .where(sibling.c[field].in_(values))
+                        .limit(1)
+                    ).one_or_none()
+                    if existing is not None:
+                        raise EntryIdConflictError(sibling.name, str(existing[2]), int(existing[0]), int(existing[1]))
 
     def _finalize(self) -> None:
         if self._parallel:
@@ -2543,6 +2613,8 @@ class BulkIngest:
             if spec.field in skipped:
                 incoming_value = incoming[spec.field]
                 stored_value = stored[spec.field]
+                if spec.field in {"id", "immutable_id"} and incoming_value is None:
+                    continue
                 if not _metadata_scalar_equal(incoming_value, stored_value):
                     raise EntryMetadataConflictError(
                         f"metadata conflict for {field_path}: stored {stored_value!r}, received {incoming_value!r}"

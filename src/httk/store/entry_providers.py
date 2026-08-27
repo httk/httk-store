@@ -242,9 +242,11 @@ def _runs_definition() -> EntryTypeDefinition:
     base = load_entry_type_definition(RUNS_DEFINITION_ID)
     properties = {name: base.properties[name] for name in ("id", "type", "immutable_id", "last_modified")}
     workflow = base.properties["workflow_declaration_uri"]
+    source = base.properties["source_id"]
     properties["_httk_workflow_declaration_uri"] = PropertyDefinition.from_optimade(
         "_httk_workflow_declaration_uri", workflow.as_optimade()
     )
+    properties["_httk_source_id"] = PropertyDefinition.from_optimade("_httk_source_id", source.as_optimade())
     return _entry_definition("_httk_runs", RUNS_DEFINITION_ID, properties)
 
 
@@ -287,6 +289,7 @@ class RunEntryProvider(EntryProvider):
             "immutable_id": "immutable_id",
             "last_modified": "last_modified",
             "_httk_workflow_declaration_uri": "workflow_declaration_uri",
+            "_httk_source_id": "source_id",
         }
 
     def records(self, entry_type: str) -> Iterable[Mapping[str, Any]]:
@@ -304,6 +307,7 @@ class RunEntryProvider(EntryProvider):
                 "immutable_id": run.immutable_id,
                 "last_modified": _json_value(run.last_modified),
                 "workflow_declaration_uri": run.workflow_declaration_uri,
+                "source_id": run.source_id,
             }
 
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:

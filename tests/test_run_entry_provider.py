@@ -42,7 +42,7 @@ def _run() -> Run:
         inputs=(RunEdge("in-1", "_httk_records", "record-1"), RunEdge("in-2", "structures", "structure-1")),
         artifacts=(RunEdge("artifact", "files", "file-1"),),
         outputs=(RunEdge("out", "_httk_records", "record-2"),),
-        immutable_id="run-immutable",
+        source_id="ws:job",
         last_modified=datetime.datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -55,6 +55,7 @@ def test_run_provider_serves_rows_and_relationships() -> None:
         "id",
         "type",
         "immutable_id",
+        "_httk_source_id",
         "last_modified",
         "_httk_workflow_declaration_uri",
     }
@@ -64,6 +65,10 @@ def test_run_provider_serves_rows_and_relationships() -> None:
     assert json.dumps(rows)
     assert rows[0]["__id"] == "run-key"
     assert rows[0]["workflow_declaration_uri"] is None
+    assert rows[0]["source_id"] == "ws:job"
+    assert definition.properties["_httk_source_id"].nullable
+    assert definition.properties["_httk_source_id"].requirements["query-support"] == "all mandatory"
+    assert definition.properties["_httk_source_id"].requirements["sortable"] is True
     assert provider.relationships("_httk_runs")["run-key"] == (
         RelatedEntry("_httk_records", "record-1", role="input", label="in-1"),
         RelatedEntry("structures", "structure-1", role="input", label="in-2"),
@@ -171,14 +176,16 @@ def test_sql_store_round_trips_provenance_records_and_stored_number() -> None:
         run = _run()
         store.save(run)
         fetched = store.fetch_entry(RunEntry, content_id(run))
-        assert fetched == replace(run, id="httk.test-1-1")
-        assert fetched.immutable_id == run.immutable_id and fetched.last_modified == run.last_modified
+        assert fetched == replace(run, id="httk.test-1-1", immutable_id="httk.test-1-1~1")
+        assert fetched.immutable_id == "httk.test-1-1~1" and fetched.last_modified == run.last_modified
+        assert fetched.source_id == "ws:job"
         assert fetched.inputs == run.inputs
 
         conflicting = Run(
             inputs=run.inputs,
             artifacts=run.artifacts,
             outputs=run.outputs,
+            source_id=run.source_id,
             immutable_id="different",
             last_modified=run.last_modified,
         )
@@ -215,13 +222,13 @@ def test_run_provider_serves_through_optimade() -> None:
     definition = _definition("_httk_energy", ENERGY_ID)
     record = DataRecord.from_value(ENERGY_ID, "_httk_energy", 3.5)
     product = DataRecord.from_value(FORCE_ID, "_httk_force", 2.0)
-    run = Run(inputs=(RunEdge("labeled-input", "_httk_records", "record-1"),))
+    run = Run(source_id="ws:job", inputs=(RunEdge("labeled-input", "_httk_records", "record-1"),))
     product_links = product_relationships(
         [ProductLink("_httk_records", "record-1", "_httk_records", "record-2", "derived")]
     )
     adapter = adapter_from_providers(
         [
-            RunEntryProvider({"run-1": run}),
+            RunEntryProvider({"run-1": run, "run-2": Run(source_id="other-job")}),
             DataRecordEntryProvider(
                 {"record-1": record, "record-2": product},
                 definitions={"_httk_energy": definition, "_httk_force": _definition("_httk_force", FORCE_ID)},
@@ -231,8 +238,12 @@ def test_run_provider_serves_through_optimade() -> None:
     )
     with TestClient(create_asgi_app(adapter, baseurl="http://testserver/")) as client:
         run_response = client.get("/_httk_runs")
+        filtered_run_response = client.get("/_httk_runs", params={"filter": '_httk_source_id = "ws:job"'})
         records_response = client.get("/_httk_records")
     assert run_response.status_code == records_response.status_code == 200
+    assert filtered_run_response.status_code == 200
+    assert [item["id"] for item in filtered_run_response.json()["data"]] == ["run-1"]
+    assert filtered_run_response.json()["data"][0]["attributes"]["_httk_source_id"] == "ws:job"
     run_relation = run_response.json()["data"][0]["relationships"]["_httk_records"]["data"][0]
     assert run_relation["meta"]["_httk_label"] == "labeled-input"
     record = next(item for item in records_response.json()["data"] if item["id"] == "record-1")

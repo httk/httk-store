@@ -247,6 +247,13 @@ Old, unversioned, or incompatible layouts raise
 `StorageLayoutUpgradeRequiredError`; this redesign does not migrate old stores,
 so rebuild them explicitly — with one exception below.
 
+`Run.source_id` is served as `_httk_source_id` on `_httk_runs`. It is a nullable,
+queryable, sortable string containing the identifier assigned by the system that
+executed the run (for example, an httk-workflow `<workspace_id>:<job_id>`), and
+it participates in the run's content identity. Adding it therefore changes the
+`core_run` schema fingerprint and requires rebuilding existing stores; it is not
+an additive `upgrade=True` change.
+
 #### Applying a purely additive change with `upgrade=True`
 
 When the *only* difference is additive, the reopen is applied instead of

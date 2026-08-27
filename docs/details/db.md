@@ -354,8 +354,13 @@ one-to-one with a `logical_id` lineage and is consequently shared by every
 replacement; `immutable_id` is one-to-one with a stored row. Configure minting
 with `SqlStore(..., entry_ids=EntryIdScheme("httk.mydb", "1"))`, or pass
 `id_series=` to `save`, `replace`, or `bulk_ingest` to select a campaign
-series for that call. The recommended form is
+series for that call. `MongoStore` has the same `EntryIdScheme` and per-call
+kwargs (it has no bulk ingest); it indexes `f.id` and creates a unique partial
+index for nullable `f.immutable_id`. The recommended form is
 `httk.mydb-1-42` for an entry id and `httk.mydb-1-42~3` for its third revision.
+Mongo stored-property serving uses these same human ids as SQL: ordinary pages
+serve the latest row of each lineage, while revisions pages serve immutable ids
+and expose the lineage id as `_httk_id`.
 `EntryIdScheme(type_in_base=True)` appends the served entry type to the base.
 For multi-backing families, the number is `logical_id * backing_count + backing_index`, which keeps ids unique across
 the family's backing tables.

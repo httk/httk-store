@@ -183,7 +183,13 @@ def test_mongo_timestamp_nondivisor_future_limit(mongo_test_database):
 
 
 def test_mongo_carried_federation_timestamp_skips_lookup(mongo_test_database, monkeypatch):
-    store = MongoStore(mongo_test_database, entry_records={FederatedCalculation: FederationFirst})
+    from httk.store import EntryIdScheme
+
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={FederatedCalculation: FederationFirst},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
     store._clock = lambda: 1_000_000
     record = FederationFirst("carried", None)
     sid = store.save(record)

@@ -5,7 +5,6 @@ from fractions import Fraction
 
 import pytest
 from httk.core import FracScalar
-from httk.core.storage import content_id
 from test_db_stored_properties import (
     FIRST,
     SECOND,
@@ -14,6 +13,7 @@ from test_db_stored_properties import (
     GenericCalculationSecond,
 )
 
+from httk.store import EntryIdScheme
 from httk.store.backend.mongo import MongoStore
 from httk.store.backend.mongo.evaluator import canonical_predicate, evaluate
 from httk.store.backend.mongo.stored_properties import (
@@ -21,6 +21,7 @@ from httk.store.backend.mongo.stored_properties import (
     _MongoQueryContext,
     _response_json_value,
 )
+from httk.store.backend.sql import Backend, SqlStore, stored_property_sql_plan
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ def plan(mongo_test_database):
     store = MongoStore(
         mongo_test_database,
         entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     store.save(FIRST)
     store.save(SECOND)
@@ -60,23 +62,47 @@ def _records(searchers):
 @pytest.mark.parametrize(
     ("filter_string", "expected"),
     (
-        ('immutable_id = "one-third"', {"first"}),
-        ('immutable_id = "composition"', {"first"}),
-        ('immutable_id = "null-comment"', {"first"}),
-        ('immutable_id = "nested"', {"first"}),
-        ('immutable_id = "when-known"', {"second"}),
-        ('immutable_id = "score-gt"', {"second"}),
+        ('_httk_selector = "one-third"', {"first"}),
+        ('_httk_selector = "composition"', {"first"}),
+        ('_httk_selector = "null-comment"', {"first"}),
+        ('_httk_selector = "nested"', {"first"}),
+        ('_httk_selector = "when-known"', {"second"}),
+        ('_httk_selector = "score-gt"', {"second"}),
         ("last_modified IS UNKNOWN", {"first"}),
         ("last_modified IS KNOWN", {"second"}),
         ('last_modified = "2026-08-02T08:30:00Z"', {"second"}),
     ),
 )
 def test_mongo_plan_matches_the_sql_stored_property_scenarios(plan, filter_string, expected):
-    assert {record.label for record in _records(plan.filter_searchers(filter_string))} == expected
+    """Mongo filters and rendered rows equal the SQL reference plan."""
+    plan.store._clear_identity_caches()
+    mongo_records = _records(plan.filter_searchers(filter_string))
+    assert {record.label for record in mongo_records} == expected
+
+    with Backend.sqlite() as database:
+        store = SqlStore(
+            database,
+            entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
+        store.save(FIRST)
+        store.save(SECOND)
+        store._clear_identity_caches()
+        sql_plan = stored_property_sql_plan(store, CalculationEntry)
+        sql_records = _records(sql_plan.filter_searchers(filter_string))
+        assert {record.label for record in sql_records} == expected
+
+        mongo_rows = sorted(
+            (plan.response_row(type(record), record) for record in mongo_records), key=lambda row: row["id"]
+        )
+        sql_rows = sorted(
+            (row for row in sql_plan.records() if row["_httk_selector"] in expected), key=lambda row: row["id"]
+        )
+        assert mongo_rows == sql_rows
 
 
 def test_candidate_streams_are_id_only_and_verified(plan):
-    streams = plan.candidate_searchers('immutable_id = "composition"', sort=(("immutable_id", False),))
+    streams = plan.candidate_searchers('_httk_selector = "composition"', sort=(("immutable_id", False),))
     assert len(streams) == 2
     rows = [row for stream in streams for row in stream.searcher]
     assert [row[0][0] for row in rows]
@@ -86,19 +112,19 @@ def test_candidate_streams_are_id_only_and_verified(plan):
 
 def test_public_id_prefix_filters_sorts_and_candidate_streams(plan):
     prefix = "mongo:"
-    first_id = prefix + content_id(FIRST)
+    first_id = prefix + next(row["id"] for row in plan.records() if row["_httk_selector"] == "first")
     assert [
         record.label for record in _records(plan.filter_searchers(f'id = "{first_id}"', public_id_prefix=prefix))
     ] == ["first"]
-    assert not _records(plan.filter_searchers(f'id = "other:{content_id(FIRST)}"', public_id_prefix=prefix))
+    assert not _records(plan.filter_searchers(f'id = "other:{first_id}"', public_id_prefix=prefix))
 
     additional = replace(FIRST, label="another-first")
     plan.store.save(additional)
     streams = plan.candidate_searchers(sort=(("id", False),), public_id_prefix=prefix)
     first_stream = next(stream for stream in streams if stream.backing is GenericCalculationFirst)
     rows = [result[0] for result in first_stream.searcher]
-    assert {row[1] for row in rows} == {content_id(FIRST), content_id(additional)}
-    assert [row[2] for row in rows] == sorted(prefix + row[1] for row in rows)
+    assert all(row[1].startswith("httk.test-1-") for row in rows)
+    assert [row[3] for row in rows] == sorted(prefix + row[1] for row in rows)
 
 
 def test_evaluator_preserves_unknown_and_canonical_exact_constants():
@@ -165,12 +191,12 @@ def test_optional_child_presence_and_response_serialization(plan):
         _response_json_value({1: "not-public-json"})
 
     backing = plan._backings[0]
-    projection = backing.projections["immutable_id"]
+    projection = backing.projections["_httk_selector"]
     exact_sort = replace(projection, sort=lambda context: context.field("energy"))
-    incompatible = replace(backing, projections={**backing.projections, "immutable_id": exact_sort})
+    incompatible = replace(backing, projections={**backing.projections, "_httk_selector": exact_sort})
     variable = plan.store.searcher().variable(backing.backing)
     with pytest.raises(MongoStoredPropertyConfigurationError, match="canonical text channel"):
-        plan._sort_field(incompatible, variable, "immutable_id", "")
+        plan._sort_field(incompatible, variable, "_httk_selector", "")
 
     assert [
         record.label for record in _records(plan.filter_searchers('type = "calculations"', sort=(("type", False),)))
@@ -181,5 +207,5 @@ def test_optional_child_presence_and_response_serialization(plan):
     streams = plan.candidate_searchers(sort=(("type", True), ("immutable_id", False)))
     assert all(stream.sort_count == 2 for stream in streams)
     assert all(
-        result[0][2] == "calculations" and len(result[0]) == 4 for stream in streams for result in stream.searcher
+        result[0][3] == "calculations" and len(result[0]) == 6 for stream in streams for result in stream.searcher
     )

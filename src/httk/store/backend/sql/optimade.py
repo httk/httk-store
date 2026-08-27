@@ -105,13 +105,11 @@ def optimade_filter_searcher(
     child-of-storable (``list[Target]``) field of ``cls`` (anything else
     raises :class:`ValueError`). For each such ``(rtype, rcls)``:
 
-    - ``<rtype>.id HAS "<rtype>-<sid>"`` filters over the field's foreign-key
-      (or child-element) column against default-minted
-      ``"<entry type>-<sid>"`` ids, as
-      :class:`~httk.store.backend.sql.entry_provider.StoreEntryProvider` mints them;
-      ids of any other format match nothing. Custom ``id_of`` minting is out
-      of scope here — with a custom minting scheme, supply your own
-      ``'<rtype>.id'`` entry via ``extra_handlers``.
+    - ``<rtype>.id HAS "<stored id>"`` resolves the supplied stored public id
+      through a correlated subquery over the related table's physical ``id``
+      column, then compares its sid to the reference (or child-element)
+      column.  The same stored-id rule is used by
+      :class:`~httk.store.backend.sql.entry_provider.StoreEntryProvider`.
     - Depth-1 related-property filters (``<rtype>._httk_doi CONTAINS "10.1"``,
       ``<rtype>.id != "..."``, ``<rtype>._httk_year IS KNOWN``, ...) resolve by
       a two-phase semi-join: a nested ``optimade_filter_searcher`` over

@@ -12,6 +12,7 @@ from typing import Any
 from httk.core import EntryTypeDefinition
 from httk.core.optimade import FilterAst
 
+from httk.store.backend.mongo.mapping import collection_name_for
 from httk.store.backend.mongo.searcher import MongoExpression, MongoField, MongoReference, MongoSearcher, MongoVariable
 from httk.store.backend.mongo.store import MongoStore
 from httk.store.backend.schema import resolve_schema
@@ -27,22 +28,31 @@ from httk.store.served_specs import definition_fulltype, served_specs
 __all__ = ["optimade_filter_searcher"]
 
 
-def _related_sid(related_type: str, value: Any) -> int:
-    """Parse a default-minted ``'<related_type>-<sid>'`` id into its SID."""
-    if isinstance(value, str) and value.startswith(related_type + "-"):
-        tail = value[len(related_type) + 1 :]
-        if tail.isdigit():
-            return int(tail)
-    return -1
+def _related_sids(store: MongoStore, related_cls: type, values: Any) -> tuple[int, ...]:
+    """Resolve served ids to the related collection's physical SIDs."""
+    requested = tuple(values)
+    if not requested:
+        return ()
+    strings = tuple(value for value in requested if isinstance(value, str))
+    if not strings:
+        return tuple(-1 for _value in requested)
+    collection = store._database.database[collection_name_for(resolve_schema(related_cls))]
+    resolved = {
+        str(document["f"]["id"]): int(document["_id"])
+        for document in collection.find({"f.id": {"$in": strings}}, {"_id": 1, "f.id": 1}, **store._session_kwargs())
+    }
+    return tuple(resolved.get(value, -1) if isinstance(value, str) else -1 for value in requested)
 
 
-def _related_id_has_handlers(related_type: str, field: str, role: str) -> Mapping[str, Callable[..., Any]]:
+def _related_id_has_handlers(
+    store: MongoStore, related_cls: type, field: str, role: str
+) -> Mapping[str, Callable[..., Any]]:
     """Build the ``'<related_type>.id'`` handler over a reference or child SID field."""
 
     def has_handler(
         entry: str, ops: Any, values: Any, search_variable: MongoVariable, has_type: str
     ) -> MongoExpression:
-        sids = tuple(_related_sid(related_type, value) for value in values)
+        sids = _related_sids(store, related_cls, values)
         relation = getattr(search_variable, field)
         query_field = relation._field if isinstance(relation, MongoReference) else relation
         if not isinstance(query_field, MongoField):
@@ -85,15 +95,14 @@ def _related_id_has_handlers(related_type: str, field: str, role: str) -> Mappin
     return {"HAS": has_handler}
 
 
-def _own_id_handlers(related_type: str) -> Mapping[str, Callable[..., Any]]:
+def _own_id_handlers() -> Mapping[str, Callable[..., Any]]:
     """Build handlers for a related class's own ``id`` in a nested search."""
 
     def comparison(entry: str, op: str, value: Any, search_variable: MongoVariable) -> MongoExpression:
         if op not in ("=", "!="):
             raise FilterTranslationError("Ordering comparisons on relationship ids not implemented.", "not-implemented")
-        sid = _related_sid(related_type, value)
-        field = search_variable.sid
-        return field == sid if op == "=" else field != sid
+        field = search_variable.id
+        return field == value if op == "=" else field != value
 
     return {"comparison": comparison, "unknown": known_unknown_handler}
 
@@ -125,14 +134,14 @@ def optimade_filter_searcher(
     served = served_specs(schema, prefix)
     property_fulltypes = {"id": "string", "type": "string"}
     property_fulltypes.update({name: fulltype for name, _spec, fulltype in served})
-    property_keys = {name: spec.field for name, spec, _fulltype in served}
+    property_keys = {"id": "id"}
+    property_keys.update({name: spec.field for name, spec, _fulltype in served})
     if definition is not None:
         for name, prop in definition.properties.items():
             if name not in ("id", "type"):
                 property_fulltypes[name] = definition_fulltype(prop)
 
     handlers = simple_property_handlers(cls.__name__, property_keys, property_fulltypes)
-    del handlers["id"]
     del handlers["type"]
     entry_type = cls.__name__
 
@@ -150,7 +159,9 @@ def optimade_filter_searcher(
                     f"{'no' if not matching else str(len(matching))} reference or child-of-storable "
                     f"field{'' if len(matching) == 1 else 's'} of {cls.__name__}; exactly one is required"
                 )
-            handlers[f"{related_type}.id"] = _related_id_has_handlers(related_type, matching[0].field, matching[0].role)
+            handlers[f"{related_type}.id"] = _related_id_has_handlers(
+                store, related_cls, matching[0].field, matching[0].role
+            )
         relationship_targets = tuple(related)
 
         def resolve_related(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:
@@ -159,11 +170,18 @@ def optimade_filter_searcher(
                 related[related_type],
                 sub_ast,
                 prefix=prefix,
-                extra_handlers={"id": _own_id_handlers(related_type)},
+                extra_handlers={"id": _own_id_handlers()},
             )
             assert isinstance(nested, MongoSearcher)
             result = nested.results(sid=nested._root_sid_field())
-            return tuple(f"{related_type}-{int(sid)}" for sid in result.scalars("sid"))
+            sids = tuple(int(sid) for sid in result.scalars("sid"))
+            if not sids:
+                return ()
+            collection = store._database.database[collection_name_for(resolve_schema(related[related_type]))]
+            return tuple(
+                str(document["f"]["id"])
+                for document in collection.find({"_id": {"$in": sids}}, {"f.id": 1}, **store._session_kwargs())
+            )
 
         resolver = resolve_related
 

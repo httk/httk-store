@@ -2,15 +2,25 @@
 
 import datetime
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Annotated, ClassVar
 
 import pytest
 from httk.core import EntryTypeDefinition, FracVector, RelatedEntry
 from httk.core.register import register_entry_family, register_entry_record
-from httk.core.storage import Related, RelationshipLink, Shape, StorageInfo, stored_property
+from httk.core.storage import (
+    IdentitySkip,
+    Indexed,
+    Related,
+    RelationshipLink,
+    Shape,
+    StorageInfo,
+    Unique,
+    stored_property,
+)
 
+from httk.store import EntryIdScheme
 from httk.store.backend.mongo import MongoStore, StoreEntryProvider
 from httk.store.validation import validate_record
 
@@ -21,6 +31,8 @@ class MongoWriter:
 
     name: str
     born: int
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -38,6 +50,8 @@ class MongoBook:
     keywords: list[str]
     coauthors: list[MongoWriter]
     author: MongoWriter | None = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
     @stored_property
     def nkeywords(self) -> int:
@@ -48,6 +62,8 @@ class MongoBook:
 class MongoPerson:
     __httk_storage__: ClassVar[StorageInfo] = StorageInfo(dedup="content_id")
     name: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -57,6 +73,8 @@ class MongoProject:
     lead: Annotated[MongoPerson | None, Related(role="lead", description="Project lead")] = None
     backup: Annotated[MongoPerson | None, Related(serve=False)] = None
     members: Annotated[list[MongoPerson] | None, Related(role="member")] = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -66,18 +84,35 @@ class MongoSimulation:
     )
     label: str
     compound: "MongoCompound | None" = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class MongoCompound:
     __httk_storage__: ClassVar[StorageInfo] = StorageInfo(dedup="content_id")
     formula: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class MongoCitation:
     __httk_storage__: ClassVar[StorageInfo] = StorageInfo(dedup="content_id")
     doi: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class MongoIdentityProbe:
+    """A non-deduplicated entry used to guard provider cache side effects."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(dedup="none")
+
+    label: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -193,6 +228,7 @@ def store(mongo_test_database):
             MongoCompounds: MongoCompound,
             MongoCitations: MongoCitation,
         },
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     for obj in (ADA, BOOLE, CARA, BOOK_1, BOOK_2):
         value.save(obj)
@@ -201,11 +237,15 @@ def store(mongo_test_database):
 
 @pytest.fixture()
 def provider(store):
-    return StoreEntryProvider(store, {"books": MongoBook, "writers": MongoWriter})
+    return StoreEntryProvider(store, {"books": MongoBook, "writers": MongoWriter}, id_of=_sid_id)
 
 
 def _rows(provider, entry_type):
     return list(provider.records(entry_type))
+
+
+def _sid_id(entry_type, sid, _obj):
+    return f"{entry_type}-{sid}"
 
 
 def test_entry_types_and_auto_definition(provider):
@@ -233,12 +273,24 @@ def test_entry_types_and_auto_definition(provider):
     assert properties["id"].nullable is False
 
 
+def test_auto_definition_matches_sql_for_the_same_record_class(store):
+    """Schema-derived provider definitions are backend-neutral."""
+    from httk.store.backend.sql import Backend, SqlStore
+    from httk.store.backend.sql import StoreEntryProvider as SqlStoreEntryProvider
+
+    mongo_provider = StoreEntryProvider(store, {"books": MongoBook}, id_of=_sid_id)
+    with Backend.sqlite() as database:
+        sql_provider = SqlStoreEntryProvider(SqlStore(database, entry_records={}), {"books": MongoBook}, id_of=_sid_id)
+        assert sql_provider.property_keys("books") == mongo_provider.property_keys("books")
+        assert sql_provider.entry_types()["books"].as_optimade() == mongo_provider.entry_types()["books"].as_optimade()
+
+
 def test_unregistered_prefix_and_definition_for_unserved_type(store):
     with pytest.raises(ValueError, match="_nope_"):
         StoreEntryProvider(store, {"books": MongoBook}, prefix="_nope_")
-    generated = dict(StoreEntryProvider(store, {"writers": MongoWriter}).entry_types())
+    generated = dict(StoreEntryProvider(store, {"writers": MongoWriter}, id_of=_sid_id).entry_types())
     with pytest.raises(ValueError, match="writers"):
-        StoreEntryProvider(store, {"books": MongoBook}, definitions=generated)
+        StoreEntryProvider(store, {"books": MongoBook}, definitions=generated, id_of=_sid_id)
 
 
 def test_unconfigured_backing_is_rejected(mongo_test_database):
@@ -248,7 +300,7 @@ def test_unconfigured_backing_is_rejected(mongo_test_database):
 
 
 def test_property_keys_unknown_and_records_are_jsonable(provider):
-    assert provider.property_keys("writers")["id"] == "id"
+    assert provider.property_keys("writers")["id"] == "__id"
     with pytest.raises(KeyError):
         provider.property_keys("nope")
     with pytest.raises(KeyError):
@@ -271,18 +323,36 @@ def test_property_keys_unknown_and_records_are_jsonable(provider):
     assert {row["_httk_custom_name"] for row in writers} == {"Ada", "Boole", "Cara"}
 
 
+def test_records_preserves_saved_identity_map_for_non_deduplicated_records(mongo_test_database):
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={MongoBooks: MongoBook},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    original = MongoIdentityProbe("before")
+    original_sid = store.save(original)
+    store.save(BOOK_1)
+    provider = StoreEntryProvider(store, {"books": MongoBook}, id_of=_sid_id)
+
+    list(provider.records("books"))
+
+    assert store.sid_of(original) == original_sid
+    replacement_sid = store.replace(original, MongoIdentityProbe("after"))
+    assert replacement_sid != original_sid
+
+
 def test_relationships_and_custom_ids(provider, store):
     related = provider.relationships("books")
-    book_id = next(row["id"] for row in _rows(provider, "books") if row["_httk_custom_title"] == "Analytical Engines")
+    book_id = next(row["__id"] for row in _rows(provider, "books") if row["_httk_custom_title"] == "Analytical Engines")
     assert related[book_id] == (
         RelatedEntry(
-            "writers", next(row["id"] for row in _rows(provider, "writers") if row["_httk_custom_name"] == "Ada")
+            "writers", next(row["__id"] for row in _rows(provider, "writers") if row["_httk_custom_name"] == "Ada")
         ),
         RelatedEntry(
-            "writers", next(row["id"] for row in _rows(provider, "writers") if row["_httk_custom_name"] == "Boole")
+            "writers", next(row["__id"] for row in _rows(provider, "writers") if row["_httk_custom_name"] == "Boole")
         ),
         RelatedEntry(
-            "writers", next(row["id"] for row in _rows(provider, "writers") if row["_httk_custom_name"] == "Cara")
+            "writers", next(row["__id"] for row in _rows(provider, "writers") if row["_httk_custom_name"] == "Cara")
         ),
     )
 
@@ -291,57 +361,65 @@ def test_relationships_and_custom_ids(provider, store):
         {"books": MongoBook, "writers": MongoWriter},
         id_of=lambda kind, _sid, obj: f"{kind}/{obj.title if kind == 'books' else obj.name}",
     )
-    assert {row["id"] for row in custom.records("books")} == {"books/Analytical Engines", "books/Silence"}
+    assert {row["__id"] for row in custom.records("books")} == {"books/Analytical Engines", "books/Silence"}
     assert custom.relationships("books")["books/Analytical Engines"][0] == RelatedEntry("writers", "writers/Ada")
 
 
 def test_relationship_metadata_and_suppression(mongo_test_database):
-    store = MongoStore(mongo_test_database, entry_records={MongoPeople: MongoPerson, MongoProjects: MongoProject})
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={MongoPeople: MongoPerson, MongoProjects: MongoProject},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
     people = (MongoPerson("Ada"), MongoPerson("Boole"), MongoPerson("Cara"))
     project = MongoProject("Engine", people[0], people[1], [people[1], people[2]])
     for obj in (*people, project):
         store.save(obj)
-    provider = StoreEntryProvider(store, {"people": MongoPerson, "projects": MongoProject})
+    provider = StoreEntryProvider(store, {"people": MongoPerson, "projects": MongoProject}, id_of=_sid_id)
     assert "_httk_backup" not in provider.entry_types()["projects"].properties
     source = next(iter(provider.relationships("projects")))
     assert provider.relationships("projects")[source] == (
         RelatedEntry(
             "people",
-            next(row["id"] for row in provider.records("people") if row["_httk_custom_name"] == "Ada"),
+            next(row["__id"] for row in provider.records("people") if row["_httk_custom_name"] == "Ada"),
             description="Project lead",
             role="lead",
         ),
         RelatedEntry(
             "people",
-            next(row["id"] for row in provider.records("people") if row["_httk_custom_name"] == "Boole"),
+            next(row["__id"] for row in provider.records("people") if row["_httk_custom_name"] == "Boole"),
             role="member",
         ),
         RelatedEntry(
             "people",
-            next(row["id"] for row in provider.records("people") if row["_httk_custom_name"] == "Cara"),
+            next(row["__id"] for row in provider.records("people") if row["_httk_custom_name"] == "Cara"),
             role="member",
         ),
     )
 
 
 def test_absent_optional_storable_child_is_an_empty_relationship_set(mongo_test_database):
-    store = MongoStore(mongo_test_database, entry_records={MongoPeople: MongoPerson, MongoProjects: MongoProject})
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={MongoPeople: MongoPerson, MongoProjects: MongoProject},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
     store.save(MongoProject("No members"))
-    provider = StoreEntryProvider(store, {"people": MongoPerson, "projects": MongoProject})
+    provider = StoreEntryProvider(store, {"people": MongoPerson, "projects": MongoProject}, id_of=_sid_id)
     assert provider.relationships("projects") == {}
 
 
 def test_definitions_validation_and_record_validation(provider, store):
     generated = dict(provider.entry_types())
     assert (
-        StoreEntryProvider(store, {"books": MongoBook, "writers": MongoWriter}, definitions=generated).entry_types()[
-            "books"
-        ]
+        StoreEntryProvider(
+            store, {"books": MongoBook, "writers": MongoWriter}, definitions=generated, id_of=_sid_id
+        ).entry_types()["books"]
         is generated["books"]
     )
     incomplete = EntryTypeDefinition("writers", "Writers.", {})
     with pytest.raises(ValueError):
-        StoreEntryProvider(store, {"writers": MongoWriter}, definitions={"writers": incomplete})
+        StoreEntryProvider(store, {"writers": MongoWriter}, definitions={"writers": incomplete}, id_of=_sid_id)
     for kind, definition in provider.entry_types().items():
         keys = provider.property_keys(kind)
         for row in provider.records(kind):
@@ -350,7 +428,9 @@ def test_definitions_validation_and_record_validation(provider, store):
 
 def test_link_relationships_and_order(mongo_test_database):
     store = MongoStore(
-        mongo_test_database, entry_records={MongoCompounds: MongoCompound, MongoCitations: MongoCitation}
+        mongo_test_database,
+        entry_records={MongoCompounds: MongoCompound, MongoCitations: MongoCitation},
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     c1, c2 = MongoCompound("NaCl"), MongoCompound("SiO2")
     z1, z2 = MongoCitation("10.1/a"), MongoCitation("10.1/b")
@@ -365,10 +445,13 @@ def test_link_relationships_and_order(mongo_test_database):
     ):
         store.save(obj)
     provider = StoreEntryProvider(
-        store, {"compounds": MongoCompound, "citations": MongoCitation}, link_classes=[MongoCompoundCitation]
+        store,
+        {"compounds": MongoCompound, "citations": MongoCitation},
+        link_classes=[MongoCompoundCitation],
+        id_of=_sid_id,
     )
-    citations = {row["_httk_custom_doi"]: row["id"] for row in provider.records("citations")}
-    compounds = {row["_httk_custom_formula"]: row["id"] for row in provider.records("compounds")}
+    citations = {row["_httk_custom_doi"]: row["__id"] for row in provider.records("citations")}
+    compounds = {row["_httk_custom_formula"]: row["__id"] for row in provider.records("compounds")}
     assert provider.relationships("compounds") == {
         compounds["NaCl"]: (
             RelatedEntry("citations", citations["10.1/a"], description="Cited by", role="citation"),
@@ -380,15 +463,17 @@ def test_link_relationships_and_order(mongo_test_database):
 
 def test_link_none_endpoint_is_inverse_and_forward_reference_is_direct(mongo_test_database):
     store = MongoStore(
-        mongo_test_database, entry_records={MongoCompounds: MongoCompound, MongoSimulations: MongoSimulation}
+        mongo_test_database,
+        entry_records={MongoCompounds: MongoCompound, MongoSimulations: MongoSimulation},
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     compound = MongoCompound("NaCl")
     store.save(compound)
     run = MongoSimulation("run-1", compound)
     store.save(run)
-    provider = StoreEntryProvider(store, {"compounds": MongoCompound, "simulations": MongoSimulation})
-    compound_id = next(row["id"] for row in provider.records("compounds"))
-    simulation_id = next(row["id"] for row in provider.records("simulations"))
+    provider = StoreEntryProvider(store, {"compounds": MongoCompound, "simulations": MongoSimulation}, id_of=_sid_id)
+    compound_id = next(row["__id"] for row in provider.records("compounds"))
+    simulation_id = next(row["__id"] for row in provider.records("simulations"))
     assert provider.relationships("compounds") == {
         compound_id: (RelatedEntry("simulations", simulation_id, role="output"),)
     }
@@ -397,7 +482,9 @@ def test_link_none_endpoint_is_inverse_and_forward_reference_is_direct(mongo_tes
 
 def test_link_deduplication_custom_ids_and_link_class_validation(mongo_test_database):
     store = MongoStore(
-        mongo_test_database, entry_records={MongoCompounds: MongoCompound, MongoCitations: MongoCitation}
+        mongo_test_database,
+        entry_records={MongoCompounds: MongoCompound, MongoCitations: MongoCitation},
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     compound, citation = MongoCompound("NaCl"), MongoCitation("10.1/a")
     for obj in (
@@ -409,12 +496,12 @@ def test_link_deduplication_custom_ids_and_link_class_validation(mongo_test_data
     ):
         store.save(obj)
     provider = StoreEntryProvider(
-        store, {"compounds": MongoCompound, "citations": MongoCitation}, link_classes=[MongoCompoundTag]
+        store, {"compounds": MongoCompound, "citations": MongoCitation}, link_classes=[MongoCompoundTag], id_of=_sid_id
     )
     assert provider.relationships("compounds") == {
-        next(row["id"] for row in provider.records("compounds")): (
-            RelatedEntry("citations", next(row["id"] for row in provider.records("citations")), role="primary"),
-            RelatedEntry("citations", next(row["id"] for row in provider.records("citations")), role="secondary"),
+        next(row["__id"] for row in provider.records("compounds")): (
+            RelatedEntry("citations", next(row["__id"] for row in provider.records("citations")), role="primary"),
+            RelatedEntry("citations", next(row["__id"] for row in provider.records("citations")), role="secondary"),
         )
     }
     custom = StoreEntryProvider(
@@ -427,14 +514,18 @@ def test_link_deduplication_custom_ids_and_link_class_validation(mongo_test_data
         "compounds/NaCl": (RelatedEntry("citations", "citations/10.1/a", description="Cited by", role="citation"),)
     }
     with pytest.raises(ValueError, match="MongoPerson.*no relationship links"):
-        StoreEntryProvider(store, {"compounds": MongoCompound}, link_classes=[MongoPerson])
+        StoreEntryProvider(store, {"compounds": MongoCompound}, link_classes=[MongoPerson], id_of=_sid_id)
 
 
 def test_link_validation_and_no_relationships_for_unserved_target(mongo_test_database):
-    store = MongoStore(mongo_test_database, entry_records={MongoCompounds: MongoCompound})
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={MongoCompounds: MongoCompound},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
     with pytest.raises(ValueError, match="MongoCitation.*not served"):
-        StoreEntryProvider(store, {"compounds": MongoCompound}, link_classes=[MongoCompoundCitation])
-    provider = StoreEntryProvider(store, {"compounds": MongoCompound})
+        StoreEntryProvider(store, {"compounds": MongoCompound}, link_classes=[MongoCompoundCitation], id_of=_sid_id)
+    provider = StoreEntryProvider(store, {"compounds": MongoCompound}, id_of=_sid_id)
     assert provider.relationships("compounds") == {}
 
 
@@ -448,15 +539,17 @@ def test_configured_family_uses_the_mongo_stored_property_plan(mongo_test_databa
     )
 
     store = MongoStore(
-        mongo_test_database, entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)}
+        mongo_test_database,
+        entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     store.save(FIRST)
     store.save(SECOND)
     provider = StoreEntryProvider(store, {"calculations": CalculationEntry})
     rows = list(provider.records("calculations"))
-    assert {row["immutable_id"] for row in rows} == {"first", "second"}
+    assert {row["immutable_id"] for row in rows} == {"httk.test-1-2~1", "httk.test-1-3~1"}
     assert {row["type"] for row in rows} == {"calculations"}
-    assert all(len(row["id"]) == 64 for row in rows)
+    assert all(row["id"].startswith("httk.test-1-") for row in rows)
     assert {row["last_modified"] for row in rows} == {None, "2026-08-02T08:30:00+00:00"}
     with pytest.raises(ValueError, match="immutable_id"):
         StoreEntryProvider(

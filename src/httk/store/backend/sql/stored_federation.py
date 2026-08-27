@@ -38,15 +38,15 @@ _AUDIT_BATCH_SIZE: Final = 1_000
 class StoredEntrySource:
     """One named configured family in one durable entry store.
 
-    ``public_id_prefix`` is concatenated with every backing's canonical
-    content id.  It is intentionally not required to be unique: callers may
+    ``public_id_prefix`` is concatenated with every backing's store-minted
+    lineage id.  It is intentionally not required to be unique: callers may
     retain a legacy unprefixed source, in which case collisions are detected
     when their visible ids are fetched or explicitly audited.
 
     :param store: The durable entry store containing the entry family.
     :param entry_family: The logical entry-family class to serve.
     :param name: The unique name used to identify this source.
-    :param public_id_prefix: The prefix prepended to canonical content ids.
+    :param public_id_prefix: The prefix prepended to store-minted lineage ids.
     """
 
     store: EntryStore

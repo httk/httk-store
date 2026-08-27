@@ -1,9 +1,11 @@
 """Live MongoDB semantic coverage for OPTIMADE-filter querying."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
+from typing import Annotated
 
 import pytest
+from httk.core.storage import IdentitySkip, Indexed, Unique
 
 from httk.store.backend.mongo import MongoStore, optimade_filter_searcher
 from httk.store.query.optimade_filters import FilterTranslationError
@@ -13,6 +15,8 @@ from httk.store.query.optimade_filters import FilterTranslationError
 class Publication:
     doi: str
     year: int
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -21,26 +25,32 @@ class Material:
     x: Fraction
     symbols: list[str]
     ref: Publication | None = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class Part:
     label: str
     val: int
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class Assembly:
     name: str
     parts: list[Part]
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
-PUB_A = Publication("10.1000/alpha", 1999)
-PUB_B = Publication("10.2000/beta", 2005)
+PUB_A = Publication("10.1000/alpha", 1999, "publication-a", "publication-a~1")
+PUB_B = Publication("10.2000/beta", 2005, "publication-b", "publication-b~1")
 
-MAT_1 = Material("alpha oxide", Fraction(1, 2), ["O", "H"], PUB_A)
-MAT_2 = Material("beta metal", Fraction(5, 2), ["Fe"], PUB_B)
-MAT_3 = Material("gamma oxide", Fraction(7, 2), ["O"], None)
+MAT_1 = Material("alpha oxide", Fraction(1, 2), ["O", "H"], PUB_A, "material-1", "material-1~1")
+MAT_2 = Material("beta metal", Fraction(5, 2), ["Fe"], PUB_B, "material-2", "material-2~1")
+MAT_3 = Material("gamma oxide", Fraction(7, 2), ["O"], None, "material-3", "material-3~1")
 
 
 @pytest.fixture()
@@ -111,42 +121,39 @@ def test_related_property_no_match_is_empty_not_an_error(store):
 
 
 def test_relationship_id_has_over_foreign_key(store):
-    sid = store.sid_of(PUB_A)
     searcher = optimade_filter_searcher(
-        store, Material, f'refs.id HAS "refs-{sid}"', related_classes={"refs": Publication}
+        store, Material, f'refs.id HAS "{PUB_A.id}"', related_classes={"refs": Publication}
     )
     assert results(searcher) == [MAT_1]
 
 
 def test_relationship_id_has_only_preserves_empty_reference_vacuous_truth(store):
-    sid = store.sid_of(PUB_B)
     searcher = optimade_filter_searcher(
-        store, Material, f'refs.id HAS ONLY "refs-{sid}"', related_classes={"refs": Publication}
+        store, Material, f'refs.id HAS ONLY "{PUB_B.id}"', related_classes={"refs": Publication}
     )
     assert results(searcher) == [MAT_2, MAT_3]
     searcher = optimade_filter_searcher(
-        store, Material, f'NOT refs.id HAS ONLY "refs-{sid}"', related_classes={"refs": Publication}
+        store, Material, f'NOT refs.id HAS ONLY "{PUB_B.id}"', related_classes={"refs": Publication}
     )
     assert results(searcher) == [MAT_1]
 
     searcher = optimade_filter_searcher(
-        store, Material, f'refs.id HAS ANY "refs-{sid}"', related_classes={"refs": Publication}
+        store, Material, f'refs.id HAS ANY "{PUB_B.id}"', related_classes={"refs": Publication}
     )
     assert results(searcher) == [MAT_2]
     searcher = optimade_filter_searcher(
-        store, Material, f'NOT refs.id HAS ANY "refs-{sid}"', related_classes={"refs": Publication}
+        store, Material, f'NOT refs.id HAS ANY "{PUB_B.id}"', related_classes={"refs": Publication}
     )
     assert results(searcher) == [MAT_1, MAT_3]
 
 
 def test_relationship_id_equality_routes_through_semi_join(store):
-    sid = store.sid_of(PUB_B)
     searcher = optimade_filter_searcher(
-        store, Material, f'refs.id = "refs-{sid}"', related_classes={"refs": Publication}
+        store, Material, f'refs.id = "{PUB_B.id}"', related_classes={"refs": Publication}
     )
     assert results(searcher) == [MAT_2]
     searcher = optimade_filter_searcher(
-        store, Material, f'refs.id != "refs-{sid}"', related_classes={"refs": Publication}
+        store, Material, f'refs.id != "{PUB_B.id}"', related_classes={"refs": Publication}
     )
     assert results(searcher) == [MAT_1]
 
@@ -160,17 +167,16 @@ def test_invalid_or_foreign_id_formats_match_nothing(store):
 
 
 def test_child_of_storable_target(store):
-    part_a = Part("bolt", 1)
-    part_b = Part("nut", 5)
-    assembly_1 = Assembly("frame", [part_a, part_b])
-    assembly_2 = Assembly("hinge", [part_a])
+    part_a = Part("bolt", 1, "part-a", "part-a~1")
+    part_b = Part("nut", 5, "part-b", "part-b~1")
+    assembly_1 = Assembly("frame", [part_a, part_b], "assembly-1", "assembly-1~1")
+    assembly_2 = Assembly("hinge", [part_a], "assembly-2", "assembly-2~1")
     store.save(assembly_1)
     store.save(assembly_2)
     searcher = optimade_filter_searcher(store, Assembly, "parts._httk_custom_val > 2", related_classes={"parts": Part})
     assert results(searcher) == [assembly_1]
-    part_a_sid = store.sid_of(part_a)
     searcher = optimade_filter_searcher(
-        store, Assembly, f'parts.id HAS "parts-{part_a_sid}"', related_classes={"parts": Part}
+        store, Assembly, f'parts.id HAS "{part_a.id}"', related_classes={"parts": Part}
     )
     assert results(searcher) == [assembly_1, assembly_2]
 
@@ -188,11 +194,11 @@ def test_dotted_filter_without_related_classes_matches_nothing(store):
     assert results(searcher) == []
 
 
-def test_id_and_type_not_supported_without_extra_handlers(store):
-    for filter_string in ('id = "materials-1"', 'type = "materials"'):
-        with pytest.raises(FilterTranslationError) as excinfo:
-            optimade_filter_searcher(store, Material, filter_string)
-        assert excinfo.value.category == "not-implemented"
+def test_id_filters_the_physical_entry_column_while_type_still_needs_a_handler(store):
+    assert results(optimade_filter_searcher(store, Material, 'id = "material-1"')) == [MAT_1]
+    with pytest.raises(FilterTranslationError) as excinfo:
+        optimade_filter_searcher(store, Material, 'type = "materials"')
+    assert excinfo.value.category == "not-implemented"
 
 
 def test_unknown_prefixed_property_raises(store):

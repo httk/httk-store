@@ -21,9 +21,9 @@ from httk.core.register import (
     resolve_entry_family,
     resolve_entry_record,
 )
-from httk.core.storage import storage_identity_name
+from httk.core.storage import IdentitySkip, Indexed, Unique, storage_identity_name
 
-from httk.store.backend.schema import ChildTableSpec, ColumnSpec, FieldSpec, TableSchema, resolve_schema
+from httk.store.backend.schema import ChildTableSpec, ColumnSpec, FieldSpec, SchemaError, TableSchema, resolve_schema
 
 __all__ = [
     "ADDITIVE_UPGRADE_HINT",
@@ -41,6 +41,7 @@ __all__ = [
     "normalize_entry_records",
     "schema_fingerprint_diff",
     "schema_fingerprint_json",
+    "validate_entry_id_fields",
 ]
 
 DECLARATION_PROTOCOL_VERSION: Final = "2"
@@ -177,6 +178,75 @@ class StorageLayout:
     def declaration(self) -> Mapping[str, tuple[str, ...]]:
         """Configured stable family names mapped to their ordered stable record names."""
         return MappingProxyType({family.name: family.record_names for family in self.families})
+
+
+def validate_entry_id_fields(layout: StorageLayout) -> None:
+    """Require entry-id fields on every backing of a defined entry family."""
+    required = (
+        ("id", "id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)"),
+        (
+            "immutable_id",
+            "immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)",
+        ),
+    )
+    for family in layout.families:
+        if family.definition_id is None:
+            continue
+        for record in family.records:
+            schema = resolve_schema(record)
+            hints = typing.get_type_hints(record, include_extras=True)
+            fields = {item.name: item for item in dataclasses.fields(record)}
+            for name, declaration in required:
+                try:
+                    spec = schema.field(name)
+                except SchemaError:
+                    spec = None
+                valid = (
+                    spec is not None
+                    and spec.role == "scalar"
+                    and spec.python_type is str
+                    and len(spec.columns) == 1
+                    and (name != "id" or (_has_indexed(hints.get(name)) and not _has_unique(hints.get(name))))
+                    and (name != "immutable_id" or _has_unique(hints.get(name)))
+                    and _is_optional_string(hints.get(name))
+                    and _has_identity_skip(hints.get(name))
+                    and fields.get(name) is not None
+                    and fields[name].default is None
+                    and fields[name].compare is False
+                )
+                if not valid:
+                    raise SchemaError(
+                        f"entry record {record.__name__} in family {family.name!r} must declare {declaration}"
+                    )
+
+
+def _is_optional_string(annotation: object) -> bool:
+    """Whether an annotated field's value type is exactly ``str | None``."""
+    if typing.get_origin(annotation) is typing.Annotated:
+        annotation = typing.get_args(annotation)[0]
+    return annotation == (str | None)
+
+
+def _has_indexed(annotation: object) -> bool:
+    """Whether an annotation carries the ``Indexed`` marker."""
+    return any(isinstance(marker, Indexed) for marker in _annotation_metadata(annotation))
+
+
+def _has_unique(annotation: object) -> bool:
+    """Whether an annotation carries the ``Unique`` marker."""
+    return any(isinstance(marker, Unique) for marker in _annotation_metadata(annotation))
+
+
+def _has_identity_skip(annotation: object) -> bool:
+    """Whether an annotation carries the ``IdentitySkip`` marker."""
+    return any(isinstance(marker, IdentitySkip) for marker in _annotation_metadata(annotation))
+
+
+def _annotation_metadata(annotation: object) -> tuple[object, ...]:
+    """Return the metadata carried by an ``Annotated`` declaration."""
+    if typing.get_origin(annotation) is not typing.Annotated:
+        return ()
+    return tuple(typing.get_args(annotation)[1:])
 
 
 def normalize_entry_records(entry_records: Mapping[type, type | tuple[type, ...]]) -> StorageLayout:

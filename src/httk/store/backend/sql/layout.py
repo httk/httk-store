@@ -1,15 +1,13 @@
 """Versioned physical layout for :class:`httk.store.backend.sql.store.SqlStore`."""
 
 import dataclasses
-import typing
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Final, Literal
 
 import sqlalchemy
-from httk.core.storage import Indexed, Unique
 
-from httk.store.backend.schema import SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import TableSchema, resolve_schema
 from httk.store.backend.sql.mapping import dispatch_table_for, entry_dispatch_table_name, table_for
 from httk.store.storage_layout import (
     EntryFamilyDeclaration,
@@ -19,6 +17,7 @@ from httk.store.storage_layout import (
     _merge_storage_layouts,
     _walk_closure,
     declaration_json,
+    validate_entry_id_fields,
 )
 from httk.store.storage_layout import (
     normalize_entry_families as _normalize_entry_families,
@@ -26,7 +25,6 @@ from httk.store.storage_layout import (
 from httk.store.storage_layout import (
     normalize_entry_records as _normalize_entry_records,
 )
-from httk.store.store_common import _has_identity_skip
 
 __all__ = [
     "METADATA_TABLE_NAME",
@@ -207,7 +205,7 @@ def normalize_entry_declaration(
     if not layouts:
         return None
     layout = _merge_storage_layouts(*layouts)
-    _validate_entry_id_fields(layout)
+    validate_entry_id_fields(layout)
     _validate_physical_names(layout)
     return layout
 
@@ -373,67 +371,3 @@ def _validate_physical_names(layout: StorageLayout) -> None:
                     f"entry family {family.name!r} dispatch table collides with record table {dispatch_name!r}"
                 )
             owners[dispatch_name] = family.family
-
-
-def _validate_entry_id_fields(layout: StorageLayout) -> None:
-    """Require id columns on every backing of a defined entry family."""
-    required = (
-        ("id", "id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)"),
-        (
-            "immutable_id",
-            "immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)",
-        ),
-    )
-    for family in layout.families:
-        if family.definition_id is None:
-            continue
-        for record in family.records:
-            schema = resolve_schema(record)
-            hints = typing.get_type_hints(record, include_extras=True)
-            fields = {item.name: item for item in dataclasses.fields(record)}
-            for name, declaration in required:
-                try:
-                    spec = schema.field(name)
-                except SchemaError:
-                    spec = None
-                valid = (
-                    spec is not None
-                    and spec.role == "scalar"
-                    and spec.python_type is str
-                    and len(spec.columns) == 1
-                    and (name != "id" or (_has_indexed(hints.get(name)) and not _has_unique(hints.get(name))))
-                    and (name != "immutable_id" or _has_unique(hints.get(name)))
-                    and _is_optional_string(hints.get(name))
-                    and _has_identity_skip(hints.get(name))
-                    and fields.get(name) is not None
-                    and fields[name].default is None
-                    and fields[name].compare is False
-                )
-                if not valid:
-                    raise SchemaError(
-                        f"entry record {record.__name__} in family {family.name!r} must declare {declaration}"
-                    )
-
-
-def _is_optional_string(annotation: object) -> bool:
-    """Whether an annotated field's value type is exactly ``str | None``."""
-    if typing.get_origin(annotation) is typing.Annotated:
-        annotation = typing.get_args(annotation)[0]
-    return annotation == (str | None)
-
-
-def _has_indexed(annotation: object) -> bool:
-    """Whether an annotation carries the ``Indexed`` marker."""
-    return any(isinstance(marker, Indexed) for marker in _annotation_metadata(annotation))
-
-
-def _has_unique(annotation: object) -> bool:
-    """Whether an annotation carries the ``Unique`` marker."""
-    return any(isinstance(marker, Unique) for marker in _annotation_metadata(annotation))
-
-
-def _annotation_metadata(annotation: object) -> tuple[object, ...]:
-    """Return the metadata carried by an ``Annotated`` declaration."""
-    if typing.get_origin(annotation) is not typing.Annotated:
-        return ()
-    return tuple(typing.get_args(annotation)[1:])

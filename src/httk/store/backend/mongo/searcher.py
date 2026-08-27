@@ -1121,7 +1121,10 @@ def _scalar_value(document: dict[str, Any], field: MongoField) -> Any:
     embedded = source.get("f", {})
     spec = field._spec
     if spec.role == "scalar":
-        return embedded.get(field._key_path.removeprefix("f."))
+        value = embedded.get(field._key_path.removeprefix("f."))
+        return (
+            None if value is None else (value if not field._presentation_prefix else field._presentation_prefix + value)
+        )
     assert field._codec is not None
     parts = [embedded.get(spec.field + suffix) for suffix, _kind in field._codec.columns]
     return None if all(part is None for part in parts) else field._codec.decode(tuple(parts))

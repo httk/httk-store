@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from httk.core.storage import QueryLiteralError, content_id
+from httk.core.storage import QueryLiteralError
 
 from httk.store.backend.codecs import ValueCodec, codec_named
 from httk.store.backend.schema import FieldSpec, TableSchema
@@ -263,8 +263,12 @@ def _eval_value(
         return None
     if value.scope.scalar_child:
         return items[0]
-    if value.field.startswith("__content_id__"):
-        return value.field.removeprefix("__content_id__") + content_id(items[0])
+    if value.field.startswith("__presentation_prefix__"):
+        marker = value.field.removeprefix("__presentation_prefix__")
+        prefix, separator, field = marker.partition("\0")
+        if not separator:
+            raise ValueError("invalid stored public-id evaluator marker")
+        return prefix + getattr(items[0], field)
     return getattr(items[0], value.field, None)
 
 

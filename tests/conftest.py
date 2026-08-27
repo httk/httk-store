@@ -187,7 +187,7 @@ class _StoreFactory:
             assert self._mongo_client is not None
             database = MongoDatabase(self._mongo_client, name, transactions="never")
             declaration = entry_records if entry_records is not None else {}
-            store = MongoStore(database, entry_records=declaration)
+            store = MongoStore(database, entry_records=declaration, entry_ids=entry_ids)
         self._databases.append(database)
         self._stores[id(store)] = (store, database, declaration)
         return store
@@ -206,7 +206,9 @@ class _StoreFactory:
             assert self._mongo_client is not None
             mongo_database = MongoDatabase(self._mongo_client, database.database.name, transactions="never")
             self._databases.append(mongo_database)
-            return MongoStore(mongo_database, entry_records=declaration)
+            return MongoStore(
+                mongo_database, entry_records=declaration, entry_ids=getattr(original, "_entry_ids", None)
+            )
         if self._backend == "postgresql":
             reopened = Backend.postgresql(database.engine.url)
             self._databases.append(reopened)

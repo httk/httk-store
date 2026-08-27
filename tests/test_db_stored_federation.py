@@ -380,7 +380,11 @@ def test_unique_prefix_page_has_no_duplicate_probe_queries() -> None:
                 sqlalchemy.event.remove(store._database.engine, "before_cursor_execute", count_select)
 
     assert len(page.rows) == 3
-    assert len(statements) == 6  # Three count queries plus three candidate queries; no duplicate probes.
+    assert not any(".id = ?" in " ".join(statement.lower().split()) for statement in statements)
+    # Three count queries, three candidate queries, and one parent plus one
+    # child hydration per served row. Entry records hydrate their minted ids
+    # from storage rather than reusing the pre-mint source-instance cache.
+    assert len(statements) == 12
 
 
 def test_single_source_page_skips_probes_but_audit_detects_corrupt_cross_backing_ids() -> None:
@@ -418,7 +422,10 @@ def test_single_source_page_skips_probes_but_audit_detects_corrupt_cross_backing
         assert len(page.rows) == 1
         assert page.total_count == 2
         assert [row["id"] for row in page.rows] == [f"same:{key}"]
-        assert len(statements) == 4  # Two counts plus two page candidates; no duplicate probes.
+        assert not any(".id = ?" in " ".join(statement.lower().split()) for statement in statements)
+        # Two counts, two page candidates, then one parent and child hydration
+        # for the served row; no identity probe accompanies that hydration.
+        assert len(statements) == 6
         with pytest.raises(DuplicateEntryIdError) as caught:
             federation.audit_duplicate_ids()
 

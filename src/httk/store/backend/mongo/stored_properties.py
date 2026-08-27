@@ -23,7 +23,7 @@ from httk.core import (
     load_entry_type_definition,
 )
 from httk.core.optimade import FilterAst, parse_optimade_filter
-from httk.core.storage import QueryLiteralError, StoredPropertyProjection, content_id, stored_property_projections
+from httk.core.storage import QueryLiteralError, StoredPropertyProjection, stored_property_projections
 
 from httk.store.backend.schema import FieldSpec, SchemaError, resolve_schema
 from httk.store.query import SearchResult
@@ -42,6 +42,7 @@ __all__ = [
 ]
 
 _CORE_PROPERTIES = frozenset(("id", "type"))
+_INTRINSIC_PROPERTIES = frozenset(("id", "type", "immutable_id", "_httk_id"))
 _RFC3339_TIMESTAMP = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z", re.IGNORECASE
 )
@@ -150,8 +151,6 @@ class _MongoQueryContext:
         return MongoPredicate("when_known", (_predicate(known), _predicate(predicate)))
 
     def _field(self, scope: MongoScope, name: str) -> MongoValue:
-        if name.startswith("__content_id__"):
-            return MongoValue("field", scope=scope, field=name)
         if name == "store_timestamp":
             if self._store is None or not self._store.store_timestamps:
                 raise MongoStoredPropertyConfigurationError(
@@ -261,18 +260,19 @@ class _ConstantSortSearcher:
 
     def __iter__(self) -> Iterator[SearchResult]:
         for result in self._searcher:
-            values = iter(result.values[2:])
+            values = iter(result.values[3:])
             sort_values = tuple(
                 self._entry_type if name == "type" else next(values) for name, _descending in self._sort
             )
             tail = tuple(values)
             names = (
                 "sid",
-                "content_id",
+                "id",
+                "immutable_id",
                 *(f"sort_{index}" for index in range(len(self._sort))),
                 *(("store_timestamp",) if tail else ()),
             )
-            yield SearchResult((result.values[0], result.values[1], *sort_values, *tail), names)
+            yield SearchResult((result.values[0], result.values[1], result.values[2], *sort_values, *tail), names)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._searcher, name)
@@ -319,11 +319,19 @@ class MongoStoredPropertyPlan:
         public_id_prefix: str = "",
         as_of: object = None,
         only_latest: bool = False,
+        revisions: bool = False,
     ) -> tuple[MongoSearcher, ...]:
         ast = parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string
         return tuple(
             self._searcher_for(
-                item, ast, sort, public_id_prefix, candidate=False, as_of=as_of, only_latest=only_latest
+                item,
+                ast,
+                sort,
+                public_id_prefix,
+                candidate=False,
+                as_of=as_of,
+                only_latest=only_latest,
+                revisions=revisions,
             )[0]
             for item in self._backings
         )
@@ -336,17 +344,24 @@ class MongoStoredPropertyPlan:
         public_id_prefix: str = "",
         as_of: object = None,
         only_latest: bool = False,
+        revisions: bool = False,
     ) -> tuple[MongoStoredPropertyCandidateStream, ...]:
         ast = parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string
         streams: list[MongoStoredPropertyCandidateStream] = []
         for backing, name in zip(self._backings, self.layout.record_names, strict=True):
             searcher, variable, sorts = self._searcher_for(
-                backing, ast, sort, public_id_prefix, candidate=True, as_of=as_of, only_latest=only_latest
+                backing,
+                ast,
+                sort,
+                public_id_prefix,
+                candidate=True,
+                as_of=as_of,
+                only_latest=only_latest,
+                revisions=revisions,
             )
             searcher.output(variable.sid, "sid")
-            # ``content_id`` remains canonical: StoredEntryFederation applies
-            # its source prefix when it turns a candidate into a public id.
-            searcher.output(self._public_id_field(variable, ""), "content_id")
+            searcher.output(self._public_id_field(variable, ""), "id")
+            searcher.output(self._immutable_id_field(variable), "immutable_id")
             for index, value in enumerate(sorts):
                 searcher.output(value, f"sort_{index}")
             timestamp_output = self.store.store_timestamps
@@ -374,7 +389,10 @@ class MongoStoredPropertyPlan:
         record: object,
         *,
         public_id: str | None = None,
+        httk_id: str | None = None,
+        revisions: bool = False,
         store_timestamp: int | None = None,
+        fields: Sequence[str] | None = None,
     ) -> Mapping[str, Any]:
         """Render one hydrated backing record at the protocol boundary.
 
@@ -391,8 +409,18 @@ class MongoStoredPropertyPlan:
             raise MongoStoredPropertyConfigurationError(
                 f"{backing.__name__} is not a configured backing for {self.family.__name__}"
             )
-        result: dict[str, Any] = {"id": content_id(record) if public_id is None else public_id, "type": self.entry_type}
-        for name in self.definition.properties:
+        result: dict[str, Any] = {
+            "id": cast(Any, record).id if public_id is None else public_id,
+            "type": self.entry_type,
+        }
+        names = (
+            list(self.definition.properties)
+            if fields is None
+            else [name for name in self.definition.properties if name in fields]
+        )
+        if revisions and "_httk_id" not in names and (fields is None or "_httk_id" in fields):
+            names.append("_httk_id")
+        for name in names:
             if name not in _CORE_PROPERTIES:
                 if name == "_httk_store_timestamp":
                     if store_timestamp is not None:
@@ -426,6 +454,12 @@ class MongoStoredPropertyPlan:
                     value = None if found is None else found.get("logical_id")
                     result[name] = None if value is None else int(value)
                     continue
+                if name == "immutable_id":
+                    result[name] = cast(Any, record).immutable_id
+                    continue
+                if name == "_httk_id":
+                    result[name] = cast(Any, record).id if httk_id is None else httk_id
+                    continue
                 projection = configured.projections.get(name)
                 result[name] = None if projection is None else _response_json_value(projection.response(record))
         return result
@@ -440,6 +474,7 @@ class MongoStoredPropertyPlan:
         candidate: bool,
         as_of: object = None,
         only_latest: bool = False,
+        revisions: bool = False,
     ) -> tuple[MongoSearcher, MongoVariable, tuple[MongoField, ...]]:
         searcher = self.store.searcher(as_of=as_of, only_latest=only_latest)
         variable = searcher.variable(backing.backing)
@@ -449,8 +484,8 @@ class MongoStoredPropertyPlan:
                 predicate = translate_filter_ast(
                     ast,
                     cast(Any, variable),
-                    _property_fulltypes(self.definition),
-                    self._handlers(backing, context, public_id_prefix),
+                    _property_fulltypes(self.definition, revisions=revisions),
+                    self._handlers(backing, context, public_id_prefix, revisions),
                     known_definition_prefixes(),
                 )
             except QueryLiteralError as error:
@@ -501,20 +536,30 @@ class MongoStoredPropertyPlan:
         for name, descending in sort:
             if name == "type":
                 continue
-            field = self._sort_field(backing, variable, name, public_id_prefix)
+            field = self._sort_field(backing, variable, name, public_id_prefix, revisions)
             searcher.add_sort(field, descending)
             sort_fields.append(field)
         if not candidate:
             searcher.output(variable, "record")
         return searcher, variable, tuple(sort_fields)
 
-    def _handlers(self, backing: _BackingPlan, context: _MongoQueryContext, prefix: str) -> HandlerTable:
+    def _handlers(
+        self, backing: _BackingPlan, context: _MongoQueryContext, prefix: str, revisions: bool
+    ) -> HandlerTable:
         handlers: dict[str, Mapping[str, Callable[..., Any]]] = {
-            "id": _id_handlers(context, prefix),
+            "id": _id_handlers(context, prefix, revisions=revisions),
             "type": _type_handlers(context, self.entry_type),
         }
+        if revisions:
+            handlers["_httk_id"] = _id_handlers(context, prefix, revisions=False)
         for name, definition in self.definition.properties.items():
             if name in _CORE_PROPERTIES:
+                continue
+            if name == "immutable_id":
+                handlers[name] = _field_handlers(context, "immutable_id")
+                continue
+            if name == "_httk_id":
+                handlers[name] = _id_handlers(context, prefix, revisions=not revisions)
                 continue
             projection = backing.projections.get(name)
             if projection is None:
@@ -524,9 +569,19 @@ class MongoStoredPropertyPlan:
                 handlers[name] = _projection_handlers(projection, context)
         return handlers
 
-    def _sort_field(self, backing: _BackingPlan, variable: MongoVariable, name: str, prefix: str) -> MongoField:
+    def _sort_field(
+        self, backing: _BackingPlan, variable: MongoVariable, name: str, prefix: str, revisions: bool = False
+    ) -> MongoField:
         if name == "id":
-            return self._public_id_field(variable, prefix)
+            return self._public_id_field(variable, prefix, revisions=revisions)
+        if name == "immutable_id":
+            return self._immutable_id_field(variable)
+        if name == "_httk_id":
+            if not revisions and name not in self.definition.properties:
+                raise MongoStoredPropertyConfigurationError(f"{self.entry_type} has no property {name!r} to sort")
+            return self._public_id_field(variable, prefix, revisions=not revisions)
+        if name not in self.definition.properties:
+            raise MongoStoredPropertyConfigurationError(f"{self.entry_type} has no property {name!r} to sort")
         projection = backing.projections.get(name)
         if projection is None or projection.sort is None:
             raise MongoStoredPropertyConfigurationError(
@@ -548,19 +603,19 @@ class MongoStoredPropertyPlan:
         return value
 
     @staticmethod
-    def _public_id_field(variable: MongoVariable, prefix: str) -> MongoField:
-        """Return content identity with its source-specific presentation prefix.
-
-        Mongo sorts the physical ``content_id`` path.  Prefixing every value
-        with one constant preserves that ordering, while the field's scalar
-        projection exposes the prefixed public value to federation streams.
-        """
+    def _public_id_field(variable: MongoVariable, prefix: str, *, revisions: bool = False) -> MongoField:
+        """Return a source-prefixed stored entry or immutable revision id."""
         return MongoField(
             variable,
-            "content_id",
-            FieldSpec("content_id", str, "scalar", ()),
+            f"f.{'immutable_id' if revisions else 'id'}",
+            FieldSpec("immutable_id" if revisions else "id", str, "scalar", ()),
             presentation_prefix=prefix,
         )
+
+    @staticmethod
+    def _immutable_id_field(variable: MongoVariable) -> MongoField:
+        """Return the physical immutable revision identifier field."""
+        return MongoField(variable, "f.immutable_id", FieldSpec("immutable_id", str, "scalar", ()))
 
 
 class _MongoFieldSortContext:
@@ -599,7 +654,7 @@ def stored_property_mongo_plan(store: Any, family: type) -> MongoStoredPropertyP
     names = set(definition.properties)
     for backing in layout.records:
         projections = stored_property_projections(backing)
-        reserved, unknown = sorted(set(_CORE_PROPERTIES) & set(projections)), sorted(set(projections) - names)
+        reserved, unknown = sorted(set(_INTRINSIC_PROPERTIES) & set(projections)), sorted(set(projections) - names)
         if reserved:
             raise MongoStoredPropertyConfigurationError(
                 f"{backing.__name__} must not declare intrinsic properties: {', '.join(reserved)}"
@@ -611,7 +666,7 @@ def stored_property_mongo_plan(store: Any, family: type) -> MongoStoredPropertyP
         required = [
             name
             for name, item in definition.properties.items()
-            if name not in _CORE_PROPERTIES and not item.nullable and name not in projections
+            if name not in _INTRINSIC_PROPERTIES and not item.nullable and name not in projections
         ]
         if required:
             raise MongoStoredPropertyConfigurationError(
@@ -653,8 +708,24 @@ def _null_handlers(context: _MongoQueryContext) -> Mapping[str, Callable[..., An
     }
 
 
-def _id_handlers(context: _MongoQueryContext, prefix: str) -> Mapping[str, Callable[..., Any]]:
-    value = context._field(context._root, "__content_id__" + prefix)
+def _field_handlers(context: _MongoQueryContext, name: str) -> Mapping[str, Callable[..., Any]]:
+    value = context._field(context._root, name)
+    return {
+        "comparison": lambda _e, op, literal, _v: context.compare(value, op, context.constant(literal)),
+        "stringmatching": lambda _e, literal, op, _v: context.compare(value, op, context.constant(literal)),
+        "unknown": lambda _e, _v, op: context.always_false() if op == "IS_UNKNOWN" else context.always_true(),
+    }
+
+
+def _id_handlers(
+    context: _MongoQueryContext, prefix: str, *, revisions: bool = False
+) -> Mapping[str, Callable[..., Any]]:
+    name = "immutable_id" if revisions else "id"
+    value = context._field(context._root, name)
+    if prefix:
+        value = MongoValue(
+            "field", scope=value.scope, field="__presentation_prefix__" + prefix + "\0" + name, spec=value.spec
+        )
     return {
         "comparison": lambda _e, op, literal, _v: context.compare(value, op, context.constant(literal)),
         "stringmatching": lambda _e, literal, op, _v: context.compare(value, op, context.constant(literal)),
@@ -691,8 +762,11 @@ def _type_handlers(context: _MongoQueryContext, entry_type: str) -> Mapping[str,
     }
 
 
-def _property_fulltypes(definition: EntryTypeDefinition) -> Mapping[str, str]:
-    return MappingProxyType({name: _definition_fulltype(item) for name, item in definition.properties.items()})
+def _property_fulltypes(definition: EntryTypeDefinition, *, revisions: bool = False) -> Mapping[str, str]:
+    result = {name: _definition_fulltype(item) for name, item in definition.properties.items()}
+    if revisions:
+        result["_httk_id"] = "string"
+    return MappingProxyType(result)
 
 
 def _definition_fulltype(definition: PropertyDefinition) -> str:

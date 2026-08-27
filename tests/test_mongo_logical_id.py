@@ -17,7 +17,7 @@ from test_db_stored_properties import FIRST, CalculationEntry
 from httk.store.backend.mongo import MongoStore
 from httk.store.backend.mongo.mapping import collection_name_for
 from httk.store.backend.schema import resolve_schema
-from httk.store.store_common import EntryReplacementError
+from httk.store.store_common import EntryIdScheme, EntryReplacementError
 
 
 @dataclass(frozen=True)
@@ -271,7 +271,11 @@ def test_evaluator_resolves_logical_id_without_a_database() -> None:
 def test_stored_property_plan_serves_filters_and_sorts_logical_id(mongo_test_database) -> None:
     from test_logical_id import LogicalIdBacking, LogicalIdCalculation
 
-    store = MongoStore(mongo_test_database, entry_records={LogicalIdCalculation: (LogicalIdBacking,)})
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={LogicalIdCalculation: (LogicalIdBacking,)},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
     first = LogicalIdBacking("first")
     a = store.save(first)
     store.replace(first, LogicalIdBacking("second"))
@@ -279,10 +283,9 @@ def test_stored_property_plan_serves_filters_and_sorts_logical_id(mongo_test_dat
     plan = store.stored_property_plan(LogicalIdCalculation)
 
     # The served row carries the lineage id, unconditional and unscaled.
-    rows = {row["immutable_id"]: row["_httk_logical_id"] for row in plan.records()}
-    assert rows["first"] == a
-    assert rows["second"] == a
-    assert rows["independent"] != a
+    rows = list(plan.records())
+    assert sum(row["_httk_logical_id"] == a for row in rows) == 2
+    assert any(row["_httk_logical_id"] != a for row in rows)
 
     # Filtering by _httk_logical_id selects the whole lineage (resolved through
     # the evaluator's logical_id resolver over each candidate document).
@@ -300,6 +303,7 @@ def test_stored_property_plan_threads_only_latest(mongo_test_database) -> None:
     store = MongoStore(
         mongo_test_database,
         entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+        entry_ids=EntryIdScheme("httk.test", "1"),
     )
     store.save(FIRST)
     store.replace(FIRST, dataclasses_replace(FIRST, label="first-replaced"))  # same lineage, distinct content

@@ -1609,6 +1609,10 @@ class SqlStore:
         projected = projection.projector(record_type, source)
         if record_type in self._entry_record_types:
             self._validate_projected_entry_ids(record_type, projected)
+            if top_level and replacement_entry_id is not None:
+                entry_id = projected.get("id")
+                if entry_id is not None and entry_id != replacement_entry_id:
+                    raise EntryIdConflictError(table.name, str(entry_id), replacement, replacement)
         validation_key = (record_type, id(source))
         if type(source) is record_type and validation_key not in projection.validated:
             validator = vars(record_type).get("__httk_validate__")
@@ -1639,7 +1643,12 @@ class SqlStore:
                     )
                     if self._write_profile == "degraded":
                         self._after_degraded_write(f"content-promotion-update:{table.name}")
-                self._remember(record_type, sid, source, cache_instance=type(source) is record_type)
+                self._remember(
+                    record_type,
+                    sid,
+                    source,
+                    cache_instance=type(source) is record_type and record_type not in self._entry_record_types,
+                )
                 return sid
 
         checkpoint = len(projection.inserted)
@@ -1676,7 +1685,12 @@ class SqlStore:
                     connection.execute(
                         sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values({ROLE_COLUMN: 1})
                     )
-                self._remember(record_type, sid, source, cache_instance=type(source) is record_type)
+                self._remember(
+                    record_type,
+                    sid,
+                    source,
+                    cache_instance=type(source) is record_type and record_type not in self._entry_record_types,
+                )
                 return sid
 
         if self._write_profile == "degraded":
@@ -1725,7 +1739,12 @@ class SqlStore:
                 self._raise_entry_id_integrity(table, values, error)
             self._after_degraded_write(f"parent-row-write:{table.name}")
             projection.inserted.append((record_type, sid))
-            self._remember(record_type, sid, source, cache_instance=type(source) is record_type)
+            self._remember(
+                record_type,
+                sid,
+                source,
+                cache_instance=type(source) is record_type and record_type not in self._entry_record_types,
+            )
             return sid
 
         if key is not None:
@@ -1752,7 +1771,12 @@ class SqlStore:
                         .where(table.c[SID_COLUMN] == sid, table.c[ROLE_COLUMN] == 0)
                         .values({ROLE_COLUMN: 1})
                     )
-                self._remember(record_type, sid, source, cache_instance=type(source) is record_type)
+                self._remember(
+                    record_type,
+                    sid,
+                    source,
+                    cache_instance=type(source) is record_type and record_type not in self._entry_record_types,
+                )
                 return sid
             if replacement is None:
                 # The only sanctioned write-after-insert: fill the fresh row's
@@ -1858,7 +1882,12 @@ class SqlStore:
                     _field_path(path, spec.field),
                     id_series=id_series,
                 )
-        self._remember(record_type, sid, source, cache_instance=type(source) is record_type)
+        self._remember(
+            record_type,
+            sid,
+            source,
+            cache_instance=type(source) is record_type and record_type not in self._entry_record_types,
+        )
         return sid
 
     def _prepare_entry_ids(
@@ -2328,7 +2357,12 @@ class SqlStore:
         if found is None:
             return None
         sid = int(found)
-        self._remember(record_type, sid, obj, cache_instance=type(obj) is record_type)
+        self._remember(
+            record_type,
+            sid,
+            obj,
+            cache_instance=type(obj) is record_type and record_type not in self._entry_record_types,
+        )
         return sid
 
     def searcher(self, *, as_of: object = None, only_latest: bool = False) -> SqlSearcher:

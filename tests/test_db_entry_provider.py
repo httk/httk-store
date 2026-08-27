@@ -166,8 +166,6 @@ def test_auto_definition_properties_prefixed_and_core_present(provider):
     definition = provider.entry_types()["books"]
     assert isinstance(definition, EntryTypeDefinition)
     assert sorted(definition.properties) == [
-        "_httk_custom_id",
-        "_httk_custom_immutable_id",
         "_httk_custom_in_print",
         "_httk_custom_keywords",
         "_httk_custom_metric",
@@ -288,8 +286,6 @@ def test_property_keys_id_type_and_identity_map(provider):
         "type": "type",
         "_httk_custom_name": "_httk_custom_name",
         "_httk_custom_born": "_httk_custom_born",
-        "_httk_custom_id": "_httk_custom_id",
-        "_httk_custom_immutable_id": "_httk_custom_immutable_id",
     }
     book_keys = provider.property_keys("books")
     assert book_keys["id"] == "__id" and book_keys["type"] == "type"

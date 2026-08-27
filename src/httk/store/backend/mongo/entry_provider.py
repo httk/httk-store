@@ -1,6 +1,7 @@
 """Serve MongoDB-backed records through the neutral entry-provider contract.
 
-Mongo entry identities are content identities rather than SQL row identities.
+Mongo entry identities are the store-managed physical ``id`` values carried
+by the hydrated records.
 Configured entry families are rendered through their Mongo stored-property plan;
 configured backing records are also accepted for the schema-derived provider
 surface used by the SQL provider's parity tests.
@@ -16,13 +17,13 @@ from httk.core import (
     FracVector,
     PropertyDefinition,
     RelatedEntry,
-    content_id,
     known_definition_prefixes,
 )
 from httk.core.storage import RelationshipLink
 
 from httk.store.backend.codecs import codec_named
-from httk.store.backend.schema import FieldSpec, TableSchema, resolve_schema
+from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.query import ID_FIELD
 from httk.store.served_specs import served_specs
 
 from .documents import _as_fixed_tensor
@@ -32,7 +33,13 @@ __all__ = ["StoreEntryProvider", "auto_definition", "served_specs"]
 
 
 def _default_id(_entry_type: str, _sid: int, obj: Any) -> str:
-    return content_id(obj)
+    """Return the store-minted identifier carried by ``obj``."""
+    value = getattr(obj, "id", None)
+    if value is None:
+        raise ValueError(f"{_entry_type} record sid {_sid} has no stored id")
+    if not isinstance(value, str):
+        raise ValueError(f"{_entry_type} record sid {_sid} has a non-string stored id")
+    return value
 
 
 def _query_index(codec: Any) -> int:
@@ -86,7 +93,7 @@ class StoreEntryProvider(EntryProvider):
     family's :class:`~httk.store.backend.mongo.stored_properties.MongoStoredPropertyPlan`; backing classes use the same
     schema-derived property contract as the SQL provider. ``id_of`` receives
     ``(entry_type, sid, hydrated_record)`` and defaults to the record's
-    content identity. ``only_latest`` restricts served searchers' root
+    stored ``id`` field. ``only_latest`` restricts served searchers' root
     variables to the latest document of each lineage.
     """
 
@@ -99,13 +106,18 @@ class StoreEntryProvider(EntryProvider):
         prefix: str = "_httk_",
         id_of: Callable[[str, int, Any], str] | None = None,
         link_classes: Iterable[type] = (),
-        only_latest: bool = False,
+        only_latest: bool = True,
     ) -> None:
         if prefix not in known_definition_prefixes():
             raise ValueError(
                 f"the property-name prefix {prefix!r} is not registered; register it with "
                 f"httk.core.register_definition_prefix() (registered prefixes: "
                 f"{', '.join(known_definition_prefixes())})"
+            )
+        if id_of is None and not only_latest:
+            raise ValueError(
+                "StoreEntryProvider(only_latest=False) requires an id_of override; "
+                "all-revision serving must use immutable ids"
             )
         self._store = store
         self._classes = dict(classes)
@@ -134,6 +146,16 @@ class StoreEntryProvider(EntryProvider):
                 self._record_classes[entry_type] = (selected,)
             for record in self._record_classes[entry_type]:
                 self._schemas[record] = resolve_schema(record)
+
+        if id_of is None:
+            required = "id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)"
+            for record, schema in self._schemas.items():
+                try:
+                    spec = schema.field("id")
+                except SchemaError:
+                    spec = None
+                if spec is None or spec.role != "scalar" or spec.python_type is not str:
+                    raise TypeError(f"{record.__name__} must declare {required} when served without id_of")
 
         self._type_for_class: dict[type, str] = {}
         for entry_type, records in self._record_classes.items():
@@ -226,7 +248,7 @@ class StoreEntryProvider(EntryProvider):
         """Return keys actually emitted by :meth:`records`, independent of overrides."""
         if entry_type in self._plans:
             return {name: name for name in self._plans[entry_type].definition.properties}
-        return {"id": "id", "type": "type", **{name: name for name, _spec, _ in self._served_specs(entry_type)}}
+        return {"id": ID_FIELD, "type": "type", **{name: name for name, _spec, _ in self._served_specs(entry_type)}}
 
     def _served_specs(self, entry_type: str) -> list[tuple[str, FieldSpec, str]]:
         record = self._record_classes[entry_type][0]
@@ -253,7 +275,7 @@ class StoreEntryProvider(EntryProvider):
         specs = self._served_specs(entry_type)
         schema = self._schemas[self._record_classes[entry_type][0]]
         for record, sid in self._iter_records(self._record_classes[entry_type][0]):
-            row: dict[str, Any] = {"id": self._id_of(entry_type, sid, record), "type": entry_type}
+            row: dict[str, Any] = {ID_FIELD: self._id_of(entry_type, sid, record), "type": entry_type}
             for name, spec, _fulltype in specs:
                 row[name] = _json_value(schema, spec, getattr(record, spec.field))
             yield row

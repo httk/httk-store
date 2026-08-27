@@ -56,10 +56,14 @@ def served_specs(schema: TableSchema, prefix: str) -> list[tuple[str, FieldSpec,
 
     :param schema: The resolved schema whose fields are inspected.
     :param prefix: The registered prefix used for served property names.
-    :return: One triple for every schema field with an OPTIMADE value type.
+    :return: One triple for every non-intrinsic schema field with an OPTIMADE
+        value type.  The store-managed ``id`` and ``immutable_id`` fields are
+        intentionally omitted because serving layers expose them intrinsically.
     """
     served: list[tuple[str, FieldSpec, str]] = []
     for spec in schema.fields:
+        if spec.field in {"id", "immutable_id"}:
+            continue
         fulltype = _fulltype_of(spec)
         if fulltype is not None:
             served.append((f"{prefix}custom_{spec.field}", spec, fulltype))

@@ -4,15 +4,19 @@ import os
 import uuid
 
 import pytest
-from httk.core.storage import content_id
 from test_db_stored_federation import FederatedCalculation, FederationFirst, FederationSecond, _record
 
+from httk.store import EntryIdScheme
 from httk.store.backend.sql import Backend, DuplicateEntryIdError, SqlStore, StoredEntryFederation, StoredEntrySource
 from httk.store.backend.mongo import MongoDatabase, MongoStore
 
 
 def _mongo_store(database):
-    return MongoStore(database, entry_records={FederatedCalculation: (FederationFirst, FederationSecond)})
+    return MongoStore(
+        database,
+        entry_records={FederatedCalculation: (FederationFirst, FederationSecond)},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
 
 
 @pytest.fixture
@@ -52,7 +56,7 @@ def test_mongo_only_federation_pages_filters_and_audits(mongo_store_pair):
     assert tuple(row["id"] for row in paged) == tuple(row["id"] for row in complete.rows)
     federation.audit_duplicate_ids(batch_size=1)
 
-    target = f"beta:{content_id(second_records[0])}"
+    target = next(row["id"] for row in complete.rows if row["id"].startswith("beta:"))
     page = federation.query(f'id = "{target}"', sort=(("id", False),), limit=10)
     assert [row["id"] for row in page.rows] == [target]
 
@@ -68,7 +72,7 @@ def test_mongo_only_federation_probes_cross_source_prefix_collisions(mongo_store
             StoredEntrySource(second_store, FederatedCalculation, "second", "shared:"),
         )
     )
-    public_id = f"shared:{content_id(duplicate)}"
+    public_id = "shared:httk.test-1-2"
 
     with pytest.raises(DuplicateEntryIdError) as page_error:
         federation.query(f'id = "{public_id}"', limit=1)
@@ -87,6 +91,7 @@ def test_mixed_sql_mongo_federation_pages_audits_and_probes_prefix_collisions(mo
         sql_store = SqlStore(
             database,
             entry_records={FederatedCalculation: (FederationFirst, FederationSecond)},
+            entry_ids=EntryIdScheme("httk.test", "1"),
         )
         mongo_store = _mongo_store(mongo_test_database)
         shared = _record("shared")
@@ -94,6 +99,7 @@ def test_mixed_sql_mongo_federation_pages_audits_and_probes_prefix_collisions(mo
         mongo_only = _record("mongo-only", second=True)
         sql_store.save(shared)
         sql_store.save(sql_only)
+        sql_store._clear_identity_caches()
         mongo_store.save(shared)
         mongo_store.save(mongo_only)
 
@@ -113,24 +119,14 @@ def test_mixed_sql_mongo_federation_pages_audits_and_probes_prefix_collisions(mo
 
         assert complete.total_count == 4
         assert tuple(row["id"] for row in paged) == tuple(row["id"] for row in complete.rows)
-        assert [row["immutable_id"] for row in complete.rows] == [
-            "mongo-only",
-            "shared",
-            "shared",
-            "sql-only",
-        ]
+        immutable_ids = [row["immutable_id"] for row in complete.rows]
+        assert immutable_ids[0] == immutable_ids[1]
+        assert immutable_ids[2] == immutable_ids[3]
+        assert immutable_ids[0] != immutable_ids[2]
         typed = federation.query(sort=(("type", True), ("immutable_id", False)), limit=10)
-        assert [row["immutable_id"] for row in typed.rows] == [
-            "mongo-only",
-            "shared",
-            "shared",
-            "sql-only",
-        ]
-        assert [row["id"] for row in complete.rows[1:3]] == [
-            f"mongo:{content_id(shared)}",
-            f"sql:{content_id(shared)}",
-        ]
-        target = f"mongo:{content_id(mongo_only)}"
+        assert [row["immutable_id"] for row in typed.rows] == immutable_ids
+        assert {row["id"].split(":", 1)[0] for row in complete.rows} == {"mongo", "sql"}
+        target = next(row["id"] for row in complete.rows if row["id"].startswith("mongo:"))
         assert [row["id"] for row in federation.query(f'id = "{target}"', limit=10).rows] == [target]
 
         collision = StoredEntryFederation(
@@ -139,7 +135,9 @@ def test_mixed_sql_mongo_federation_pages_audits_and_probes_prefix_collisions(mo
                 StoredEntrySource(mongo_store, FederatedCalculation, "mongo-collision", "shared:"),
             )
         )
-        public_id = f"shared:{content_id(shared)}"
+        public_id = "shared:" + next(
+            row["id"].split(":", 1)[1] for row in complete.rows if row["_httk_label"] == "shared"
+        )
         with pytest.raises(DuplicateEntryIdError) as page_error:
             collision.query(f'id = "{public_id}"', limit=1)
         with pytest.raises(DuplicateEntryIdError) as audit_error:

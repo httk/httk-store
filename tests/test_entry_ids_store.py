@@ -169,6 +169,27 @@ def test_save_mints_ids_type_base_and_series_override() -> None:
         database.dispose()
 
 
+def test_entry_save_and_dedup_keep_reverse_identity_but_hydrate_minted_ids() -> None:
+    database, store = _store()
+    try:
+        original = EntryIdRecord(1)
+        sid = store.save(original)
+        fetched = store.fetch(EntryIdRecord, sid, eager=True)
+        assert fetched.id == f"httk.test-1-{sid}"
+        assert fetched.immutable_id == f"{fetched.id}~1"
+        assert store.sid_of(original) == sid
+
+        replacement = store.replace(original, EntryIdRecord(2))
+        assert store.fetch(EntryIdRecord, replacement, eager=True).id == fetched.id
+
+        duplicate = EntryIdRecord(1)
+        assert store.save(duplicate) == sid
+        assert store.sid_of(duplicate) == sid
+        assert store.fetch(EntryIdRecord, sid, eager=True).immutable_id == f"{fetched.id}~1"
+    finally:
+        database.dispose()
+
+
 def test_replace_keeps_lineage_id_and_increments_immutable_id() -> None:
     database, store = _store()
     try:
@@ -191,6 +212,8 @@ def test_conflicts_and_content_metadata_are_checked() -> None:
         store.save(first)
         with pytest.raises(EntryIdConflictError):
             store.replace(first, EntryIdRecord(2, id="httk.test-1-999"))
+        with pytest.raises(EntryIdConflictError):
+            store.replace(first, EntryIdRecord(1, id="httk.test-1-999"))
         with pytest.raises(EntryIdConflictError):
             store.save(EntryIdRecord(2, id=_fetched(store, 1).id))
         store.save(EntryIdRecord(3, id="httk.test-1-3", immutable_id="httk.test-1-3~1"))

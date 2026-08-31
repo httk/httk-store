@@ -20,6 +20,7 @@ def database(
     path: str | os.PathLike[str] | None = None,
     *,
     memory_limit: str | None = None,
+    read_only: bool = False,
 ) -> "Backend":
     """Build a DuckDB-backed backend stored in ``path``, or in memory when ``path`` is None.
 
@@ -31,6 +32,10 @@ def database(
         processes; when this parameter is ``None`` the ``HTTK_DUCKDB_MEMORY_LIMIT``
         environment variable (if set) supplies the cap instead, so process trees
         can be memory-guarded wholesale.
+    :param read_only: Open the file in DuckDB ``READ_ONLY`` access mode. A read-only
+        database takes no write lock, so several processes (and this one) may open the
+        same file concurrently for reading; write operations on the resulting backend
+        will fail. Ignored for the in-memory database.
     :return: The configured backend wrapper.
     :raises ImportError: If the ``duckdb_engine`` SQLAlchemy dialect is not installed;
         install the ``httk-store[duckdb]`` extra to use it.
@@ -45,9 +50,12 @@ def database(
     _install_missing_pandas_sentinel()
     location = ":memory:" if path is None else os.fspath(path)
     limit = memory_limit if memory_limit is not None else os.environ.get("HTTK_DUCKDB_MEMORY_LIMIT")
-    options: dict[str, Any] = {}
+    config: dict[str, Any] = {}
     if limit:
-        options["connect_args"] = {"config": {"memory_limit": limit}}
+        config["memory_limit"] = limit
+    if read_only and path is not None:
+        config["access_mode"] = "READ_ONLY"
+    options: dict[str, Any] = {"connect_args": {"config": config}} if config else {}
     engine = sqlalchemy.create_engine(f"duckdb:///{location}", **options)
     # duckdb_engine derives from the psycopg2 dialect, which doubles
     # backslashes when rendering inline string literals (PostgreSQL's

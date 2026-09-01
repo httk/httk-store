@@ -394,6 +394,41 @@ search.output(note, "note")
 current = [row.values[0] for row in search]  # one row per lineage
 ```
 
+#### Alternatives
+
+A stored entry may carry named **alternative representations** — a conventional
+cell beside a primitive one, say — that share the main entry's public `id` but
+are addressed by a composite identifier. Two store-managed columns back this:
+`alt_id` (`BigInteger`, not null; the group id — the main's `logical_id`, and a
+main's own `alt_id` is itself) and `alt_kind` (`Text`, null; `NULL` on mains, a
+kind token matching `[a-z][a-z0-9_]*` on alternatives).
+
+Save an alternative by naming its main and kind:
+
+```python
+main = store.fetch(Structure, store.save(Structure(...)))
+store.save(conventional_cell, alternative_of=main.id, alternative_kind="conventional")
+```
+
+The alternative copies the main's `id`, gets its own lineage and revision
+history, and mints immutable ids of the form `<id>~<kind>~<n>`
+(`httk.mydb-1-42~conventional~3`); a listed alternative without a revision
+suffix is written `<id>~<kind>`. Both `alternative_of` and `alternative_kind`
+must be given together, one kind per group, and bulk ingest saves mains only.
+
+`store.searcher()` defaults to `only_main_alt=True`, so **mains are the default
+everywhere**: ordinary and revisions queries never surface alternatives, and an
+alternative's revisions never enter a revision stream. Pass
+`only_main_alt=False` to include them. Stored-property serving exposes
+alternatives through `StoredEntryFederation` (see `federation.md`), not through
+`StoreEntryProvider`, which stays main-only.
+
+Because `alt_id`/`alt_kind` are new physical columns, a store created before
+this change is not version-bumped automatically. An old SQL store still reads
+its mains correctly, but the first query or write that touches the alternative
+columns fails loudly with a missing-column error; the remedy is to rebuild the
+store rather than reopen the old schema.
+
 ## Store timestamps
 
 `SqlStore` enables store-managed timestamps by default:

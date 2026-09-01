@@ -22,7 +22,12 @@ from httk.core import (
 from httk.core.storage import RelationshipLink
 
 from httk.store.backend.codecs import codec_named
-from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    SchemaError,
+    TableSchema,
+    resolve_schema,
+)
 from httk.store.query import ID_FIELD
 from httk.store.served_specs import served_specs
 
@@ -44,7 +49,10 @@ def _default_id(_entry_type: str, _sid: int, obj: Any) -> str:
 
 def _query_index(codec: Any) -> int:
     """Return the stored codec component used for query/response values."""
-    return next((index for index, (suffix, _kind) in enumerate(codec.columns) if suffix == codec.query_suffix), 0)
+    return next(
+        (index for index, (suffix, _kind) in enumerate(codec.columns) if suffix == codec.query_suffix),
+        0,
+    )
 
 
 def auto_definition(entry_type: str, schema: TableSchema, prefix: str) -> EntryTypeDefinition:
@@ -55,7 +63,9 @@ def auto_definition(entry_type: str, schema: TableSchema, prefix: str) -> EntryT
         {
             "id": PropertyDefinition.from_simple("id", description="The unique entry id.", required_response=True),
             "type": PropertyDefinition.from_simple(
-                "type", description="The name of the entry type.", required_response=True
+                "type",
+                description="The name of the entry type.",
+                required_response=True,
             ),
         },
     )
@@ -64,7 +74,10 @@ def auto_definition(entry_type: str, schema: TableSchema, prefix: str) -> EntryT
         dimensions: dict[str, Any] | None = None
         if spec.role == "fixed_array":
             assert spec.shape is not None
-            dimensions = {"names": ["rows", "cols"], "sizes": [spec.shape.rows, spec.shape.cols]}
+            dimensions = {
+                "names": ["rows", "cols"],
+                "sizes": [spec.shape.rows, spec.shape.cols],
+            }
         kind = "stored property" if spec.derived else "stored field"
         extra[name] = PropertyDefinition.from_simple(
             name,
@@ -119,6 +132,10 @@ class StoreEntryProvider(EntryProvider):
                 "StoreEntryProvider(only_latest=False) requires an id_of override; "
                 "all-revision serving must use immutable ids"
             )
+        # This provider serves mains only: the store searcher defaults to
+        # only_main_alt=True, so named alternatives never appear here and their
+        # revisions never enter the revision stream. Alternative serving is
+        # available through StoredEntryFederation, not this provider.
         self._store = store
         self._classes = dict(classes)
         self._only_latest = only_latest
@@ -248,7 +265,11 @@ class StoreEntryProvider(EntryProvider):
         """Return keys actually emitted by :meth:`records`, independent of overrides."""
         if entry_type in self._plans:
             return {name: name for name in self._plans[entry_type].definition.properties}
-        return {"id": ID_FIELD, "type": "type", **{name: name for name, _spec, _ in self._served_specs(entry_type)}}
+        return {
+            "id": ID_FIELD,
+            "type": "type",
+            **{name: name for name, _spec, _ in self._served_specs(entry_type)},
+        }
 
     def _served_specs(self, entry_type: str) -> list[tuple[str, FieldSpec, str]]:
         record = self._record_classes[entry_type][0]
@@ -275,7 +296,10 @@ class StoreEntryProvider(EntryProvider):
         specs = self._served_specs(entry_type)
         schema = self._schemas[self._record_classes[entry_type][0]]
         for record, sid in self._iter_records(self._record_classes[entry_type][0]):
-            row: dict[str, Any] = {ID_FIELD: self._id_of(entry_type, sid, record), "type": entry_type}
+            row: dict[str, Any] = {
+                ID_FIELD: self._id_of(entry_type, sid, record),
+                "type": entry_type,
+            }
             for name, spec, _fulltype in specs:
                 row[name] = _json_value(schema, spec, getattr(record, spec.field))
             yield row
@@ -321,7 +345,7 @@ class StoreEntryProvider(EntryProvider):
                             RelatedEntry(
                                 related_type,
                                 self._id_of(related_type, target_sid, target),
-                                description=marker.description if marker is not None else None,
+                                description=(marker.description if marker is not None else None),
                                 role=marker.role if marker is not None else None,
                             )
                         )

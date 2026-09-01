@@ -40,6 +40,8 @@ from httk.store.backend.schema import (
 )
 
 __all__ = [
+    "ALT_ID_COLUMN",
+    "ALT_KIND_COLUMN",
     "CONTENT_ID_COLUMN",
     "DISPATCH_CONTENT_ID_COLUMN",
     "LOGICAL_ID_COLUMN",
@@ -68,6 +70,12 @@ STORE_TIMESTAMP_COLUMN: Final = "store_timestamp"
 
 LOGICAL_ID_COLUMN: Final = "logical_id"
 """The store-managed lineage identity on every parent record table (a fresh record's own sid, copied by a replacement)."""
+
+ALT_ID_COLUMN: Final = "alt_id"
+"""The store-managed alternative-group identity on every parent record table (a main's ``logical_id``; self for mains)."""
+
+ALT_KIND_COLUMN: Final = "alt_kind"
+"""The store-managed alternative kind on every parent record table (``NULL`` for mains, a kind name for alternatives)."""
 
 DISPATCH_CONTENT_ID_COLUMN: Final = "content_id"
 """The content identity primary key of an entry-family dispatch table."""
@@ -253,6 +261,20 @@ def _build_parent_table(
     # record carries its own sid here, a replacement copies its predecessor's.
     items.append(sqlalchemy.Column(LOGICAL_ID_COLUMN, sqlalchemy.BigInteger, nullable=False))
     items.append(sqlalchemy.Index(_index_name("ix", name, (LOGICAL_ID_COLUMN,)), LOGICAL_ID_COLUMN))
+    # Alternative-group identity (a main's logical_id, self for mains) and kind
+    # (NULL for mains). The composite index serves group/kind lookups. It is
+    # deliberately NOT unique: "one alternative lineage per (group, kind)" is
+    # enforced by the _prepare_entry_ids lineage scan (the immutable_id unique
+    # index is only the race backstop, where two revision-1 alternatives of the
+    # same kind both mint <id>~<kind>~1), and a unique (alt_id, alt_kind) would
+    # instead reject an alternative's OWN revisions, which append rows copying
+    # the same (group, kind). See replace().
+    items.append(sqlalchemy.Column(ALT_ID_COLUMN, sqlalchemy.BigInteger, nullable=False))
+    items.append(sqlalchemy.Index(_index_name("ix", name, (ALT_ID_COLUMN,)), ALT_ID_COLUMN))
+    items.append(sqlalchemy.Column(ALT_KIND_COLUMN, sqlalchemy.Text, nullable=True))
+    items.append(
+        sqlalchemy.Index(_index_name("ix", name, (ALT_ID_COLUMN, ALT_KIND_COLUMN)), ALT_ID_COLUMN, ALT_KIND_COLUMN)
+    )
     if schema.dedup == "content_id":
         items.append(sqlalchemy.Column(CONTENT_ID_COLUMN, sqlalchemy.Text, nullable=False))
         items.append(sqlalchemy.Index(_index_name("uq", name, (CONTENT_ID_COLUMN,)), CONTENT_ID_COLUMN, unique=True))

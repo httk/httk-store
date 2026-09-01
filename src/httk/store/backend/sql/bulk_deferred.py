@@ -17,6 +17,8 @@ import sqlalchemy
 
 from httk.store.backend.schema import resolve_schema
 from httk.store.backend.sql.mapping import (
+    ALT_ID_COLUMN,
+    ALT_KIND_COLUMN,
     CONTENT_ID_COLUMN,
     LOGICAL_ID_COLUMN,
     ROLE_COLUMN,
@@ -309,7 +311,7 @@ class DeferredFinalizer:
         columns: list[str] = []
         joins: list[str] = []
         for index, column in enumerate(real.columns):
-            if column.name in (SID_COLUMN, STORE_TIMESTAMP_COLUMN, LOGICAL_ID_COLUMN):
+            if column.name in (SID_COLUMN, STORE_TIMESTAMP_COLUMN, LOGICAL_ID_COLUMN, ALT_ID_COLUMN, ALT_KIND_COLUMN):
                 continue
             target = reference_columns.get(column.name)
             if target is None or target not in self.maps:
@@ -760,6 +762,14 @@ class DeferredFinalizer:
             # A bulk row is its own lineage root, so logical_id is the final sid.
             if column.name == LOGICAL_ID_COLUMN:
                 expressions.append(f"{own_final}.final_sid")
+                continue
+            # Bulk ingest is mains only: alt_id self-references the final sid,
+            # like logical_id; alt_kind is always NULL for a main.
+            if column.name == ALT_ID_COLUMN:
+                expressions.append(f"{own_final}.final_sid")
+                continue
+            if column.name == ALT_KIND_COLUMN:
+                expressions.append("NULL")
                 continue
             if entry_id_expression is not None and column.name == "id":
                 expressions.append(entry_id_expression)

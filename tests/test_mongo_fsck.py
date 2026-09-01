@@ -70,8 +70,16 @@ class FsckEntryHolder:
 
 
 register_entry_family(name="test-mongo-fsck-family", family=f"{__name__}:FsckFamily")
-register_entry_record(name="test-mongo-fsck-a", family="test-mongo-fsck-family", record=f"{__name__}:FsckEntryA")
-register_entry_record(name="test-mongo-fsck-b", family="test-mongo-fsck-family", record=f"{__name__}:FsckEntryB")
+register_entry_record(
+    name="test-mongo-fsck-a",
+    family="test-mongo-fsck-family",
+    record=f"{__name__}:FsckEntryA",
+)
+register_entry_record(
+    name="test-mongo-fsck-b",
+    family="test-mongo-fsck-family",
+    record=f"{__name__}:FsckEntryB",
+)
 
 
 def _store(database) -> MongoStore:
@@ -88,6 +96,7 @@ def _insert_orphan_leaf(database, leaf: FsckLeaf) -> int:
             "content_id": content_id(leaf),
             "_httk_role": "dep",
             "logical_id": sid,
+            "alt_id": sid,
             "store_timestamp": 0,
             "f": {"value": leaf.value},
         }
@@ -95,7 +104,9 @@ def _insert_orphan_leaf(database, leaf: FsckLeaf) -> int:
     return sid
 
 
-def test_fsck_sweeps_orphans_preserves_reachable_and_bumps_generation(mongo_test_database) -> None:
+def test_fsck_sweeps_orphans_preserves_reachable_and_bumps_generation(
+    mongo_test_database,
+) -> None:
     store = _store(mongo_test_database)
     live = FsckLeaf("live")
     orphan = FsckLeaf("orphan")
@@ -119,7 +130,9 @@ def test_fsck_sweeps_orphans_preserves_reachable_and_bumps_generation(mongo_test
     assert store.save(FsckLeaf("after-fsck")) > max(main_sid, orphan_sid)
 
 
-def test_fsck_marks_reference_child_and_shared_dependency_graphs(mongo_test_database) -> None:
+def test_fsck_marks_reference_child_and_shared_dependency_graphs(
+    mongo_test_database,
+) -> None:
     store = _store(mongo_test_database)
     shared = FsckLeaf("shared")
     child_only = FsckLeaf("child-only")
@@ -131,7 +144,9 @@ def test_fsck_marks_reference_child_and_shared_dependency_graphs(mongo_test_data
     store.fsck()
 
     reopened_database = MongoDatabase(
-        os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name, transactions="never"
+        os.environ["HTTK_TEST_MONGODB_URI"],
+        database=mongo_test_database.database.name,
+        transactions="never",
     )
     reopened = _store(reopened_database)
     try:
@@ -146,7 +161,9 @@ def test_fsck_marks_reference_child_and_shared_dependency_graphs(mongo_test_data
         reopened_database.dispose()
 
 
-def test_fsck_repairs_only_main_family_dispatches_and_reports_conflicts(mongo_test_database) -> None:
+def test_fsck_repairs_only_main_family_dispatches_and_reports_conflicts(
+    mongo_test_database,
+) -> None:
     store = _store(mongo_test_database)
     main = FsckEntryA("main")
     main_sid = store.save(main)
@@ -178,7 +195,9 @@ def test_fsck_repairs_only_main_family_dispatches_and_reports_conflicts(mongo_te
 def test_fsck_generation_invalidates_another_store_cache(mongo_test_database) -> None:
     first = _store(mongo_test_database)
     second_database = MongoDatabase(
-        os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name, transactions="never"
+        os.environ["HTTK_TEST_MONGODB_URI"],
+        database=mongo_test_database.database.name,
+        transactions="never",
     )
     second = _store(second_database)
     try:
@@ -192,7 +211,9 @@ def test_fsck_generation_invalidates_another_store_cache(mongo_test_database) ->
         second_database.dispose()
 
 
-def test_fsck_reports_and_preserves_unattributed_collection(mongo_test_database) -> None:
+def test_fsck_reports_and_preserves_unattributed_collection(
+    mongo_test_database,
+) -> None:
     store = _store(mongo_test_database)
     foreign = mongo_test_database.database["foreign_fsck_data"]
     foreign.insert_one({"_id": 1, "_httk_role": "dep", "f": {}})
@@ -203,7 +224,9 @@ def test_fsck_reports_and_preserves_unattributed_collection(mongo_test_database)
     assert any("foreign_fsck_data" in violation and "sweep" in violation for violation in summary.violations)
 
 
-def test_fsck_aborts_sweep_until_reopened_private_type_is_supplied(mongo_test_database) -> None:
+def test_fsck_aborts_sweep_until_reopened_private_type_is_supplied(
+    mongo_test_database,
+) -> None:
     first = _store(mongo_test_database)
     live = FsckLeaf("private-live")
     root = FsckPrivateRoot(live)
@@ -212,7 +235,9 @@ def test_fsck_aborts_sweep_until_reopened_private_type_is_supplied(mongo_test_da
     orphan = FsckLeaf("private-orphan")
     orphan_sid = _insert_orphan_leaf(mongo_test_database, orphan)
     reopened_database = MongoDatabase(
-        os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name, transactions="never"
+        os.environ["HTTK_TEST_MONGODB_URI"],
+        database=mongo_test_database.database.name,
+        transactions="never",
     )
     reopened = _store(reopened_database)
     try:
@@ -239,7 +264,9 @@ def test_fsck_randomized_graphs_retain_reachable_documents(mongo_test_database, 
     rng = random.Random(seed)
     store = _store(mongo_test_database)
     reopened_database = MongoDatabase(
-        os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name, transactions="never"
+        os.environ["HTTK_TEST_MONGODB_URI"],
+        database=mongo_test_database.database.name,
+        transactions="never",
     )
     reopened = _store(reopened_database)
     leaves = mongo_test_database.database[collection_name_for(resolve_schema(FsckLeaf))]

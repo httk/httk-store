@@ -12,7 +12,12 @@ from itertools import islice
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from httk.store.backend.codecs import ValueCodec, codec_named
-from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    SchemaError,
+    TableSchema,
+    resolve_schema,
+)
 from httk.store.query import SearchResult, UnsupportedQueryError
 from httk.store.store_timestamp import ns_operand_to_store_units
 
@@ -242,14 +247,32 @@ def _render_comparison(node: ComparisonNode) -> tuple[dict[str, Any], dict[str, 
             return _known(path), _null(path)
         return _unknown_constant(), _known(path)
 
-    operators = {"eq": "$eq", "ne": "$ne", "lt": "$lt", "le": "$lte", "gt": "$gt", "ge": "$gte"}
-    complements = {"eq": "ne", "ne": "eq", "lt": "ge", "le": "gt", "gt": "le", "ge": "lt"}
+    operators = {
+        "eq": "$eq",
+        "ne": "$ne",
+        "lt": "$lt",
+        "le": "$lte",
+        "gt": "$gt",
+        "ge": "$gte",
+    }
+    complements = {
+        "eq": "ne",
+        "ne": "eq",
+        "lt": "ge",
+        "le": "gt",
+        "gt": "le",
+        "ge": "lt",
+    }
     value = node.literal
     if isinstance(value, _FieldReference):
         right = value.field._path
         return (
             _safe_expr(path, right, {operators[node.op]: [f"${path}", f"${right}"]}),
-            _safe_expr(path, right, {operators[complements[node.op]]: [f"${path}", f"${right}"]}),
+            _safe_expr(
+                path,
+                right,
+                {operators[complements[node.op]]: [f"${path}", f"${right}"]},
+            ),
         )
     truth_op = {path: {operators[node.op]: value}}
     false_op = {path: {operators[complements[node.op]]: value}}
@@ -322,7 +345,9 @@ def _render_child_predicate(field: "MongoField", predicate: dict[str, Any]) -> t
     return _and(_type_in(path, ["array"]), member), _and(_array_domain(path), no_member)
 
 
-def _render_child_comparison(node: ChildComparisonNode) -> tuple[dict[str, Any], dict[str, Any]]:
+def _render_child_comparison(
+    node: ChildComparisonNode,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     key = _child_value_key(node.field)
     operators = {"lt": "$lt", "le": "$lte", "gt": "$gt", "ge": "$gte"}
     predicate: dict[str, Any]
@@ -337,17 +362,27 @@ def _render_child_comparison(node: ChildComparisonNode) -> tuple[dict[str, Any],
     return _render_child_predicate(node.field, predicate)
 
 
-def _render_child_string(node: ChildStringNode) -> tuple[dict[str, Any], dict[str, Any]]:
+def _render_child_string(
+    node: ChildStringNode,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     key = _child_value_key(node.field)
     escaped = re.escape(node.text)
-    pattern = {"contains": f".*{escaped}.*", "startswith": f"^{escaped}", "endswith": f"{escaped}$"}[node.mode]
+    pattern = {
+        "contains": f".*{escaped}.*",
+        "startswith": f"^{escaped}",
+        "endswith": f"{escaped}$",
+    }[node.mode]
     return _render_child_predicate(node.field, {key: {"$regex": pattern}})
 
 
 def _render_string(node: StringMatchNode) -> tuple[dict[str, Any], dict[str, Any]]:
     path = node.field._path
     escaped = re.escape(node.text)
-    pattern = {"contains": f".*{escaped}.*", "startswith": f"^{escaped}", "endswith": f"{escaped}$"}[node.mode]
+    pattern = {
+        "contains": f".*{escaped}.*",
+        "startswith": f"^{escaped}",
+        "endswith": f"{escaped}$",
+    }[node.mode]
     regex = {"$regex": pattern}
     return _and({path: regex}, _known(path)), _and({path: {"$not": regex}}, _known(path))
 
@@ -414,6 +449,7 @@ class MongoField:
     """A scalar field, or the value channel of an embedded child field."""
 
     __slots__ = (
+        "_alternative_composite",
         "_child_keys",
         "_codec",
         "_key_path",
@@ -434,6 +470,7 @@ class MongoField:
         presentation_prefix: str = "",
         operand_converter: Callable[[Any], Any] | None = None,
         presentation_converter: Callable[[Any], Any] | None = None,
+        alternative_composite: bool = False,
     ) -> None:
         self._variable = variable
         self._key_path = key_path
@@ -443,6 +480,9 @@ class MongoField:
         self._presentation_prefix = presentation_prefix
         self._operand_converter = operand_converter
         self._presentation_converter = presentation_converter
+        # When set, this field renders the composite ``<prefix><id>~<alt_kind>``
+        # public id of a named alternative for output/sort (see _scalar_value).
+        self._alternative_composite = alternative_composite
 
     @property
     def _path(self) -> str:
@@ -649,6 +689,10 @@ class MongoVariable:
             # and store_timestamp), carrying no unit conversion and, unlike
             # store_timestamp, no store_timestamps=True requirement.
             return MongoField(self, "logical_id", FieldSpec("logical_id", int, "scalar", ()))
+        if name == "alt_kind":
+            # The store-managed alternative kind: a top-level document field
+            # (absent on mains), served for the ``_httk_kind`` intrinsic.
+            return MongoField(self, "alt_kind", FieldSpec("alt_kind", str, "scalar", ()))
         if name == "store_timestamp":
             if not self._searcher._store.store_timestamps:
                 raise AttributeError("store_timestamp queries require MongoStore(store_timestamps=True)")
@@ -684,7 +728,11 @@ class MongoVariable:
             assert spec.child is not None
             child_codec: ValueCodec | None = codec_named(spec.codec_name) if spec.codec_name is not None else None
             return MongoField(
-                self, f"f.{spec.field}", spec, child_codec, tuple(column.name for column in spec.child.element_columns)
+                self,
+                f"f.{spec.field}",
+                spec,
+                child_codec,
+                tuple(column.name for column in spec.child.element_columns),
             )
         raise SchemaError(
             f"{self._cls.__name__}.{spec.field} is a fixed-shape tensor field and cannot be queried as a whole"
@@ -711,10 +759,18 @@ class MongoSearcher:
     still resolve replaced documents.
     """
 
-    def __init__(self, store: "MongoStore", *, as_of: object = None, only_latest: bool = False) -> None:
+    def __init__(
+        self,
+        store: "MongoStore",
+        *,
+        as_of: object = None,
+        only_latest: bool = False,
+        only_main_alt: bool = True,
+    ) -> None:
         self._store = store
         self._as_of = as_of
         self._only_latest = only_latest
+        self._only_main_alt = only_main_alt
         self._variables: list[MongoVariable] = []
         self._hidden_variables: list[MongoVariable] = []
         self._root: MongoVariable | None = None
@@ -805,7 +861,11 @@ class MongoSearcher:
         self._expressions.append(expression)
 
     def add_sort(
-        self, field: MongoField, descending: bool = False, *, nulls: Literal["first", "last"] = "last"
+        self,
+        field: MongoField,
+        descending: bool = False,
+        *,
+        nulls: Literal["first", "last"] = "last",
     ) -> None:
         """Append a stable scalar sort with an explicit null rank."""
         if not isinstance(field, MongoField):
@@ -924,7 +984,12 @@ class MongoSearcher:
                                 "as": variable._alias,
                             }
                         },
-                        {"$unwind": {"path": f"${variable._alias}", "preserveNullAndEmptyArrays": True}},
+                        {
+                            "$unwind": {
+                                "path": f"${variable._alias}",
+                                "preserveNullAndEmptyArrays": True,
+                            }
+                        },
                     ]
                 )
                 emitted.add(variable)
@@ -936,6 +1001,24 @@ class MongoSearcher:
 
     def _truth_filter(self) -> dict[str, Any]:
         return _and(*(render_node(expression.node)[0] for expression in self._expressions))
+
+    def _main_alt_stages(self) -> list[dict[str, Any]]:
+        """Restrict each declared variable to mains, hiding named alternatives.
+
+        A main carries no ``alt_kind`` field (only named alternatives set it), so
+        the match keeps documents where the field is null or absent. Documents
+        from a store that predates the alternatives axis lack the field entirely
+        and therefore match as mains, as they must.
+
+        :return: One anti-alternative ``$match`` stage per declared variable.
+        """
+        stages: list[dict[str, Any]] = []
+        for variable in self._variables:
+            prefix = "" if variable is self._root else f"{variable._alias}."
+            # A plain equality to null matches both an explicit null and an
+            # absent field in MongoDB, which is exactly the mains predicate.
+            stages.append({"$match": {f"{prefix}alt_kind": None}})
+        return stages
 
     def _latest_lineage_stages(self) -> list[dict[str, Any]]:
         """Restrict each declared variable to the latest document of its lineage.
@@ -970,7 +1053,10 @@ class MongoSearcher:
                     "$lookup": {
                         "from": collection_name_for(variable._schema),
                         "let": {"lid": f"${prefix}logical_id", "sid": f"${prefix}_id"},
-                        "pipeline": [{"$match": {"$expr": {"$and": newer}}}, {"$limit": 1}],
+                        "pipeline": [
+                            {"$match": {"$expr": {"$and": newer}}},
+                            {"$limit": 1},
+                        ],
                         "as": alias,
                     }
                 }
@@ -990,6 +1076,8 @@ class MongoSearcher:
         self._require_verifier_identity()
         pipeline = self._lookup_stages()
         pipeline.append({"$match": self._truth_filter()})
+        if self._only_main_alt:
+            pipeline.extend(self._main_alt_stages())
         if self._only_latest:
             pipeline.extend(self._latest_lineage_stages())
         if count:
@@ -1001,7 +1089,16 @@ class MongoSearcher:
                 {
                     "$addFields": {
                         f"_httk_sort_{index}_rank": {
-                            "$cond": [{"$in": [{"$type": f"${field._path}"}, ["missing", "null"]]}, rank, 1 - rank]
+                            "$cond": [
+                                {
+                                    "$in": [
+                                        {"$type": f"${field._path}"},
+                                        ["missing", "null"],
+                                    ]
+                                },
+                                rank,
+                                1 - rank,
+                            ]
                         }
                     }
                 }
@@ -1026,7 +1123,8 @@ class MongoSearcher:
         if self._row_verifier is not None:
             return sum(1 for _document in self._verified_documents(self._pipeline(apply_window=False)))
         row = next(
-            iter(self._collection().aggregate(self._pipeline(count=True), **self._store._session_kwargs())), None
+            iter(self._collection().aggregate(self._pipeline(count=True), **self._store._session_kwargs())),
+            None,
         )
         return 0 if row is None else int(row["count"])
 
@@ -1108,6 +1206,14 @@ def _scalar_value(document: dict[str, Any], field: MongoField) -> Any:
         return source.get("_id")
     if field._key_path == "logical_id":
         return source.get("logical_id")
+    if field._key_path == "alt_kind":
+        return source.get("alt_kind")
+    if field._alternative_composite:
+        raw_id = source.get("f", {}).get("id")
+        kind = source.get("alt_kind")
+        if raw_id is None or kind is None:
+            return None
+        return f"{field._presentation_prefix}{raw_id}~{kind}"
     if field._key_path == "content_id":
         value = source.get("content_id")
         return None if value is None else field._presentation_prefix + value

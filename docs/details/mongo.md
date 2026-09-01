@@ -148,6 +148,21 @@ same-lineage replacement, `EntryReplacementError` on a cross-lineage dedup hit,
 and `only_latest` leaving reference/child scopes unfiltered — match SQL exactly;
 see [Record replacement and lineages](db.md#record-replacement-and-lineages).
 
+## Alternatives
+
+`store.save(obj, alternative_of=<main id>, alternative_kind=<kind>)` records a
+named alternative representation of a stored main, exactly as on the SQL
+backend: every parent document carries the `alt_id` group identity (a main's own
+`logical_id`, copied by its alternatives) and an optional `alt_kind` (absent on
+mains). Alternatives copy the group main's public `id`, hash with the group
+identity folded in so they never dedup onto the main, and own one lineage per
+`(alt_id, alt_kind)`. `store.searcher()` defaults to `only_main_alt=True`, hiding
+alternatives; pass `only_main_alt=False` to reveal them. `StoredEntryFederation`
+serves them latest-only under composite `<id>~<kind>` ids
+(`query(..., alternatives=True)`, `fetch_alternative(entry_id, kind)`), while the
+revision stream stays mains-only. A store written before this axis lacks
+`alt_id` and any alternative-touching write refuses it with a rebuild error.
+
 ## Store timestamps
 
 `MongoStore` enables store-managed timestamps by default:

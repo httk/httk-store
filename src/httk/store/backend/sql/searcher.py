@@ -76,7 +76,13 @@ import sqlalchemy
 
 from httk.store.backend.codecs import ValueCodec, codec_named, decode_fracvector_exact
 from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
-from httk.store.backend.sql.mapping import LOGICAL_ID_COLUMN, SID_COLUMN, STORE_TIMESTAMP_COLUMN
+from httk.store.backend.sql.mapping import (
+    ALT_ID_COLUMN,
+    ALT_KIND_COLUMN,
+    LOGICAL_ID_COLUMN,
+    SID_COLUMN,
+    STORE_TIMESTAMP_COLUMN,
+)
 from httk.store.query import SearchResult
 from httk.store.store_timestamp import ns_operand_to_store_units
 
@@ -645,6 +651,14 @@ class SqlVariable:
             # name). Unlike store_timestamp it carries no unit conversion and no
             # store_timestamps=True requirement (the column is unconditional).
             return SqlColumn(self._searcher, self._alias.c[LOGICAL_ID_COLUMN], variable=self)
+        if name == ALT_ID_COLUMN:
+            # The store-managed alternative-group id ('alt_id' is a reserved
+            # field name); like logical_id it is unconditional and unit-free.
+            return SqlColumn(self._searcher, self._alias.c[ALT_ID_COLUMN], variable=self)
+        if name == ALT_KIND_COLUMN:
+            # The store-managed alternative kind ('alt_kind' is a reserved field
+            # name); NULL on mains, a kind name on alternatives.
+            return SqlColumn(self._searcher, self._alias.c[ALT_KIND_COLUMN], variable=self)
         if name == STORE_TIMESTAMP_COLUMN:
             if not self._searcher._store.store_timestamps:
                 raise AttributeError("store_timestamp queries require SqlStore(store_timestamps=True)")
@@ -770,6 +784,7 @@ class SqlSearcher:
     :param store: The SQL store whose tables and connection serve the query.
     :param as_of: Optional historic cutoff in canonical timestamp form.
     :param only_latest: Whether root variables are restricted to the latest row of each lineage.
+    :param only_main_alt: Whether root variables are restricted to mains (``alt_kind IS NULL``), hiding alternatives.
 
     An historic cutoff is injected for every root and reference variable;
     visible rows' dependencies are always visible because references only point
@@ -780,10 +795,18 @@ class SqlSearcher:
     still resolve replaced rows.
     """
 
-    def __init__(self, store: "SqlStore", *, as_of: object = None, only_latest: bool = False) -> None:
+    def __init__(
+        self,
+        store: "SqlStore",
+        *,
+        as_of: object = None,
+        only_latest: bool = False,
+        only_main_alt: bool = True,
+    ) -> None:
         self._store = store
         self._as_of = as_of
         self._only_latest = only_latest
+        self._only_main_alt = only_main_alt
         self._variables: list[SqlVariable] = []
         self._where: list[SqlExpression] = []
         self._having: list[SqlExpression] = []
@@ -813,6 +836,10 @@ class SqlSearcher:
             self.add(cast(SqlColumn, variable.store_timestamp) <= self._as_of)
         if self._only_latest:
             self.add(self._latest_of_lineage(schema, alias))
+        if self._only_main_alt:
+            # Root variables default to mains only; alternatives (alt_kind set)
+            # are hidden unless the caller asks for them.
+            self.add(_same(alias.c[ALT_KIND_COLUMN].is_(None)))
         return variable
 
     def _latest_of_lineage(self, schema: TableSchema, alias: sqlalchemy.FromClause) -> SqlExpression:

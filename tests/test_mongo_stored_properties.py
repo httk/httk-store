@@ -93,10 +93,12 @@ def test_mongo_plan_matches_the_sql_stored_property_scenarios(plan, filter_strin
         assert {record.label for record in sql_records} == expected
 
         mongo_rows = sorted(
-            (plan.response_row(type(record), record) for record in mongo_records), key=lambda row: row["id"]
+            (plan.response_row(type(record), record) for record in mongo_records),
+            key=lambda row: row["id"],
         )
         sql_rows = sorted(
-            (row for row in sql_plan.records() if row["_httk_selector"] in expected), key=lambda row: row["id"]
+            (row for row in sql_plan.records() if row["_httk_selector"] in expected),
+            key=lambda row: row["id"],
         )
         assert mongo_rows == sql_rows
 
@@ -124,7 +126,8 @@ def test_public_id_prefix_filters_sorts_and_candidate_streams(plan):
     first_stream = next(stream for stream in streams if stream.backing is GenericCalculationFirst)
     rows = [result[0] for result in first_stream.searcher]
     assert all(row[1].startswith("httk.test-1-") for row in rows)
-    assert [row[3] for row in rows] == sorted(prefix + row[1] for row in rows)
+    # Four fixed outputs (sid, id, immutable_id, alt_kind) precede the sort values.
+    assert [row[4] for row in rows] == sorted(prefix + row[1] for row in rows)
 
 
 def test_evaluator_preserves_unknown_and_canonical_exact_constants():
@@ -133,7 +136,10 @@ def test_evaluator_preserves_unknown_and_canonical_exact_constants():
     assert evaluate(unknown, FIRST) is None
 
     exact = context.scaled_exact_equal(
-        context.field("energy"), context.constant(Fraction(1)), context.constant(Fraction(1, 3)), context.constant(1)
+        context.field("energy"),
+        context.constant(Fraction(1)),
+        context.constant(Fraction(1, 3)),
+        context.constant(1),
     )
     assert evaluate(exact, FIRST) is True
     assert "1/3" in canonical_predicate(exact)
@@ -172,13 +178,16 @@ def test_evaluator_nullable_exact_distinct_and_exists_semantics():
 def test_optional_child_presence_and_response_serialization(plan):
     context = _MongoQueryContext(_EvaluatorRecord)
     assert evaluate(
-        context.equal(context.field("assemblies_present"), context.constant(False)), _EvaluatorRecord(0.0, [])
+        context.equal(context.field("assemblies_present"), context.constant(False)),
+        _EvaluatorRecord(0.0, []),
     )
     assert evaluate(
-        context.equal(context.field("attached_present"), context.constant(True)), _EvaluatorRecord(0.0, [], attached=[])
+        context.equal(context.field("attached_present"), context.constant(True)),
+        _EvaluatorRecord(0.0, [], attached=[]),
     )
     assert evaluate(
-        context.equal(context.field("exact_values_present"), context.constant(False)), _EvaluatorRecord(0.0, [])
+        context.equal(context.field("exact_values_present"), context.constant(False)),
+        _EvaluatorRecord(0.0, []),
     )
     assert evaluate(
         context.equal(context.field("exact_values_present"), context.constant(True)),
@@ -206,6 +215,8 @@ def test_optional_child_presence_and_response_serialization(plan):
     ]
     streams = plan.candidate_searchers(sort=(("type", True), ("immutable_id", False)))
     assert all(stream.sort_count == 2 for stream in streams)
+    # Four fixed outputs (sid, id, immutable_id, alt_kind) precede the two sort
+    # values, followed by the store timestamp.
     assert all(
-        result[0][3] == "calculations" and len(result[0]) == 6 for stream in streams for result in stream.searcher
+        result[0][4] == "calculations" and len(result[0]) == 7 for stream in streams for result in stream.searcher
     )

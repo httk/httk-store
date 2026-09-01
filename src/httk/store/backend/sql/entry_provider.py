@@ -199,6 +199,10 @@ class StoreEntryProvider(EntryProvider):
                 "StoreEntryProvider(only_latest=False) requires an id_of override; "
                 "all-revision serving must use immutable ids"
             )
+        # This provider serves mains only: the store searcher defaults to
+        # only_main_alt=True, so named alternatives never appear here and their
+        # revisions never enter the revision stream. Alternative serving is
+        # available through StoredEntryFederation, not this provider.
         self._store = store
         self._classes: dict[str, type] = dict(classes)
         self._only_latest = only_latest

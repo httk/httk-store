@@ -107,3 +107,19 @@ into a successful partial result.
 There is no best-effort or `ignore_errors` mode. Federation does not implement
 writes, distributed transactions, deduplication, sorting, concurrency, or
 cross-store joins.
+
+## Durable stored-entry federation
+
+`StoredEntryFederation` is the separate, protocol-facing merge of configured
+durable entry families (`StoredEntrySource` values). Its `query()`/`fetch()`
+serve latest mains by default; `revisions=True` streams the immutable revisions
+of those mains. Both are **mains-only**: named alternatives never appear, and an
+alternative's revisions never enter a revision stream.
+
+Pass `alternatives=True` to `query()`/`fetch()` to serve named alternatives
+instead. Each listed alternative is its own latest revision, its `id` renders
+the composite `<id>~<kind>` (source prefix included), `_httk_id` renders the
+plain group entry id, and the new intrinsic `_httk_kind` renders the kind — both
+filterable and sortable. `fetch_alternative(entry_id, kind)` addresses one
+alternative by its group id and kind, mirroring `fetch_revision`; a malformed or
+absent kind returns `None`. `audit_duplicate_ids()` stays main-only.

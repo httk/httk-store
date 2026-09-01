@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Protocol, TypeVar, runtime_checkable
 
 from httk.core.storage import IdentitySkip, project_storage_record
-from httk.core.storage.identity import _trusted_content_id
+from httk.core.storage.identity import _content_id_uncached, _trusted_content_id
 
 from httk.store.backend.schema import FieldSpec, resolve_schema
 from httk.store.storage_layout import EntryFamilyLayout
@@ -49,12 +49,12 @@ class EntryIdScheme:
 
 
 class EntryIdConflictError(ValueError):
-    """An entry id is already owned by a different logical lineage.
+    """An entry id is already owned by a different lineage or alternative group.
 
     :param table_name: The table containing the conflicting identifier.
     :param entry_id: The conflicting entry identifier.
-    :param existing_logical_id: The lineage already owning the identifier.
-    :param requested_logical_id: The lineage requesting it, when known.
+    :param existing_logical_id: The lineage or group already owning the identifier.
+    :param requested_logical_id: The lineage or group requesting it, when known.
     """
 
     def __init__(
@@ -69,7 +69,7 @@ class EntryIdConflictError(ValueError):
         self.existing_logical_id = existing_logical_id
         self.requested_logical_id = requested_logical_id
         super().__init__(
-            f"entry id {entry_id!r} in table {table_name!r} belongs to logical_id "
+            f"entry id {entry_id!r} in table {table_name!r} belongs to "
             f"{existing_logical_id!r}, not {requested_logical_id!r}"
         )
 
@@ -174,11 +174,14 @@ class SaveProjection:
             self.values_by_source[key] = values
         return values
 
-    def content_id(self, record_type: type, source: Any) -> str:
+    def content_id(self, record_type: type, source: Any, *, extras: Mapping[str, object] | None = None) -> str:
         # SaveProjection only memoizes the standard deterministic projection;
         # use core's trusted route so the source-owned content-id cache is
         # shared across saves.  Arbitrary custom projectors remain uncached via
-        # the public content_id path.
+        # the public content_id path.  Extras (alternative-group identity) are
+        # root-only and must bypass the extras-less trusted cache entirely.
+        if extras:
+            return _content_id_uncached(source, as_record=record_type, projector=self.projector, extras=extras)
         return _trusted_content_id(source, as_record=record_type, projector=self.projector)
 
 

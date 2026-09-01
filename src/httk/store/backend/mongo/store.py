@@ -10,7 +10,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from httk.core import FracVector
-from httk.core.entry_ids import check_entry_id, check_immutable_id, format_entry_id, format_immutable_id
+from httk.core.entry_ids import (
+    ALTERNATIVE_KIND_PATTERN,
+    check_entry_id,
+    check_immutable_id,
+    format_alternative_id,
+    format_entry_id,
+    format_immutable_id,
+)
 from httk.core.storage import StorageProjectionCycleError, resolve_storage_record
 from pymongo import IndexModel
 from pymongo.errors import CollectionInvalid, DuplicateKeyError, PyMongoError
@@ -80,10 +87,34 @@ __all__ = ["MongoStore", "StoreClockRegressionError"]
 _DOCUMENT_LAYOUT = "mongo-v2"
 _RESERVED_PREFIX = "_httk_"
 _METADATA_KEYS = frozenset(
-    {"_id", "protocol", "entry_declaration", "entry_schemas", "document_layout", "generation", "store_timestamps"}
+    {
+        "_id",
+        "protocol",
+        "entry_declaration",
+        "entry_schemas",
+        "document_layout",
+        "generation",
+        "store_timestamps",
+    }
 )
 _LOGGER = logging.getLogger("httk.store.backend.mongo")
 _TRANSACTION_ATTEMPTS = 5
+
+
+class _AlternativeRequest(typing.NamedTuple):
+    """One top-level save's unresolved alternative-group inputs.
+
+    A fresh :meth:`MongoStore.save` carries ``alternative_of``/
+    ``alternative_kind`` (resolved against the record's backing collection); a
+    :meth:`MongoStore.replace` of an alternative carries the predecessor's
+    already-resolved ``replace_alt_*`` values instead.
+    """
+
+    alternative_of: str | None = None
+    alternative_kind: str | None = None
+    replace_alt_group: int | None = None
+    replace_alt_kind: str | None = None
+    replace_alt_main_id: str | None = None
 
 
 class _HydrationContext:
@@ -190,7 +221,11 @@ class MongoStore:
         for family in self.layout.families:
             self._known_record_types.update(family.records)
         self._entry_record_types: dict[type, tuple[str, int, int]] = {
-            record: (self._family_entry_type(family.family), len(family.records), backing_index)
+            record: (
+                self._family_entry_type(family.family),
+                len(family.records),
+                backing_index,
+            )
             for family in self.layout.families
             if family.definition_id is not None
             for backing_index, record in enumerate(family.records)
@@ -308,8 +343,14 @@ class MongoStore:
         document_layout_actual = stored.get("document_layout")
         if protocol_actual != DECLARATION_PROTOCOL_VERSION or document_layout_actual != _DOCUMENT_LAYOUT:
             diff["protocol"] = {
-                "expected": {"protocol": DECLARATION_PROTOCOL_VERSION, "document_layout": _DOCUMENT_LAYOUT},
-                "actual": {"protocol": protocol_actual, "document_layout": document_layout_actual},
+                "expected": {
+                    "protocol": DECLARATION_PROTOCOL_VERSION,
+                    "document_layout": _DOCUMENT_LAYOUT,
+                },
+                "actual": {
+                    "protocol": protocol_actual,
+                    "document_layout": document_layout_actual,
+                },
             }
 
         persisted_timestamps = stored.get("store_timestamps")
@@ -454,7 +495,8 @@ class MongoStore:
     def _restamp_entry_schemas(self, layout: StorageLayout) -> None:
         """Re-stamp the metadata layout document's fingerprint after an additive upgrade."""
         self._database.database[METADATA_COLLECTION].update_one(
-            {"_id": "layout"}, {"$set": {"entry_schemas": schema_fingerprint_json(layout)}}
+            {"_id": "layout"},
+            {"$set": {"entry_schemas": schema_fingerprint_json(layout)}},
         )
 
     def ensure_collections(self, *classes: type) -> None:
@@ -486,7 +528,13 @@ class MongoStore:
                 dispatch_name = entry_dispatch_table_name(family.name)
                 if dispatch_name in seen:
                     continue
-                requested.append((dispatch_name, dispatch_validator_for(family), dispatch_index_specs(family)))
+                requested.append(
+                    (
+                        dispatch_name,
+                        dispatch_validator_for(family),
+                        dispatch_index_specs(family),
+                    )
+                )
                 seen.add(dispatch_name)
 
         for name, validator, specs in requested:
@@ -559,7 +607,9 @@ class MongoStore:
 
     def _advance_store_timestamp_mark(self, captured: int | None) -> None:
         self._store_timestamp_mark = advance_store_timestamp_mark(
-            self._store_timestamp_mark, captured, allow_clock_regression=self._allow_clock_regression
+            self._store_timestamp_mark,
+            captured,
+            allow_clock_regression=self._allow_clock_regression,
         )
 
     # ------------------------------------------------------------------ leases and transactions
@@ -617,7 +667,10 @@ class MongoStore:
         return any(entry_dispatch_table_name(family.name) in message for family in self.layout.families)
 
     def _start_transaction(self, session: Any) -> None:
-        session.start_transaction(read_concern=ReadConcern("majority"), write_concern=WriteConcern("majority", j=True))
+        session.start_transaction(
+            read_concern=ReadConcern("majority"),
+            write_concern=WriteConcern("majority", j=True),
+        )
 
     def _commit(self, session: Any) -> None:
         while True:
@@ -742,18 +795,49 @@ class MongoStore:
 
     # ------------------------------------------------------------------ object storage
 
-    def save(self, obj: Any, *, as_record: type | None = None, id_series: str | None = None) -> int:
+    def save(
+        self,
+        obj: Any,
+        *,
+        as_record: type | None = None,
+        id_series: str | None = None,
+        alternative_of: str | None = None,
+        alternative_kind: str | None = None,
+    ) -> int:
         """Store an object graph and return its integer sid.
+
+        Passing ``alternative_of`` (a stored main entry's id) with
+        ``alternative_kind`` saves ``obj`` as a named ALTERNATIVE representation
+        of that main: it copies the main's public ``id``, joins the main's
+        alternative group, and hashes with the group identity folded in so its
+        content never dedups onto the main. The main must live in ``obj``'s own
+        backing collection and must itself be a main (not another alternative).
 
         :param obj: The object or projected domain object to store.
         :param as_record: An explicit alternate storage-record class.
         :param id_series: Override the configured entry-id series when an id must be minted.
+        :param alternative_of: The stored main entry's id this record is an alternative of, if any.
+        :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
         :return: The stored sid.
         :raises TypeError: If ``obj`` is a cursor proxy.
+        :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing collection, or itself an alternative.
         :raises ~httk.core.storage.StorageProjectionCycleError: If the projected graph cycles.
         :raises ~httk.store.store_common.EntryMetadataConflictError: If identity-excluded metadata conflicts.
         """
-        return self._save_graph(obj, as_record=as_record, replace_logical_id=None, id_series=id_series)
+        if (alternative_of is None) != (alternative_kind is None):
+            raise ValueError("alternative_of and alternative_kind must be given together, or neither")
+        if alternative_kind is not None and ALTERNATIVE_KIND_PATTERN.fullmatch(alternative_kind) is None:
+            raise ValueError(
+                f"invalid alternative_kind {alternative_kind!r}; expected {ALTERNATIVE_KIND_PATTERN.pattern}"
+            )
+        return self._save_graph(
+            obj,
+            as_record=as_record,
+            replace_logical_id=None,
+            id_series=id_series,
+            alternative_of=alternative_of,
+            alternative_kind=alternative_kind,
+        )
 
     def _save_graph(
         self,
@@ -763,10 +847,33 @@ class MongoStore:
         replace_logical_id: int | None,
         id_series: str | None,
         replacement_entry_id: str | None = None,
+        alternative_of: str | None = None,
+        alternative_kind: str | None = None,
+        replace_alt_group: int | None = None,
+        replace_alt_kind: str | None = None,
+        replace_alt_main_id: str | None = None,
     ) -> int:
-        """Run one top-level save, optionally as a replacement carrying ``replace_logical_id``."""
+        """Run one top-level save, optionally as a replacement carrying ``replace_logical_id``.
+
+        Alternatives enter one of two ways: a fresh :meth:`save` resolves
+        ``alternative_of``/``alternative_kind`` against the record's own backing
+        collection; a :meth:`replace` of an alternative carries the predecessor's
+        already-resolved ``replace_alt_*`` values so the replacement hashes with
+        the same group extras as revision 1.
+        """
         reject_cursor_proxy(obj)
         record_type = resolve_storage_record(obj, as_record=as_record)
+        alt_request = (
+            _AlternativeRequest(
+                alternative_of=alternative_of,
+                alternative_kind=alternative_kind,
+                replace_alt_group=replace_alt_group,
+                replace_alt_kind=replace_alt_kind,
+                replace_alt_main_id=replace_alt_main_id,
+            )
+            if alternative_of is not None or replace_alt_group is not None
+            else None
+        )
         if self._current_transaction() is not None:
             self._ensure_graph_collections(record_type)
             self._ensure_counter_collection()
@@ -776,7 +883,13 @@ class MongoStore:
                 transaction.store_timestamp = self._capture_store_timestamp()
                 transaction.timestamp_initialized = True
             sid = self._save_once(
-                record_type, obj, transaction.store_timestamp, replace_logical_id, id_series, replacement_entry_id
+                record_type,
+                obj,
+                transaction.store_timestamp,
+                replace_logical_id,
+                id_series,
+                replacement_entry_id,
+                alt_request,
             )
             return sid
         with self._write_lock:
@@ -794,13 +907,26 @@ class MongoStore:
                         self._local.write_session = session
                         try:
                             sid = self._save_once(
-                                record_type, obj, captured, replace_logical_id, id_series, replacement_entry_id
+                                record_type,
+                                obj,
+                                captured,
+                                replace_logical_id,
+                                id_series,
+                                replacement_entry_id,
+                                alt_request,
                             )
                         finally:
                             self._local.write_session = previous_session
                 else:
                     sid = self._save_implicit_transaction(
-                        record_type, obj, lease, captured, replace_logical_id, id_series, replacement_entry_id
+                        record_type,
+                        obj,
+                        lease,
+                        captured,
+                        replace_logical_id,
+                        id_series,
+                        replacement_entry_id,
+                        alt_request,
                     )
                 self._advance_store_timestamp_mark(captured)
                 return sid
@@ -816,9 +942,26 @@ class MongoStore:
         replace_logical_id: int | None = None,
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
+        alt_request: "_AlternativeRequest | None" = None,
     ) -> int:
         projection = SaveProjection(store_timestamp=store_timestamp)
         self._projection_state(projection)
+        alt_group: int | None
+        alt_kind: str | None
+        alt_main_id: str | None
+        if alt_request is not None:
+            if alt_request.alternative_of is not None:
+                alt_group, alt_main_id = self._resolve_alternative_main(record_type, alt_request.alternative_of)
+                alt_kind = alt_request.alternative_kind
+            else:
+                alt_group = alt_request.replace_alt_group
+                alt_kind = alt_request.replace_alt_kind
+                alt_main_id = alt_request.replace_alt_main_id
+        else:
+            alt_group = alt_kind = alt_main_id = None
+        alt_extras: Mapping[str, object] | None = (
+            {"alternative_of": alt_main_id, "alternative_kind": alt_kind} if alt_kind is not None else None
+        )
         try:
             sid = self._save(
                 record_type,
@@ -829,10 +972,21 @@ class MongoStore:
                 replace_logical_id=replace_logical_id,
                 id_series=id_series,
                 replacement_entry_id=replacement_entry_id,
+                alt_group=alt_group,
+                alt_kind=alt_kind,
+                alt_main_id=alt_main_id,
+                alt_extras=alt_extras,
             )
             family = self._family_for_backing(record_type)
             if family is not None:
-                self._save_entry_dispatch(family, record_type, sid, projection.content_id(record_type, obj))
+                # The dispatch hash is a top-level content id, so it carries the
+                # same alternative-group extras as the dedup key below.
+                self._save_entry_dispatch(
+                    family,
+                    record_type,
+                    sid,
+                    projection.content_id(record_type, obj, extras=alt_extras),
+                )
             for (saved_type, identity), saved_sid in self._projection_sids(projection).items():
                 source = self._projection_sources(projection)[(saved_type, identity)]
                 # Entry-id minting augments the persisted ``f`` document; the
@@ -860,6 +1014,7 @@ class MongoStore:
         replace_logical_id: int | None = None,
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
+        alt_request: "_AlternativeRequest | None" = None,
     ) -> int:
         last_error: BaseException | None = None
         for attempt in range(_TRANSACTION_ATTEMPTS):
@@ -870,7 +1025,13 @@ class MongoStore:
                 try:
                     self._start_transaction(session)
                     sid = self._save_once(
-                        record_type, obj, store_timestamp, replace_logical_id, id_series, replacement_entry_id
+                        record_type,
+                        obj,
+                        store_timestamp,
+                        replace_logical_id,
+                        id_series,
+                        replacement_entry_id,
+                        alt_request,
                     )
                     self._commit(session)
                 except BaseException as error:
@@ -934,6 +1095,10 @@ class MongoStore:
         replace_logical_id: int | None = None,
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
+        alt_group: int | None = None,
+        alt_kind: str | None = None,
+        alt_main_id: str | None = None,
+        alt_extras: Mapping[str, object] | None = None,
     ) -> int:
         self._refresh_writer_lease()
         key = (record_type, id(source))
@@ -954,6 +1119,10 @@ class MongoStore:
                 replace_logical_id=replace_logical_id,
                 id_series=id_series,
                 replacement_entry_id=replacement_entry_id,
+                alt_group=alt_group,
+                alt_kind=alt_kind,
+                alt_main_id=alt_main_id,
+                alt_extras=alt_extras,
             )
         finally:
             projection.active.remove(key)
@@ -969,11 +1138,21 @@ class MongoStore:
         replace_logical_id: int | None = None,
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
+        alt_group: int | None = None,
+        alt_kind: str | None = None,
+        alt_main_id: str | None = None,
+        alt_extras: Mapping[str, object] | None = None,
     ) -> int:
         # The replacement lineage applies ONLY to the top-level parent document;
         # a nested record reached through references/ownership keeps its own-sid
-        # lineage. A fresh document's logical_id is its own sid.
+        # lineage. A fresh document's logical_id is its own sid. Alternative-group
+        # identity is likewise a top-level concept only: nested records never
+        # carry a group id, kind, or extras.
         replacement = replace_logical_id if top_level else None
+        alt_group = alt_group if top_level else None
+        alt_kind = alt_kind if top_level else None
+        alt_main_id = alt_main_id if top_level else None
+        alt_extras = alt_extras if top_level else None
         schema = resolve_schema(record_type)
         projected = projection.projector(record_type, source)
         if record_type in self._entry_record_types:
@@ -981,7 +1160,12 @@ class MongoStore:
             if top_level and replacement_entry_id is not None:
                 entry_id = projected.get("id")
                 if entry_id is not None and entry_id != replacement_entry_id:
-                    raise EntryIdConflictError(collection_name_for(schema), str(entry_id), replacement, replacement)
+                    raise EntryIdConflictError(
+                        collection_name_for(schema),
+                        str(entry_id),
+                        replacement,
+                        replacement,
+                    )
         validation_key = (record_type, id(source))
         if type(source) is record_type and validation_key not in projection.validated:
             validator = vars(record_type).get("__httk_validate__")
@@ -992,7 +1176,7 @@ class MongoStore:
         content_key: str | None = None
         collection = self._database.database[collection_name_for(schema)]
         if schema.dedup == "content_id":
-            content_key = projection.content_id(record_type, source)
+            content_key = projection.content_id(record_type, source, extras=alt_extras)
             found = collection.find_one({"content_id": content_key}, **self._session_kwargs())
             if found is not None:
                 sid = int(found["_id"])
@@ -1001,7 +1185,11 @@ class MongoStore:
                 self._check_metadata(record_type, sid, source, projection)
                 self._projection_sids(projection)[validation_key] = sid
                 if top_level and found.get("_httk_role") == "dep":
-                    collection.update_one({"_id": sid}, {"$set": {"_httk_role": "main"}}, **self._session_kwargs())
+                    collection.update_one(
+                        {"_id": sid},
+                        {"$set": {"_httk_role": "main"}},
+                        **self._session_kwargs(),
+                    )
                 return sid
 
         checkpoint = len(projection.inserted)
@@ -1011,7 +1199,12 @@ class MongoStore:
             source,
             record_type,
             lambda target, value, field: self._save(
-                target, value, projection, self._field_path(path, field), top_level=False, id_series=id_series
+                target,
+                value,
+                projection,
+                self._field_path(path, field),
+                top_level=False,
+                id_series=id_series,
             ),
         )
         if schema.dedup == "by_value":
@@ -1025,14 +1218,28 @@ class MongoStore:
                 self._check_metadata(record_type, sid, source, projection)
                 self._projection_sids(projection)[validation_key] = sid
                 if top_level and found.get("_httk_role") == "dep":
-                    collection.update_one({"_id": sid}, {"$set": {"_httk_role": "main"}}, **self._session_kwargs())
+                    collection.update_one(
+                        {"_id": sid},
+                        {"$set": {"_httk_role": "main"}},
+                        **self._session_kwargs(),
+                    )
                 return sid
 
         sid = counter_next(self._database.database, schema.table_name, session=self._write_session())
-        document: dict[str, Any] = {"_id": sid, "_httk_role": "main" if top_level else "dep", "f": f_document}
+        document: dict[str, Any] = {
+            "_id": sid,
+            "_httk_role": "main" if top_level else "dep",
+            "f": f_document,
+        }
         # The sid is allocated pre-insert, so the lineage is known directly: a
         # replacement copies its predecessor's, a fresh document uses its own sid.
         document["logical_id"] = replacement if replacement is not None else sid
+        # alt_id is a replacement's/alternative's group (both carried in
+        # alt_group), else the fresh main's own sid; alt_kind is absent for a
+        # main.  Both are final pre-insert here (no write-after-insert).
+        document["alt_id"] = alt_group if alt_group is not None else sid
+        if alt_kind is not None:
+            document["alt_kind"] = alt_kind
         if record_type in self._entry_record_types:
             self._prepare_entry_ids(
                 record_type,
@@ -1041,6 +1248,9 @@ class MongoStore:
                 sid=sid,
                 id_series=id_series,
                 replacement_entry_id=replacement_entry_id if top_level else None,
+                alt_group=alt_group,
+                alt_kind=alt_kind,
+                alt_main_id=alt_main_id,
             )
         if projection.store_timestamp is not None:
             document["store_timestamp"] = projection.store_timestamp
@@ -1064,11 +1274,55 @@ class MongoStore:
             self._check_metadata(record_type, sid, source, projection)
             self._projection_sids(projection)[validation_key] = sid
             if top_level and winner.get("_httk_role") == "dep":
-                collection.update_one({"_id": sid}, {"$set": {"_httk_role": "main"}}, **self._session_kwargs())
+                collection.update_one(
+                    {"_id": sid},
+                    {"$set": {"_httk_role": "main"}},
+                    **self._session_kwargs(),
+                )
             return sid
         projection.inserted.append((record_type, sid))
         self._projection_sids(projection)[validation_key] = sid
         return sid
+
+    def _resolve_alternative_main(self, record_type: type, alternative_of: str) -> tuple[int, str]:
+        """Resolve ``alternative_of`` to its ``(group id, main entry id)``.
+
+        The main must live in ``record_type``'s own backing collection
+        (alternatives share their main's backing) and must itself be a main, not
+        another alternative.
+
+        :param record_type: The alternative's record class, fixing the backing collection to search.
+        :param alternative_of: The main entry's id this record is an alternative of.
+        :return: The main's ``logical_id`` (the alternative group id) and its entry id.
+        :raises ValueError: If the main is missing, lives in another family backing collection, or is itself an alternative.
+        """
+        collection = self._database.database[collection_name_for(resolve_schema(record_type))]
+        # Alternatives copy their main's id, so an id names a whole group; the
+        # group's MAIN is the one document with no alt_kind.
+        main = collection.find_one(
+            {"f.id": alternative_of, "alt_kind": {"$exists": False}},
+            {"logical_id": 1},
+            **self._session_kwargs(),
+        )
+        if main is not None:
+            return int(main["logical_id"]), alternative_of
+        # No main here: the id may exist only as an alternative (defensive; an
+        # orphan without its main cannot arise through the public API), in a
+        # sibling backing collection, or nowhere.
+        if collection.find_one({"f.id": alternative_of}, {"_id": 1}, **self._session_kwargs()) is not None:
+            raise ValueError(
+                f"alternative_of {alternative_of!r} names an alternative, not a main; "
+                "alternatives of alternatives are not allowed"
+            )
+        for sibling in self._entry_family_collections(record_type):
+            if sibling.name == collection.name:
+                continue
+            if sibling.find_one({"f.id": alternative_of}, {"_id": 1}, **self._session_kwargs()) is not None:
+                raise ValueError(
+                    f"alternative_of {alternative_of!r} is stored in collection {sibling.name!r}, but an "
+                    f"alternative must share its main's backing collection {collection.name!r}"
+                )
+        raise ValueError(f"alternative_of {alternative_of!r} names no entry in collection {collection.name!r}")
 
     def _prepare_entry_ids(
         self,
@@ -1079,22 +1333,41 @@ class MongoStore:
         sid: int,
         id_series: str | None,
         replacement_entry_id: str | None,
+        alt_group: int | None = None,
+        alt_kind: str | None = None,
+        alt_main_id: str | None = None,
     ) -> None:
-        """Validate ownership and mint entry ids for one parent document."""
+        """Validate ownership and mint entry ids for one parent document.
+
+        An alternative copies its group main's id (``alt_main_id``) rather than
+        minting, owns id-space per its alternative group (``alt_group``) instead
+        of its own lineage, and stamps an alternative immutable id under
+        ``alt_kind``. Mains keep the original per-lineage behaviour.
+        """
         collection = self._database.database[collection_name_for(resolve_schema(record_type))]
         entry_id = values.get("id")
         immutable_id = values.get("immutable_id")
-        if replacement_entry_id is not None:
+        # An alternative copies its main's id; a replacement copies its
+        # predecessor's. Both forbid an explicit-but-different id on the record.
+        forced_entry_id = replacement_entry_id if replacement_entry_id is not None else alt_main_id
+        # Ownership is per alternative group, not per lineage: a fresh main's
+        # group is its own sid, so it falls back to the lineage exactly as
+        # before; an alternative/replacement carries its group id.
+        group_id = alt_group if alt_group is not None else lineage
+        if forced_entry_id is not None:
             if entry_id is None:
-                entry_id = replacement_entry_id
+                entry_id = forced_entry_id
                 values["id"] = entry_id
-            elif entry_id != replacement_entry_id:
-                raise EntryIdConflictError(collection.name, str(entry_id), lineage, lineage)
+            elif entry_id != forced_entry_id:
+                raise EntryIdConflictError(collection.name, str(entry_id), group_id, group_id)
         if entry_id is not None:
             for sibling in self._entry_family_collections(record_type):
-                existing = sibling.find_one({"f.id": entry_id}, {"logical_id": 1}, **self._session_kwargs())
-                if existing is not None and (sibling.name != collection.name or int(existing["logical_id"]) != lineage):
-                    raise EntryIdConflictError(sibling.name, str(entry_id), int(existing["logical_id"]), lineage)
+                existing = sibling.find_one({"f.id": entry_id}, {"alt_id": 1}, **self._session_kwargs())
+                if existing is None:
+                    continue
+                existing_alt_id = self._require_alt_id(existing, sibling.name)
+                if sibling.name != collection.name or (int(existing["_id"]) != sid and existing_alt_id != group_id):
+                    raise EntryIdConflictError(sibling.name, str(entry_id), existing_alt_id, group_id)
         else:
             if self._entry_ids is None:
                 raise ValueError(
@@ -1105,19 +1378,70 @@ class MongoStore:
             if self._entry_ids.type_in_base:
                 base = f"{base}.{self._entry_record_types[record_type][0]}"
             entry_id = format_entry_id(
-                base, id_series or self._entry_ids.series, self._entry_id_number(record_type, lineage)
+                base,
+                id_series or self._entry_ids.series,
+                self._entry_id_number(record_type, lineage),
             )
             values["id"] = entry_id
+        # One alternative lineage per (alt_id, alt_kind): a fresh alternative
+        # (its own new lineage) conflicts with ANY existing row of that (group,
+        # kind); a replacement excludes its own predecessor lineage. This runs
+        # before this document is inserted, so it never matches itself, and it
+        # closes the hole an explicit ``<id>~<kind>~N`` immutable id would
+        # otherwise punch through the incidental revision-1 collision.
+        if alt_kind is not None:
+            existing_lineage = collection.find_one(
+                {
+                    "alt_id": alt_group,
+                    "alt_kind": alt_kind,
+                    "logical_id": {"$ne": lineage},
+                },
+                {"logical_id": 1},
+                **self._session_kwargs(),
+            )
+            if existing_lineage is not None:
+                raise EntryIdConflictError(
+                    collection.name,
+                    str(entry_id),
+                    int(existing_lineage["logical_id"]),
+                    lineage,
+                )
         if immutable_id is not None:
             for sibling in self._entry_family_collections(record_type):
-                existing = sibling.find_one({"f.immutable_id": immutable_id}, {"_id": 1}, **self._session_kwargs())
+                existing = sibling.find_one(
+                    {"f.immutable_id": immutable_id},
+                    {"_id": 1},
+                    **self._session_kwargs(),
+                )
                 if existing is not None:
                     raise EntryIdConflictError(sibling.name, str(immutable_id), int(existing["_id"]), sid)
             return
         revision = 1 + collection.count_documents(
             {"logical_id": lineage, "_id": {"$ne": sid}}, **self._session_kwargs()
         )
-        values["immutable_id"] = format_immutable_id(str(entry_id), revision)
+        if alt_kind is not None:
+            # Each alternative is its own lineage, so the per-logical_id revision
+            # counter is correct here; the id namespace is the kind-qualified one.
+            values["immutable_id"] = format_alternative_id(str(entry_id), alt_kind, revision)
+        else:
+            values["immutable_id"] = format_immutable_id(str(entry_id), revision)
+
+    @staticmethod
+    def _require_alt_id(document: Mapping[str, Any], collection_name: str) -> int:
+        """Return a parent document's ``alt_id``, refusing pre-alternatives documents.
+
+        :param document: A parent document that must carry the alternatives axis.
+        :param collection_name: The reading collection, for the diagnostic.
+        :return: The document's alternative-group identity.
+        :raises RuntimeError: If ``alt_id`` is absent (the store predates the axis).
+        """
+        value = document.get("alt_id")
+        if value is None:
+            raise RuntimeError(
+                f"record collection {collection_name!r} has a parent document without an alt_id; "
+                "this store predates the alternatives axis; rebuild"
+            )
+        return int(value)
 
     @staticmethod
     def _validate_projected_entry_ids(record_type: type, projected: Mapping[str, object]) -> None:
@@ -1203,7 +1527,10 @@ class MongoStore:
             raise EntryReplacementError(collection.name, predecessor_logical_id, existing)
 
     def _family_for_backing(self, record_type: type) -> Any:
-        return next((family for family in self.layout.families if record_type in family.records), None)
+        return next(
+            (family for family in self.layout.families if record_type in family.records),
+            None,
+        )
 
     def _save_entry_dispatch(self, family: Any, backing: type, sid: int, key: str) -> None:
         if len(family.records) == 1:
@@ -1218,7 +1545,10 @@ class MongoStore:
                 f"entry dispatch {family.name!r} maps content_id {key!r} to a conflicting backing row"
             )
         try:
-            collection.insert_one({"_id": key, "record": record_name, "sid": sid}, **self._session_kwargs())
+            collection.insert_one(
+                {"_id": key, "record": record_name, "sid": sid},
+                **self._session_kwargs(),
+            )
             return
         except DuplicateKeyError:
             existing = collection.find_one({"_id": key}, **self._session_kwargs())
@@ -1290,7 +1620,11 @@ class MongoStore:
         if document is None:
             raise KeyError(cls, int(sid))
         self._prefetch_references(schema, document, context)
-        instance = decode_record(schema, document, lambda target, target_sid: self._fetch(target, target_sid, context))
+        instance = decode_record(
+            schema,
+            document,
+            lambda target, target_sid: self._fetch(target, target_sid, context),
+        )
         self._remember(cls, int(sid), instance)
         return instance
 
@@ -1484,7 +1818,9 @@ class MongoStore:
                 f"{obj_type.__name__} record stored in collection {obj_collection!r}"
             )
         document = self._database.database[predecessor_collection].find_one(
-            {"_id": predecessor_sid}, {"logical_id": 1, "f.id": 1}, **self._session_kwargs()
+            {"_id": predecessor_sid},
+            {"logical_id": 1, "f.id": 1, "alt_id": 1, "alt_kind": 1},
+            **self._session_kwargs(),
         )
         if document is None:
             raise RuntimeError(
@@ -1492,19 +1828,30 @@ class MongoStore:
                 f"{predecessor_sid}"
             )
         predecessor_logical_id = int(document["logical_id"])
+        predecessor_alt_id = self._require_alt_id(document, predecessor_collection)
+        predecessor_alt_kind = document.get("alt_kind")
         predecessor_entry_id = None
+        alt_main_id = None
         if obj_type in self._entry_record_types:
             predecessor_entry_id = document.get("f", {}).get("id")
             if not isinstance(predecessor_entry_id, str):
                 raise RuntimeError(
                     f"record collection {predecessor_collection!r} has no entry id on predecessor sid {predecessor_sid}"
                 )
+            if predecessor_alt_kind is not None:
+                # An alternative copied its group main's id, so the predecessor's
+                # own id is the group main's id: the replacement hashes with the
+                # same group extras as revision 1.
+                alt_main_id = predecessor_entry_id
         return self._save_graph(
             obj,
             as_record=None,
             replace_logical_id=predecessor_logical_id,
             id_series=id_series,
             replacement_entry_id=predecessor_entry_id,
+            replace_alt_group=predecessor_alt_id,
+            replace_alt_kind=(predecessor_alt_kind if isinstance(predecessor_alt_kind, str) else None),
+            replace_alt_main_id=alt_main_id,
         )
 
     def history(self, obj: Any) -> tuple[Any, ...]:
@@ -1527,6 +1874,8 @@ class MongoStore:
         document = collection.find_one({"_id": obj_sid}, {"logical_id": 1}, **self._session_kwargs())
         if document is None:
             raise RuntimeError(f"record collection {collection.name!r} is missing the document for sid {obj_sid}")
+        # A lineage is one logical_id; alternatives own distinct logical_ids,
+        # so a main and its alternatives never share a history() walk.
         logical_id = int(document["logical_id"])
         sids = [
             int(item["_id"])
@@ -1534,7 +1883,13 @@ class MongoStore:
         ]
         return tuple(self.fetch(record_type, sid) for sid in sids)
 
-    def searcher(self, *, as_of: object = None, only_latest: bool = False) -> Any:
+    def searcher(
+        self,
+        *,
+        as_of: object = None,
+        only_latest: bool = False,
+        only_main_alt: bool = True,
+    ) -> Any:
         """Return a Mongo searcher bound to this store's read path.
 
         Queries use the active transaction session when one is open, so they
@@ -1545,6 +1900,8 @@ class MongoStore:
         :param only_latest: Whether root variables are restricted to the latest document of each
             ``logical_id`` lineage by sid (bounded by ``as_of`` when given). Reference/child
             scopes stay unfiltered so pinned references may still resolve replaced documents.
+        :param only_main_alt: Whether root variables are restricted to mains (``alt_kind`` absent),
+            hiding named alternatives. Defaults to ``True``; pass ``False`` to reveal alternatives.
         :return: A new MongoDB searcher bound to this store.
         """
         if as_of is not None:
@@ -1553,7 +1910,7 @@ class MongoStore:
             ns_operand_to_store_units(as_of, self._store_timestamp_resolution)
         from .searcher import MongoSearcher
 
-        return MongoSearcher(self, as_of=as_of, only_latest=only_latest)
+        return MongoSearcher(self, as_of=as_of, only_latest=only_latest, only_main_alt=only_main_alt)
 
     def stored_property_plan(self, family: type) -> Any:
         """Return the Mongo stored-property plan for one configured entry family.
@@ -1683,7 +2040,13 @@ class MongoStore:
         return embedded.get(spec.columns[0].name)
 
     def _check_metadata_at(
-        self, record_type: type, sid: int, source: Any, projection: SaveProjection, path: str, plan: Any
+        self,
+        record_type: type,
+        sid: int,
+        source: Any,
+        projection: SaveProjection,
+        path: str,
+        plan: Any,
     ) -> None:
         schema = resolve_schema(record_type)
         document = self._metadata_parent_document(record_type, sid, plan, projection)
@@ -1710,11 +2073,25 @@ class MongoStore:
                     )
             elif spec.field in nested:
                 self._check_metadata_nested(
-                    schema, document, sid, spec, values[spec.field], projection, field_path, True
+                    schema,
+                    document,
+                    sid,
+                    spec,
+                    values[spec.field],
+                    projection,
+                    field_path,
+                    True,
                 )
             elif spec.field in descend:
                 self._check_metadata_nested(
-                    schema, document, sid, spec, values[spec.field], projection, field_path, False
+                    schema,
+                    document,
+                    sid,
+                    spec,
+                    values[spec.field],
+                    projection,
+                    field_path,
+                    False,
                 )
 
     def _check_metadata_nested(
@@ -1765,11 +2142,22 @@ class MongoStore:
             raise EntryMetadataConflictError(f"metadata conflict for {path}")
         for index, (incoming_item, stored_sid) in enumerate(zip(incoming, stored, strict=True)):
             self._check_metadata_target(
-                spec.target, int(stored_sid), incoming_item, projection, f"{path}[{index}]", compare_content
+                spec.target,
+                int(stored_sid),
+                incoming_item,
+                projection,
+                f"{path}[{index}]",
+                compare_content,
             )
 
     def _check_metadata_target(
-        self, record_type: type, sid: int, source: Any, projection: SaveProjection, path: str, compare_content: bool
+        self,
+        record_type: type,
+        sid: int,
+        source: Any,
+        projection: SaveProjection,
+        path: str,
+        compare_content: bool,
     ) -> None:
         if compare_content:
             collection = self._database.database[collection_name_for(resolve_schema(record_type))]

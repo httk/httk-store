@@ -247,7 +247,7 @@ def test_eager_cycles_raise_instead_of_returning_lazy_rows(database):
     with database.engine.begin() as connection:
         connection.execute(
             table.insert().values(
-                sid=1, content_id="cycle", _httk_role=1, store_timestamp=0, logical_id=1, next_sid=None
+                sid=1, content_id="cycle", _httk_role=1, store_timestamp=0, logical_id=1, alt_id=1, next_sid=None
             )
         )
         connection.execute(table.update().where(table.c.sid == 1).values(next_sid=1))
@@ -265,7 +265,7 @@ def test_default_fetch_of_cyclic_graph_succeeds_with_proxies(database):
     with database.engine.begin() as connection:
         connection.execute(
             table.insert().values(
-                sid=1, content_id="cycle", _httk_role=1, store_timestamp=0, logical_id=1, next_sid=None
+                sid=1, content_id="cycle", _httk_role=1, store_timestamp=0, logical_id=1, alt_id=1, next_sid=None
             )
         )
         connection.execute(table.update().where(table.c.sid == 1).values(next_sid=1))

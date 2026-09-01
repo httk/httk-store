@@ -46,7 +46,14 @@ import sqlalchemy
 from httk.core import (
     FracVector,
 )
-from httk.core.entry_ids import check_entry_id, check_immutable_id, format_entry_id, format_immutable_id
+from httk.core.entry_ids import (
+    ALTERNATIVE_KIND_PATTERN,
+    check_entry_id,
+    check_immutable_id,
+    format_alternative_id,
+    format_entry_id,
+    format_immutable_id,
+)
 from httk.core.storage import (
     Shape,
     StorageProjectionCycleError,
@@ -82,6 +89,8 @@ from httk.store.backend.sql.layout import (
     read_store_metadata,
 )
 from httk.store.backend.sql.mapping import (
+    ALT_ID_COLUMN,
+    ALT_KIND_COLUMN,
     CONTENT_ID_COLUMN,
     DISPATCH_CONTENT_ID_COLUMN,
     LOGICAL_ID_COLUMN,
@@ -1469,7 +1478,15 @@ class SqlStore:
 
     # ------------------------------------------------------------------ saving
 
-    def save(self, obj: Any, *, as_record: type | None = None, id_series: str | None = None) -> int:
+    def save(
+        self,
+        obj: Any,
+        *,
+        as_record: type | None = None,
+        id_series: str | None = None,
+        alternative_of: str | None = None,
+        alternative_kind: str | None = None,
+    ) -> int:
         """Store ``obj`` (deduplicating per its class's policy) and return its integer sid.
 
         An opted-in domain object is projected through its exact
@@ -1483,16 +1500,39 @@ class SqlStore:
         Nested plans are cached per record type, and a mismatch raises
         :class:`~httk.store.backend.sql.store.EntryMetadataConflictError` without replacing the row.
 
+        Passing ``alternative_of`` (a stored main entry's id) with
+        ``alternative_kind`` saves ``obj`` as a named ALTERNATIVE representation
+        of that main: it copies the main's public ``id``, joins the main's
+        alternative group, and hashes with the group identity folded in so its
+        content never dedups onto the main. The main must live in ``obj``'s own
+        backing table and must itself be a main (not another alternative).
+
         :param obj: The object to store.
         :param as_record: The alternate record representation to use, if any.
         :param id_series: Override the configured entry-id series for minted ids.
+        :param alternative_of: The stored main entry's id this record is an alternative of, if any.
+        :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
         :return: The stored row's sid.
         :raises TypeError: If ``obj`` is a cursor row that must be materialized first.
+        :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing table, or itself an alternative.
         :raises httk.store.backend.sql.store.EntryMetadataConflictError: If a deduplication hit has conflicting metadata.
         :raises httk.core.storage.identity.StorageProjectionCycleError: If projection reaches a reference cycle.
         :raises RuntimeError: If a :meth:`bulk_ingest` context is currently open.
         """
-        return self._save_top(obj, as_record=as_record, replace_logical_id=None, id_series=id_series)
+        if (alternative_of is None) != (alternative_kind is None):
+            raise ValueError("alternative_of and alternative_kind must be given together, or neither")
+        if alternative_kind is not None and ALTERNATIVE_KIND_PATTERN.fullmatch(alternative_kind) is None:
+            raise ValueError(
+                f"invalid alternative_kind {alternative_kind!r}; expected {ALTERNATIVE_KIND_PATTERN.pattern}"
+            )
+        return self._save_top(
+            obj,
+            as_record=as_record,
+            replace_logical_id=None,
+            id_series=id_series,
+            alternative_of=alternative_of,
+            alternative_kind=alternative_kind,
+        )
 
     def _save_top(
         self,
@@ -1502,8 +1542,20 @@ class SqlStore:
         replace_logical_id: int | None,
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
+        alternative_of: str | None = None,
+        alternative_kind: str | None = None,
+        replace_alt_group: int | None = None,
+        replace_alt_kind: str | None = None,
+        replace_alt_main_id: str | None = None,
     ) -> int:
-        """Run one top-level save, optionally as a replacement carrying ``replace_logical_id``."""
+        """Run one top-level save, optionally as a replacement carrying ``replace_logical_id``.
+
+        Alternatives enter one of two ways: a fresh :meth:`save` resolves
+        ``alternative_of``/``alternative_kind`` against the record's own backing
+        table; a :meth:`replace` of an alternative carries the predecessor's
+        already-resolved ``replace_alt_*`` values so the replacement hashes with
+        the same group extras as revision 1.
+        """
         self._check_mutation_policy("save")
         self._reject_during_bulk()
         reject_cursor_proxy(obj)
@@ -1517,6 +1569,19 @@ class SqlStore:
         )
         with self._write_connection(_publish_after_commit=_publish_after_commit) as connection:
             self._create_tables_for_write(connection, (record_type,))
+            alt_group: int | None
+            alt_kind: str | None
+            alt_main_id: str | None
+            if alternative_of is not None:
+                alt_group, alt_main_id = self._resolve_alternative_main(connection, record_type, alternative_of)
+                alt_kind = alternative_kind
+            else:
+                alt_group = replace_alt_group
+                alt_kind = replace_alt_kind
+                alt_main_id = replace_alt_main_id
+            alt_extras: Mapping[str, object] | None = (
+                {"alternative_of": alt_main_id, "alternative_kind": alt_kind} if alt_kind is not None else None
+            )
             if timestamp_state is None:
                 projection.store_timestamp = self._capture_store_timestamp(connection)
             elif not timestamp_state["initialized"]:
@@ -1535,10 +1600,18 @@ class SqlStore:
                 replace_logical_id=replace_logical_id,
                 id_series=id_series,
                 replacement_entry_id=replacement_entry_id,
+                alt_group=alt_group,
+                alt_kind=alt_kind,
+                alt_main_id=alt_main_id,
+                alt_extras=alt_extras,
             )
             family = self._family_for_backing(record_type)
             if family is not None:
-                self._save_entry_dispatch(connection, family, record_type, sid, projection.content_id(record_type, obj))
+                # The dispatch hash is a top-level content id, so it carries the
+                # same alternative-group extras as the dedup key below.
+                self._save_entry_dispatch(
+                    connection, family, record_type, sid, projection.content_id(record_type, obj, extras=alt_extras)
+                )
         # A saved lazy row of this store's own base type is registered directly
         # (not via _remember, whose _sids write would hash it) so a subsequent
         # default fetch of its sid returns the same proxy.  Only when save()
@@ -1567,6 +1640,10 @@ class SqlStore:
         replace_logical_id: int | None = None,
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
+        alt_group: int | None = None,
+        alt_kind: str | None = None,
+        alt_main_id: str | None = None,
+        alt_extras: Mapping[str, object] | None = None,
     ) -> int:
         active_key = (record_type, id(source))
         if active_key in projection.active:
@@ -1583,6 +1660,10 @@ class SqlStore:
                 replace_logical_id=replace_logical_id,
                 id_series=id_series,
                 replacement_entry_id=replacement_entry_id,
+                alt_group=alt_group,
+                alt_kind=alt_kind,
+                alt_main_id=alt_main_id,
+                alt_extras=alt_extras,
             )
         finally:
             projection.active.remove(active_key)
@@ -1599,11 +1680,20 @@ class SqlStore:
         replace_logical_id: int | None = None,
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
+        alt_group: int | None = None,
+        alt_kind: str | None = None,
+        alt_main_id: str | None = None,
+        alt_extras: Mapping[str, object] | None = None,
     ) -> int:
         # The replacement lineage applies ONLY to the top-level parent row; a
         # nested record reached through references/ownership keeps its own-sid
-        # lineage. A fresh row's logical_id is its own sid.
+        # lineage. A fresh row's logical_id is its own sid. Alternative-group
+        # identity is likewise a top-level concept only: nested records never
+        # carry a group id, kind, or extras.
         replacement = replace_logical_id if top_level else None
+        alt_group = alt_group if top_level else None
+        alt_kind = alt_kind if top_level else None
+        alt_extras = alt_extras if top_level else None
         schema = resolve_schema(record_type)
         table = self._table(schema.table_name)
         projected = projection.projector(record_type, source)
@@ -1624,7 +1714,7 @@ class SqlStore:
 
         key: str | None = None
         if schema.dedup == "content_id":
-            key = projection.content_id(record_type, source)
+            key = projection.content_id(record_type, source, extras=alt_extras)
             found = connection.execute(
                 sqlalchemy.select(table.c[SID_COLUMN], table.c[ROLE_COLUMN]).where(table.c[CONTENT_ID_COLUMN] == key)
             ).first()
@@ -1664,6 +1754,9 @@ class SqlStore:
                 sid=None,
                 id_series=id_series,
                 replacement_entry_id=replacement_entry_id if top_level else None,
+                alt_group=alt_group,
+                alt_kind=alt_kind,
+                alt_main_id=alt_main_id,
             )
 
         if schema.dedup == "by_value":
@@ -1706,6 +1799,11 @@ class SqlStore:
             # directly: a replacement copies its predecessor's, a fresh row uses
             # its own sid.
             values[LOGICAL_ID_COLUMN] = replacement if replacement is not None else sid
+            # alt_id is a replacement's/alternative's group (both carried in
+            # alt_group), else the fresh main's own sid; alt_kind is NULL for a
+            # main.  Both are final pre-insert here (no write-after-insert).
+            values[ALT_ID_COLUMN] = alt_group if alt_group is not None else sid
+            values[ALT_KIND_COLUMN] = alt_kind
             if enforced_entry:
                 self._prepare_entry_ids(
                     connection,
@@ -1716,6 +1814,9 @@ class SqlStore:
                     sid=sid,
                     id_series=id_series,
                     replacement_entry_id=replacement_entry_id if top_level else None,
+                    alt_group=alt_group,
+                    alt_kind=alt_kind,
+                    alt_main_id=alt_main_id,
                 )
             if projection.store_timestamp is not None:
                 values[STORE_TIMESTAMP_COLUMN] = projection.store_timestamp
@@ -1756,6 +1857,11 @@ class SqlStore:
             # DB-allocated by the ON CONFLICT ... RETURNING below, so it inserts
             # a placeholder and is filled in the same transaction just after.
             values[LOGICAL_ID_COLUMN] = replacement if replacement is not None else 0
+            # alt_group carries an alternative's/replacement's group id; a fresh
+            # main leaves a placeholder here and is filled with its own sid just
+            # after insert.  alt_kind is final pre-insert and never updated.
+            values[ALT_ID_COLUMN] = alt_group if alt_group is not None else 0
+            values[ALT_KIND_COLUMN] = alt_kind
             try:
                 sid, inserted = self._insert_content_row(connection, table, values, key)
             except IntegrityError as error:
@@ -1782,6 +1888,10 @@ class SqlStore:
                 # The only sanctioned write-after-insert: fill the fresh row's
                 # own-sid lineage inside the same transaction as its insert.
                 update_values: dict[str, Any] = {LOGICAL_ID_COLUMN: sid}
+                if alt_group is None:
+                    # A fresh main self-references; a fresh alternative keeps the
+                    # group id inserted above (its own sid is only its lineage).
+                    update_values[ALT_ID_COLUMN] = sid
                 if enforced_entry:
                     self._prepare_entry_ids(
                         connection,
@@ -1792,6 +1902,9 @@ class SqlStore:
                         sid=sid,
                         id_series=id_series,
                         replacement_entry_id=None,
+                        alt_group=alt_group,
+                        alt_kind=alt_kind,
+                        alt_main_id=alt_main_id,
                     )
                     update_values.update({"id": values["id"], "immutable_id": values["immutable_id"]})
                 try:
@@ -1808,6 +1921,9 @@ class SqlStore:
                     sid=sid,
                     id_series=id_series,
                     replacement_entry_id=replacement_entry_id if top_level else None,
+                    alt_group=alt_group,
+                    alt_kind=alt_kind,
+                    alt_main_id=alt_main_id,
                 )
                 try:
                     connection.execute(
@@ -1825,6 +1941,11 @@ class SqlStore:
             # DB-allocated, so it inserts a placeholder and is filled in the same
             # transaction just after.
             values[LOGICAL_ID_COLUMN] = replacement if replacement is not None else 0
+            # alt_group carries an alternative's/replacement's group id; a fresh
+            # main leaves a placeholder here and is filled with its own sid just
+            # after insert.  alt_kind is final pre-insert and never updated.
+            values[ALT_ID_COLUMN] = alt_group if alt_group is not None else 0
+            values[ALT_KIND_COLUMN] = alt_kind
             try:
                 result = connection.execute(sqlalchemy.insert(table).values(values))
             except IntegrityError as error:
@@ -1834,6 +1955,10 @@ class SqlStore:
                 # The only sanctioned write-after-insert: fill the fresh row's
                 # own-sid lineage inside the same transaction as its insert.
                 update_values = {LOGICAL_ID_COLUMN: sid}
+                if alt_group is None:
+                    # A fresh main self-references; a fresh alternative keeps the
+                    # group id inserted above (its own sid is only its lineage).
+                    update_values[ALT_ID_COLUMN] = sid
                 if enforced_entry:
                     self._prepare_entry_ids(
                         connection,
@@ -1844,6 +1969,9 @@ class SqlStore:
                         sid=sid,
                         id_series=id_series,
                         replacement_entry_id=None,
+                        alt_group=alt_group,
+                        alt_kind=alt_kind,
+                        alt_main_id=alt_main_id,
                     )
                     update_values.update({"id": values["id"], "immutable_id": values["immutable_id"]})
                 try:
@@ -1860,6 +1988,9 @@ class SqlStore:
                     sid=sid,
                     id_series=id_series,
                     replacement_entry_id=replacement_entry_id if top_level else None,
+                    alt_group=alt_group,
+                    alt_kind=alt_kind,
+                    alt_main_id=alt_main_id,
                 )
                 try:
                     connection.execute(
@@ -1890,6 +2021,59 @@ class SqlStore:
         )
         return sid
 
+    def _resolve_alternative_main(
+        self, connection: sqlalchemy.Connection, record_type: type, alternative_of: str
+    ) -> tuple[int, str]:
+        """Resolve ``alternative_of`` to its ``(group alt_id, main entry id)``.
+
+        The main must live in ``record_type``'s own backing table (alternatives
+        share their main's backing) and must itself be a main, not another
+        alternative.
+
+        :param connection: The live write connection.
+        :param record_type: The alternative's record class, fixing the backing table to search.
+        :param alternative_of: The main entry's id this record is an alternative of.
+        :return: The main's ``logical_id`` (the alternative group id) and its entry id.
+        :raises ValueError: If the main is missing, lives in another family backing table, or is itself an alternative.
+        """
+        table = self._table(resolve_schema(record_type).table_name)
+        # Alternatives copy their main's id, so an id names a whole group; the
+        # group's MAIN is the one row with alt_kind NULL.
+        main = connection.execute(
+            sqlalchemy.select(table.c[LOGICAL_ID_COLUMN], table.c.id)
+            .where(table.c.id == alternative_of, table.c[ALT_KIND_COLUMN].is_(None))
+            .limit(1)
+        ).one_or_none()
+        if main is not None:
+            return int(main[0]), str(main[1])
+        # No main here: the id may exist only as an alternative (defensive; an
+        # orphan without its main cannot arise through the public API), in a
+        # sibling backing table, or nowhere.
+        if (
+            connection.execute(
+                sqlalchemy.select(table.c[SID_COLUMN]).where(table.c.id == alternative_of).limit(1)
+            ).one_or_none()
+            is not None
+        ):
+            raise ValueError(
+                f"alternative_of {alternative_of!r} names an alternative, not a main; "
+                "alternatives of alternatives are not allowed"
+            )
+        for sibling in self._entry_family_tables(record_type):
+            if sibling is table:
+                continue
+            if (
+                connection.execute(
+                    sqlalchemy.select(sibling.c[SID_COLUMN]).where(sibling.c.id == alternative_of).limit(1)
+                ).one_or_none()
+                is not None
+            ):
+                raise ValueError(
+                    f"alternative_of {alternative_of!r} is stored in table {sibling.name!r}, but an "
+                    f"alternative must share its main's backing table {table.name!r}"
+                )
+        raise ValueError(f"alternative_of {alternative_of!r} names no entry in table {table.name!r}")
+
     def _prepare_entry_ids(
         self,
         connection: sqlalchemy.Connection,
@@ -1901,32 +2085,48 @@ class SqlStore:
         sid: int | None,
         id_series: str | None,
         replacement_entry_id: str | None,
+        alt_group: int | None = None,
+        alt_kind: str | None = None,
+        alt_main_id: str | None = None,
     ) -> None:
-        """Validate or mint the entry-id columns for one parent-row write."""
+        """Validate or mint the entry-id columns for one parent-row write.
+
+        An alternative copies its group main's id (``alt_main_id``) rather than
+        minting, owns id-space per its alternative group (``alt_group``) instead
+        of its own lineage, and stamps an alternative immutable id under
+        ``alt_kind``. Mains keep the original per-lineage behaviour.
+        """
         entry_id = values.get("id")
         immutable_id = values.get("immutable_id")
-        if replacement_entry_id is not None:
+        # An alternative copies its main's id; a replacement copies its
+        # predecessor's. Both forbid an explicit-but-different id on the record.
+        forced_entry_id = replacement_entry_id if replacement_entry_id is not None else alt_main_id
+        # Ownership is per alternative group, not per lineage: a fresh main's
+        # group is its own (yet-unknown) sid, so it falls back to the lineage
+        # exactly as before; an alternative/replacement carries its group id.
+        group_id = alt_group if alt_group is not None else lineage
+        if forced_entry_id is not None:
             if entry_id is None:
-                entry_id = replacement_entry_id
+                entry_id = forced_entry_id
                 values["id"] = entry_id
-            elif entry_id != replacement_entry_id:
-                raise EntryIdConflictError(table.name, str(entry_id), lineage, lineage)
+            elif entry_id != forced_entry_id:
+                raise EntryIdConflictError(table.name, str(entry_id), group_id, group_id)
         if entry_id is not None:
             # ponytail: these checks are advisory under concurrent transactions; a
             # family-owned id-ownership table with unique constraints is the upgrade
             # path if cross-transaction family-wide ownership must be serialized.
             for sibling in self._entry_family_tables(record_type):
                 existing = connection.execute(
-                    sqlalchemy.select(sibling.c[LOGICAL_ID_COLUMN], sibling.c[SID_COLUMN])
+                    sqlalchemy.select(sibling.c[ALT_ID_COLUMN], sibling.c[SID_COLUMN])
                     .where(sibling.c.id == entry_id)
                     .limit(1)
                 ).one_or_none()
                 if existing is None:
                     continue
                 if sibling is not table or (
-                    int(existing[1]) != sid and (lineage is None or int(existing[0]) != lineage)
+                    int(existing[1]) != sid and (group_id is None or int(existing[0]) != group_id)
                 ):
-                    raise EntryIdConflictError(sibling.name, entry_id, int(existing[0]), lineage)
+                    raise EntryIdConflictError(sibling.name, entry_id, int(existing[0]), group_id)
         else:
             if self._entry_ids is None:
                 raise ValueError(
@@ -1941,6 +2141,22 @@ class SqlStore:
                     base, id_series or self._entry_ids.series, self._entry_id_number(record_type, lineage)
                 )
                 values["id"] = entry_id
+        # One alternative lineage per (alt_id, alt_kind): a fresh alternative
+        # (no lineage of its own yet) conflicts with ANY existing row of that
+        # (group, kind); a replacement excludes its own predecessor lineage.
+        # This runs only at the pre-hash pass (sid is None), before this save's
+        # row exists, so it never matches itself.  It closes the hole an
+        # explicit ``<id>~<kind>~N`` immutable id would otherwise punch through
+        # the incidental revision-1 immutable-id collision.
+        if alt_kind is not None and sid is None:
+            group_kind = sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(
+                table.c[ALT_ID_COLUMN] == alt_group, table.c[ALT_KIND_COLUMN] == alt_kind
+            )
+            if lineage is not None:
+                group_kind = group_kind.where(table.c[LOGICAL_ID_COLUMN] != lineage)
+            existing_lineage = connection.execute(group_kind.limit(1)).scalar_one_or_none()
+            if existing_lineage is not None:
+                raise EntryIdConflictError(table.name, str(entry_id), int(existing_lineage), lineage)
         if immutable_id is not None:
             for sibling in self._entry_family_tables(record_type):
                 existing = connection.execute(
@@ -1957,7 +2173,12 @@ class SqlStore:
         if sid is not None:
             count_query = count_query.where(table.c[SID_COLUMN] != sid)
         revision = 1 + int(connection.execute(count_query).scalar_one())
-        values["immutable_id"] = format_immutable_id(str(entry_id), revision)
+        if alt_kind is not None:
+            # Each alternative is its own lineage, so the per-logical_id revision
+            # counter is correct here; the id namespace is the kind-qualified one.
+            values["immutable_id"] = format_alternative_id(str(entry_id), alt_kind, revision)
+        else:
+            values["immutable_id"] = format_immutable_id(str(entry_id), revision)
 
     @staticmethod
     def _validate_projected_entry_ids(record_type: type, projected: Mapping[str, object]) -> None:
@@ -2365,7 +2586,7 @@ class SqlStore:
         )
         return sid
 
-    def searcher(self, *, as_of: object = None, only_latest: bool = False) -> SqlSearcher:
+    def searcher(self, *, as_of: object = None, only_latest: bool = False, only_main_alt: bool = True) -> SqlSearcher:
         """Return a new :class:`~httk.store.backend.sql.searcher.SqlSearcher` querying this store.
 
         The searcher runs on this store's read path — inside an open
@@ -2377,13 +2598,15 @@ class SqlStore:
         :param only_latest: Whether root variables are restricted to the latest row of each
             ``logical_id`` lineage by sid (bounded by ``as_of`` when given). Reference/child
             variables stay unfiltered. Does not require ``store_timestamps=True``.
+        :param only_main_alt: Whether root variables are restricted to mains (``alt_kind IS NULL``),
+            hiding named alternatives. Defaults to ``True``; pass ``False`` to reveal alternatives.
         :return: A new SQL searcher bound to this store.
         """
         if as_of is not None:
             if not self._store_timestamps:
                 raise ValueError("as_of queries require SqlStore(store_timestamps=True)")
             ns_operand_to_store_units(as_of, self._store_timestamp_resolution)
-        return SqlSearcher(self, as_of=as_of, only_latest=only_latest)
+        return SqlSearcher(self, as_of=as_of, only_latest=only_latest, only_main_alt=only_main_alt)
 
     def fsck(
         self,
@@ -2513,20 +2736,40 @@ class SqlStore:
         with self._read_connection() as connection:
             self._missing_tables_for_read((predecessor_type,))
             table = self._table(predecessor_table)
+            predecessor_alt_kind: str | None = None
+            alt_main_id: str | None = None
             if obj_type in self._entry_record_types:
                 predecessor_row = connection.execute(
-                    sqlalchemy.select(table.c[LOGICAL_ID_COLUMN], table.c.id).where(
-                        table.c[SID_COLUMN] == predecessor_sid
-                    )
+                    sqlalchemy.select(
+                        table.c[LOGICAL_ID_COLUMN], table.c.id, table.c[ALT_ID_COLUMN], table.c[ALT_KIND_COLUMN]
+                    ).where(table.c[SID_COLUMN] == predecessor_sid)
                 ).one()
                 predecessor_logical_id = int(predecessor_row[0])
                 predecessor_entry_id = str(predecessor_row[1])
+                predecessor_alt_id = int(predecessor_row[2])
+                predecessor_alt_kind = None if predecessor_row[3] is None else str(predecessor_row[3])
+                if predecessor_alt_kind is not None:
+                    # An alternative's replacement must hash with the same group
+                    # extras as revision 1: recover the group main's id, which is
+                    # lineage-constant, so any group-main row's id serves.
+                    alt_main_id = str(
+                        connection.execute(
+                            sqlalchemy.select(table.c.id)
+                            .where(
+                                table.c[LOGICAL_ID_COLUMN] == predecessor_alt_id,
+                                table.c[ALT_KIND_COLUMN].is_(None),
+                            )
+                            .limit(1)
+                        ).scalar_one()
+                    )
             else:
-                predecessor_logical_id = int(
-                    connection.execute(
-                        sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(table.c[SID_COLUMN] == predecessor_sid)
-                    ).scalar_one()
-                )
+                predecessor_plain = connection.execute(
+                    sqlalchemy.select(table.c[LOGICAL_ID_COLUMN], table.c[ALT_ID_COLUMN]).where(
+                        table.c[SID_COLUMN] == predecessor_sid
+                    )
+                ).one()
+                predecessor_logical_id = int(predecessor_plain[0])
+                predecessor_alt_id = int(predecessor_plain[1])
                 predecessor_entry_id = None
         return self._save_top(
             obj,
@@ -2534,6 +2777,9 @@ class SqlStore:
             replace_logical_id=predecessor_logical_id,
             id_series=id_series,
             replacement_entry_id=predecessor_entry_id,
+            replace_alt_group=predecessor_alt_id,
+            replace_alt_kind=predecessor_alt_kind,
+            replace_alt_main_id=alt_main_id,
         )
 
     def history(self, obj: Any) -> tuple[Any, ...]:
@@ -2558,6 +2804,8 @@ class SqlStore:
             if self._missing_tables_for_read((record_type,)):
                 return ()
             table = self._table(schema.table_name)
+            # A lineage is one logical_id; alternatives own distinct logical_ids,
+            # so a main and its alternatives never share a history() walk.
             logical_id = int(
                 connection.execute(
                     sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(table.c[SID_COLUMN] == obj_sid)

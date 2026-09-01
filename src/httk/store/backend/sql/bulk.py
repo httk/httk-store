@@ -111,6 +111,8 @@ from httk.store.backend.schema import FieldSpec, TableSchema, resolve_schema
 from httk.store.backend.sql.graph import LogicalEdgeGraph
 from httk.store.backend.sql.layout import METADATA_TABLE_NAME, actual_schema_objects, backend_facts_for_dialect
 from httk.store.backend.sql.mapping import (
+    ALT_ID_COLUMN,
+    ALT_KIND_COLUMN,
     CONTENT_ID_COLUMN,
     DISPATCH_CONTENT_ID_COLUMN,
     LOGICAL_ID_COLUMN,
@@ -211,6 +213,7 @@ class BulkIngest:
     :param workers: The number of worker processes; ``1`` (the default) is the serial path, ``>1`` encodes in parallel and merges shards.
     :param finalize: The finalization profile: ``"auto"`` selects the deferred finalizer on a fresh supported store for serial ingestion and the parity merge otherwise; ``"parity"`` and ``"deferred"`` force the respective profile.
     :param track_sids: Retain the per-save provisional-to-final sid mapping.  Disable it for bounded-memory offline builds when callers do not need :meth:`resolved_sid`.
+    :param id_series: Override the configured entry-id series for ids minted during the ingest.
     """
 
     def __init__(
@@ -877,6 +880,8 @@ class BulkIngest:
         *,
         as_record: type | None = None,
         promote: type | Iterable[type] | None = None,
+        alternative_of: str | None = None,
+        alternative_kind: str | None = None,
     ) -> int:
         """Encode and buffer ``obj``, returning its assigned or deduplicated sid.
 
@@ -895,8 +900,11 @@ class BulkIngest:
         :param as_record: The alternate record representation to use, if any.
         :param promote: A record class, or iterable of record classes, whose nested occurrences are also made
             top-level entries. The classes must be reachable from the selected outer record schema.
+        :param alternative_of: Unsupported here; bulk ingest is mains only.
+        :param alternative_kind: Unsupported here; bulk ingest is mains only.
         :return: The provisional sid (see :meth:`resolved_sid` for the durable one).
         :raises RuntimeError: If the bulk context is not open.
+        :raises ValueError: If ``alternative_of`` or ``alternative_kind`` is given (bulk ingest is mains only).
         :raises TypeError: If ``obj`` is a cursor row that must be materialized first.
         :raises httk.store.store_common.EntryMetadataConflictError: If a content-id hit has conflicting metadata.
         :raises httk.store.store_common.EntryDispatchIntegrityError: If a dispatch content id maps to a conflicting backing.
@@ -904,6 +912,8 @@ class BulkIngest:
         """
         if not self._entered or self._closed:
             raise RuntimeError("bulk_ingest().save() is only usable inside an open bulk context")
+        if alternative_of is not None or alternative_kind is not None:
+            raise ValueError("bulk ingest saves mains only; alternative_of/alternative_kind are not supported")
         reject_cursor_proxy(obj)
         record_type = resolve_storage_record(obj, as_record=as_record)
         promoted = self._promoted_types(record_type, promote)
@@ -1238,7 +1248,9 @@ class BulkIngest:
         sid = self._next_sid[table_name]
         self._next_sid[table_name] = sid + 1
         self._mint_bulk_entry_ids(record_type, schema, values, sid)
-        row = {SID_COLUMN: sid, ROLE_COLUMN: 0, LOGICAL_ID_COLUMN: sid, **values}
+        # Bulk ingest is mains only: alt_id self-references (== sid), alt_kind
+        # stays NULL (omitted here, filled NULL by the column default).
+        row = {SID_COLUMN: sid, ROLE_COLUMN: 0, LOGICAL_ID_COLUMN: sid, ALT_ID_COLUMN: sid, **values}
         if projection.store_timestamp is not None:
             row[STORE_TIMESTAMP_COLUMN] = projection.store_timestamp
         if key is not None:
@@ -2343,7 +2355,15 @@ class BulkIngest:
             value_columns = [
                 column.name
                 for column in table.columns
-                if column.name not in (SID_COLUMN, ROLE_COLUMN, STORE_TIMESTAMP_COLUMN, LOGICAL_ID_COLUMN)
+                if column.name
+                not in (
+                    SID_COLUMN,
+                    ROLE_COLUMN,
+                    STORE_TIMESTAMP_COLUMN,
+                    LOGICAL_ID_COLUMN,
+                    ALT_ID_COLUMN,
+                    ALT_KIND_COLUMN,
+                )
             ]
             condition = sqlalchemy.and_(*(stage.c[name].is_not_distinct_from(table.c[name]) for name in value_columns))
             statement = (
@@ -2690,6 +2710,7 @@ def _value_tuple(row: Mapping[str, Any]) -> tuple[Any, ...]:
         sorted(
             (name, value)
             for name, value in row.items()
-            if name not in (SID_COLUMN, ROLE_COLUMN, STORE_TIMESTAMP_COLUMN, LOGICAL_ID_COLUMN)
+            if name
+            not in (SID_COLUMN, ROLE_COLUMN, STORE_TIMESTAMP_COLUMN, LOGICAL_ID_COLUMN, ALT_ID_COLUMN, ALT_KIND_COLUMN)
         )
     )

@@ -65,6 +65,8 @@ from httk.core.storage import StorageProjectionCycleError, resolve_storage_recor
 from httk.store.backend.schema import TableSchema, resolve_schema
 from httk.store.backend.sql.layout import actual_table_names
 from httk.store.backend.sql.mapping import (
+    ALT_ID_COLUMN,
+    ALT_KIND_COLUMN,
     CONTENT_ID_COLUMN,
     DISPATCH_CONTENT_ID_COLUMN,
     LOGICAL_ID_COLUMN,
@@ -709,7 +711,9 @@ class _WorkerEncoder:
                 "reduce the worker count or split the ingest"
             )
         self._next_sid[table_name] = sid + 1
-        row = {SID_COLUMN: sid, ROLE_COLUMN: 0, LOGICAL_ID_COLUMN: sid, **values}
+        # Bulk ingest is mains only: alt_id self-references (== sid), alt_kind
+        # stays NULL (omitted here, filled NULL by the column default).
+        row = {SID_COLUMN: sid, ROLE_COLUMN: 0, LOGICAL_ID_COLUMN: sid, ALT_ID_COLUMN: sid, **values}
         if self._config.store_timestamp is not None:
             row[STORE_TIMESTAMP_COLUMN] = self._config.store_timestamp
         if key is not None:
@@ -1383,7 +1387,8 @@ class _Merger:
         value_columns = [
             column.name
             for column in table.columns
-            if column.name not in (SID_COLUMN, ROLE_COLUMN, STORE_TIMESTAMP_COLUMN, LOGICAL_ID_COLUMN)
+            if column.name
+            not in (SID_COLUMN, ROLE_COLUMN, STORE_TIMESTAMP_COLUMN, LOGICAL_ID_COLUMN, ALT_ID_COLUMN, ALT_KIND_COLUMN)
         ]
         while True:
             keep = (
@@ -1743,6 +1748,9 @@ class _Merger:
             # whose logical_id may differ from their sid after replace(), carry
             # ids below that floor and are never matched, hence never disturbed.
             self._remap_column(name, LOGICAL_ID_COLUMN, map_table)
+            # alt_id likewise starts equal to the block sid for a bulk main, so
+            # the same remap preserves the invariant alt_id == final sid.
+            self._remap_column(name, ALT_ID_COLUMN, map_table)
             self._mint_compacted_entry_ids(table)
         finally:
             self._drop_map_table(map_table)

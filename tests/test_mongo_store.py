@@ -10,7 +10,10 @@ from httk.core.register import register_entry_family, register_entry_record
 from httk.core.storage import Skip, StorageInfo, content_id, stored_property
 
 from httk.store.backend.mongo import MongoDatabase, MongoStore, RecordTooLargeError
-from httk.store.backend.mongo.mapping import collection_name_for, entry_dispatch_table_name
+from httk.store.backend.mongo.mapping import (
+    collection_name_for,
+    entry_dispatch_table_name,
+)
 from httk.store.backend.schema import resolve_schema
 from httk.store.store_common import EntryDispatchIntegrityError
 
@@ -89,8 +92,16 @@ class MongoDispatchB:
 
 
 register_entry_family(name="test-mongo-store-family", family=f"{__name__}:MongoDispatchFamily")
-register_entry_record(name="test-mongo-store-a", family="test-mongo-store-family", record=f"{__name__}:MongoDispatchA")
-register_entry_record(name="test-mongo-store-b", family="test-mongo-store-family", record=f"{__name__}:MongoDispatchB")
+register_entry_record(
+    name="test-mongo-store-a",
+    family="test-mongo-store-family",
+    record=f"{__name__}:MongoDispatchA",
+)
+register_entry_record(
+    name="test-mongo-store-b",
+    family="test-mongo-store-family",
+    record=f"{__name__}:MongoDispatchB",
+)
 
 
 def _store(database, *, entry_records=None):
@@ -153,7 +164,9 @@ def test_concurrent_fetches_use_independent_hydration_contexts(mongo_test_databa
     record = MongoRoleContainer("hydration", [MongoRoleDependency("child")])
     sid = store.save(record)
     reader_database = MongoDatabase(
-        os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name, transactions="never"
+        os.environ["HTTK_TEST_MONGODB_URI"],
+        database=mongo_test_database.database.name,
+        transactions="never",
     )
     reader = _store(reader_database)
     barrier = Barrier(2)
@@ -180,7 +193,10 @@ def test_concurrent_fetches_use_independent_hydration_contexts(mongo_test_databa
 
 
 def test_dispatch_missing_is_detected_and_resaved(mongo_test_database):
-    store = _store(mongo_test_database, entry_records={MongoDispatchFamily: (MongoDispatchA, MongoDispatchB)})
+    store = _store(
+        mongo_test_database,
+        entry_records={MongoDispatchFamily: (MongoDispatchA, MongoDispatchB)},
+    )
     record = MongoDispatchA("value")
     sid = store.save(record)
     key = content_id(record)
@@ -189,7 +205,11 @@ def test_dispatch_missing_is_detected_and_resaved(mongo_test_database):
     with pytest.raises(EntryDispatchIntegrityError):
         store.fetch_entry(MongoDispatchFamily, key)
     assert store.save(record) == sid
-    assert dispatch.find_one({"_id": key}) == {"_id": key, "record": "test-mongo-store-a", "sid": sid}
+    assert dispatch.find_one({"_id": key}) == {
+        "_id": key,
+        "record": "test-mongo-store-a",
+        "sid": sid,
+    }
 
 
 def test_content_id_race_returns_one_sid(mongo_test_database):
@@ -209,7 +229,10 @@ def test_content_id_race_returns_one_sid(mongo_test_database):
             except BaseException as error:
                 errors.append(error)
 
-        threads = [Thread(target=save, args=(first,)), Thread(target=save, args=(second,))]
+        threads = [
+            Thread(target=save, args=(first,)),
+            Thread(target=save, args=(second,)),
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -267,7 +290,17 @@ def test_record_document_shape(mongo_test_database):
     document = mongo_test_database.database[collection_name_for(resolve_schema(MongoRoleDependency))].find_one(
         {"_id": sid}
     )
-    assert set(document) == {"_id", "content_id", "_httk_role", "logical_id", "store_timestamp", "f"}
+    # Every parent document carries the alternative-group identity (alt_id); a
+    # main has no alt_kind (only named alternatives set it).
+    assert set(document) == {
+        "_id",
+        "content_id",
+        "_httk_role",
+        "logical_id",
+        "alt_id",
+        "store_timestamp",
+        "f",
+    }
 
 
 def test_eager_kwarg_is_accepted_and_always_materialized(mongo_test_database):

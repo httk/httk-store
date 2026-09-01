@@ -215,7 +215,13 @@ def index_specs_for(schema: TableSchema, *, store_timestamps: bool = True) -> li
     collection = collection_name_for(schema)
     result: list[IndexSpec] = []
     if schema.dedup == "content_id":
-        result.append(IndexSpec((("content_id", 1),), _index_name("uq", collection, ("content_id",)), True))
+        result.append(
+            IndexSpec(
+                (("content_id", 1),),
+                _index_name("uq", collection, ("content_id",)),
+                True,
+            )
+        )
     result.append(
         IndexSpec(
             (("_httk_role", 1),),
@@ -229,6 +235,24 @@ def index_specs_for(schema: TableSchema, *, store_timestamps: bool = True) -> li
         IndexSpec(
             (("logical_id", 1),),
             _index_name("ix", collection, ("logical_id",)),
+        )
+    )
+    # Alternative-group identity (a main's logical_id, self for mains) and kind
+    # (absent/null for mains). The compound index serves group/kind lookups and
+    # is deliberately NOT unique: one alternative lineage per (group, kind) is
+    # enforced by the _prepare_entry_ids lineage scan (the immutable_id unique
+    # index is only the race backstop), and a unique compound would instead
+    # reject an alternative's own revisions, which share the pair. See replace().
+    result.append(
+        IndexSpec(
+            (("alt_id", 1),),
+            _index_name("ix", collection, ("alt_id",)),
+        )
+    )
+    result.append(
+        IndexSpec(
+            (("alt_id", 1), ("alt_kind", 1)),
+            _index_name("ix", collection, ("alt_id", "alt_kind")),
         )
     )
     if store_timestamps:
@@ -269,7 +293,9 @@ def _channel_dependencies(columns: tuple[Any, ...]) -> dict[str, list[str]]:
     return {column.name: [exact] for column in columns if column.name != exact}
 
 
-def _field_validator(spec: FieldSpec) -> tuple[dict[str, Any], dict[str, list[str]], list[str]]:
+def _field_validator(
+    spec: FieldSpec,
+) -> tuple[dict[str, Any], dict[str, list[str]], list[str]]:
     properties: dict[str, Any] = {}
     dependencies: dict[str, list[str]] = {}
     required: list[str] = []
@@ -317,13 +343,22 @@ def validator_for(schema: TableSchema, *, store_timestamps: bool = True) -> dict
         # regardless of ``store_timestamps`` (a fresh document's own sid, copied
         # by a replacement).
         "logical_id": {"bsonType": ["int", "long"]},
+        # The store-managed alternative-group identity (a main's logical_id,
+        # self for mains), present on every parent document like ``logical_id``.
+        "alt_id": {"bsonType": ["int", "long"]},
+        # The alternative kind name; absent (NULL-equivalent) on mains, a string
+        # on named alternatives.
+        "alt_kind": {"bsonType": "string"},
     }
-    required = ["_id", "_httk_role", "f", "logical_id"]
+    required = ["_id", "_httk_role", "f", "logical_id", "alt_id"]
     if store_timestamps:
         properties["store_timestamp"] = {"bsonType": ["long", "int"]}
         required.append("store_timestamp")
     if schema.dedup == "content_id":
-        properties["content_id"] = {"bsonType": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+        properties["content_id"] = {
+            "bsonType": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+        }
         required.append("content_id")
     field_properties: dict[str, Any] = {}
     dependencies: dict[str, list[str]] = {}
@@ -354,7 +389,9 @@ def validator_for(schema: TableSchema, *, store_timestamps: bool = True) -> dict
     }
 
 
-def _family_name_and_records(family: EntryFamilyLayout | type) -> tuple[str, tuple[str, ...]]:
+def _family_name_and_records(
+    family: EntryFamilyLayout | type,
+) -> tuple[str, tuple[str, ...]]:
     if isinstance(family, EntryFamilyLayout):
         return family.name, family.record_names
     raise TypeError("family must be an EntryFamilyLayout")
@@ -392,7 +429,13 @@ def dispatch_index_specs(family: EntryFamilyLayout) -> list[IndexSpec]:
     if len(records) < 2:
         raise ValueError("a dispatch collection requires at least two backing records")
     collection = entry_dispatch_table_name(name)
-    return [IndexSpec((("record", 1), ("sid", 1)), _index_name("uq", collection, ("record", "sid")), True)]
+    return [
+        IndexSpec(
+            (("record", 1), ("sid", 1)),
+            _index_name("uq", collection, ("record", "sid")),
+            True,
+        )
+    ]
 
 
 def counter_next(database: Any, collection_name: str, *, session: Any = None) -> int:

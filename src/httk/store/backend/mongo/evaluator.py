@@ -19,7 +19,13 @@ from httk.core.storage import QueryLiteralError
 from httk.store.backend.codecs import ValueCodec, codec_named
 from httk.store.backend.schema import FieldSpec, TableSchema
 
-__all__ = ["MongoPredicate", "MongoScope", "MongoValue", "canonical_predicate", "evaluate"]
+__all__ = [
+    "MongoPredicate",
+    "MongoScope",
+    "MongoValue",
+    "canonical_predicate",
+    "evaluate",
+]
 
 _NO_LITERAL = object()
 
@@ -49,7 +55,18 @@ class MongoScope:
 class MongoValue:
     """A field, aggregate, null, or literal value in the neutral AST."""
 
-    kind: Literal["field", "store_timestamp", "logical_id", "present", "constant", "null", "count", "distinct_count"]
+    kind: Literal[
+        "field",
+        "store_timestamp",
+        "logical_id",
+        "alt_kind",
+        "alternative_id",
+        "present",
+        "constant",
+        "null",
+        "count",
+        "distinct_count",
+    ]
     scope: MongoScope | None = None
     field: str | None = None
     spec: FieldSpec | None = None
@@ -61,7 +78,17 @@ class MongoValue:
 class MongoPredicate:
     """A frozen three-valued predicate in the neutral stored-property AST."""
 
-    kind: Literal["constant", "compare", "is_null", "exists", "and", "or", "not", "when_known", "scaled"]
+    kind: Literal[
+        "constant",
+        "compare",
+        "is_null",
+        "exists",
+        "and",
+        "or",
+        "not",
+        "when_known",
+        "scaled",
+    ]
     operands: tuple[object, ...] = ()
 
     def __and__(self, other: object) -> "MongoPredicate":
@@ -85,6 +112,7 @@ def evaluate(
     record: object,
     store_timestamp_resolver: Callable[[], object] | None = None,
     logical_id_resolver: Callable[[], object] | None = None,
+    alt_kind_resolver: Callable[[], object] | None = None,
 ) -> bool | None:
     """Evaluate ``predicate`` exactly over a hydrated backing object.
 
@@ -92,6 +120,7 @@ def evaluate(
     :param record: Hydrated backing record for the candidate SID.
     :param store_timestamp_resolver: Optional resolver for the candidate's store timestamp.
     :param logical_id_resolver: Optional resolver for the candidate's store-managed lineage id.
+    :param alt_kind_resolver: Optional resolver for the candidate's store-managed alternative kind.
     :return: ``True``, ``False``, or ``None`` for SQL UNKNOWN.
     """
     root = _root_scope(predicate)
@@ -100,6 +129,7 @@ def evaluate(
         {} if root is None else {root.identifier: record},
         store_timestamp_resolver,
         logical_id_resolver,
+        alt_kind_resolver,
     )
 
 
@@ -125,6 +155,7 @@ def _eval_predicate(
     environment: dict[int, object],
     store_timestamp_resolver: Callable[[], object] | None = None,
     logical_id_resolver: Callable[[], object] | None = None,
+    alt_kind_resolver: Callable[[], object] | None = None,
 ) -> bool | None:
     kind = predicate.kind
     values = predicate.operands
@@ -134,48 +165,128 @@ def _eval_predicate(
         left, operator, right = values
         left_value, right_value = _value(left), _value(right)
         return _compare(
-            _eval_value(left_value, environment, store_timestamp_resolver, logical_id_resolver),
+            _eval_value(
+                left_value,
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            ),
             left_value,
             str(operator),
-            _eval_value(right_value, environment, store_timestamp_resolver, logical_id_resolver),
+            _eval_value(
+                right_value,
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            ),
             right_value,
         )
     if kind == "is_null":
-        return _eval_value(_value(values[0]), environment, store_timestamp_resolver, logical_id_resolver) is None
+        return (
+            _eval_value(
+                _value(values[0]),
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            )
+            is None
+        )
     if kind == "exists":
         scope, nested = _scope(values[0]), _predicate(values[1])
-        for item in _items(scope, environment, store_timestamp_resolver, logical_id_resolver):
+        for item in _items(
+            scope,
+            environment,
+            store_timestamp_resolver,
+            logical_id_resolver,
+            alt_kind_resolver,
+        ):
             result = _eval_predicate(
-                nested, environment | {scope.identifier: item}, store_timestamp_resolver, logical_id_resolver
+                nested,
+                environment | {scope.identifier: item},
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
             )
             if result is True:
                 return True
         return False
     if kind == "and":
         left, right = (
-            _eval_predicate(_predicate(values[0]), environment, store_timestamp_resolver, logical_id_resolver),
-            _eval_predicate(_predicate(values[1]), environment, store_timestamp_resolver, logical_id_resolver),
+            _eval_predicate(
+                _predicate(values[0]),
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            ),
+            _eval_predicate(
+                _predicate(values[1]),
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            ),
         )
         return False if False in (left, right) else None if None in (left, right) else True
     if kind == "or":
         left, right = (
-            _eval_predicate(_predicate(values[0]), environment, store_timestamp_resolver, logical_id_resolver),
-            _eval_predicate(_predicate(values[1]), environment, store_timestamp_resolver, logical_id_resolver),
+            _eval_predicate(
+                _predicate(values[0]),
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            ),
+            _eval_predicate(
+                _predicate(values[1]),
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            ),
         )
         return True if True in (left, right) else None if None in (left, right) else False
     if kind == "not":
-        value = _eval_predicate(_predicate(values[0]), environment, store_timestamp_resolver, logical_id_resolver)
+        value = _eval_predicate(
+            _predicate(values[0]),
+            environment,
+            store_timestamp_resolver,
+            logical_id_resolver,
+            alt_kind_resolver,
+        )
         return None if value is None else not value
     if kind == "when_known":
-        known = _eval_predicate(_predicate(values[0]), environment, store_timestamp_resolver, logical_id_resolver)
+        known = _eval_predicate(
+            _predicate(values[0]),
+            environment,
+            store_timestamp_resolver,
+            logical_id_resolver,
+            alt_kind_resolver,
+        )
         return (
-            _eval_predicate(_predicate(values[1]), environment, store_timestamp_resolver, logical_id_resolver)
+            _eval_predicate(
+                _predicate(values[1]),
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            )
             if known is True
             else None
         )
     assert kind == "scaled"
     left, left_factor, right, right_factor = (
-        _eval_value(_value(item), environment, store_timestamp_resolver, logical_id_resolver) for item in values
+        _eval_value(
+            _value(item),
+            environment,
+            store_timestamp_resolver,
+            logical_id_resolver,
+            alt_kind_resolver,
+        )
+        for item in values
     )
     if None in (left, left_factor, right, right_factor):
         return None
@@ -192,12 +303,19 @@ def _items(
     environment: dict[int, object],
     store_timestamp_resolver: Callable[[], object] | None = None,
     logical_id_resolver: Callable[[], object] | None = None,
+    alt_kind_resolver: Callable[[], object] | None = None,
 ) -> tuple[object, ...]:
     if scope.identifier in environment:
         return (environment[scope.identifier],)
     if scope.parent is None or scope.relationship is None:
         return ()
-    parents = _items(scope.parent, environment, store_timestamp_resolver, logical_id_resolver)
+    parents = _items(
+        scope.parent,
+        environment,
+        store_timestamp_resolver,
+        logical_id_resolver,
+        alt_kind_resolver,
+    )
     values: list[object] = []
     for parent in parents:
         child = getattr(parent, scope.relationship.field, None)
@@ -216,6 +334,7 @@ def _items(
                 environment | {scope.identifier: item},
                 store_timestamp_resolver,
                 logical_id_resolver,
+                alt_kind_resolver,
             )
             is True
         ]
@@ -227,6 +346,7 @@ def _eval_value(
     environment: dict[int, object],
     store_timestamp_resolver: Callable[[], object] | None = None,
     logical_id_resolver: Callable[[], object] | None = None,
+    alt_kind_resolver: Callable[[], object] | None = None,
 ) -> object:
     if value.kind == "constant":
         return value.literal
@@ -240,25 +360,79 @@ def _eval_value(
         if logical_id_resolver is None:
             return None
         return logical_id_resolver()
+    if value.kind == "alt_kind":
+        if alt_kind_resolver is None:
+            return None
+        return alt_kind_resolver()
+    if value.kind == "alternative_id":
+        # The composite ``<prefix><id>~<kind>`` public id of a named
+        # alternative: the record's plain id joined with the store-managed
+        # alternative kind under the source's public-id prefix.
+        assert value.scope is not None and value.field is not None
+        items = _items(
+            value.scope,
+            environment,
+            store_timestamp_resolver,
+            logical_id_resolver,
+            alt_kind_resolver,
+        )
+        if len(items) != 1:
+            return None
+        entry_id = getattr(items[0], value.field, None)
+        kind = None if alt_kind_resolver is None else alt_kind_resolver()
+        if entry_id is None or kind is None:
+            return None
+        prefix = "" if value.literal is _NO_LITERAL else cast(str, value.literal)
+        return f"{prefix}{entry_id}~{kind}"
     if value.kind == "present":
         assert value.scope is not None and value.field is not None
-        items = _items(value.scope, environment, store_timestamp_resolver, logical_id_resolver)
+        items = _items(
+            value.scope,
+            environment,
+            store_timestamp_resolver,
+            logical_id_resolver,
+            alt_kind_resolver,
+        )
         return len(items) == 1 and getattr(items[0], value.field, None) is not None
     if value.kind == "count":
         assert value.scope is not None
-        return len(_items(value.scope, environment, store_timestamp_resolver, logical_id_resolver))
+        return len(
+            _items(
+                value.scope,
+                environment,
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
+            )
+        )
     if value.kind == "distinct_count":
         assert value.scope is not None and value.value is not None
         found: set[object] = set()
-        for item in _items(value.scope, environment, store_timestamp_resolver, logical_id_resolver):
+        for item in _items(
+            value.scope,
+            environment,
+            store_timestamp_resolver,
+            logical_id_resolver,
+            alt_kind_resolver,
+        ):
             candidate = _eval_value(
-                value.value, environment | {value.scope.identifier: item}, store_timestamp_resolver, logical_id_resolver
+                value.value,
+                environment | {value.scope.identifier: item},
+                store_timestamp_resolver,
+                logical_id_resolver,
+                alt_kind_resolver,
             )
             if candidate is not None:
                 found.add(_exact_key(value.value, candidate))
         return len(found)
     assert value.scope is not None and value.field is not None
-    items = _items(value.scope, environment, store_timestamp_resolver, logical_id_resolver)
+    items = _items(
+        value.scope,
+        environment,
+        store_timestamp_resolver,
+        logical_id_resolver,
+        alt_kind_resolver,
+    )
     if len(items) != 1:
         return None
     if value.scope.scalar_child:
@@ -308,7 +482,11 @@ def _compare(
         if operator in {"CONTAINS", "STARTS", "ENDS"}:
             if not isinstance(left, str) or not isinstance(right, str):
                 return None
-            return {"CONTAINS": right in left, "STARTS": left.startswith(right), "ENDS": left.endswith(right)}[operator]
+            return {
+                "CONTAINS": right in left,
+                "STARTS": left.startswith(right),
+                "ENDS": left.endswith(right),
+            }[operator]
     except TypeError:
         return None
     raise QueryLiteralError(f"unsupported stored-property comparison operator {operator!r}")
@@ -348,7 +526,10 @@ def canonical_predicate(predicate: MongoPredicate) -> str:
 
 def _canonical(value: object) -> object:
     if isinstance(value, MongoPredicate):
-        return {"predicate": value.kind, "operands": [_canonical(item) for item in value.operands]}
+        return {
+            "predicate": value.kind,
+            "operands": [_canonical(item) for item in value.operands],
+        }
     if isinstance(value, MongoValue):
         return {
             "value": value.kind,
@@ -362,8 +543,8 @@ def _canonical(value: object) -> object:
             "scope": value.identifier,
             "class": f"{value.schema.cls.__module__}.{value.schema.cls.__qualname__}",
             "parent": None if value.parent is None else _canonical(value.parent),
-            "relationship": None if value.relationship is None else value.relationship.field,
-            "filter": None if value.filter_predicate is None else _canonical(value.filter_predicate),
+            "relationship": (None if value.relationship is None else value.relationship.field),
+            "filter": (None if value.filter_predicate is None else _canonical(value.filter_predicate)),
             "scalar_child": value.scalar_child,
         }
     return _canonical_literal(value)
@@ -380,7 +561,10 @@ def _canonical_literal(value: object) -> object:
         return [_canonical_literal(item) for item in value]
     if isinstance(value, str | int | float | bool) or value is None:
         return value
-    return {"repr": repr(value), "type": f"{type(value).__module__}.{type(value).__qualname__}"}
+    return {
+        "repr": repr(value),
+        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+    }
 
 
 def _scope(value: object) -> MongoScope:

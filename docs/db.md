@@ -32,6 +32,13 @@ obj)` saves a logical successor sharing the predecessor's lineage, `store.histor
 walks a lineage, and `store.searcher(only_latest=True)` restricts root variables
 to each lineage's latest row.
 
+An entry may also carry named **alternative representations** — a conventional
+cell beside a primitive one, say: `store.save(obj, alternative_of=<main entry id>,
+alternative_kind="conventional")` stores a sibling that shares the main's public
+`id` (addressed as `<id>~<kind>`, with its own revision lineage), while ordinary
+queries stay mains-only by default (`only_main_alt=True`). See
+[the detailed guide](details/db.md#alternatives).
+
 The full guide, {doc}`details/db`, covers declaring storable classes with the
 httk-core marker vocabulary, entry families and multi-record dispatch, the
 search DSL and stored properties, record replacement lineages, bulk ingestion

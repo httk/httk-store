@@ -268,6 +268,21 @@ class StoreEntryProvider(EntryProvider):
                 result.append((spec, related))
         return result
 
+    def _exposed_link_specs(self, record: type) -> list[tuple[Any, str]]:
+        """The ``(LinkSpec, related entry type)`` exposed weak links whose target is served.
+
+        Only ``exposed_relationship=True`` links contribute; ``False`` links are
+        served nowhere.
+        """
+        result: list[tuple[Any, str]] = []
+        for spec in self._schemas[record].links:
+            if not spec.exposed_relationship:
+                continue
+            related = self._type_for_class.get(spec.target)
+            if related is not None:
+                result.append((spec, related))
+        return result
+
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
         """Return direct relationships grouped by source id."""
         self._require_entry_type(entry_type)
@@ -299,6 +314,22 @@ class StoreEntryProvider(EntryProvider):
                                 self._id_of(related_type, target_sid, target),
                                 description=(marker.description if marker is not None else None),
                                 role=marker.role if marker is not None else None,
+                            )
+                        )
+                for link_spec, related_type in self._exposed_link_specs(record_type):
+                    # Weak links bind lineages: linked() returns the live latest
+                    # target revisions (deduped, retracted dropped), so id
+                    # resolution is lineage-level on either side.
+                    for target in self._store.linked(source, link_spec.name):
+                        target_sid = self._store.sid_of(target, as_record=type(target))
+                        if target_sid is None:
+                            continue
+                        entries.append(
+                            RelatedEntry(
+                                related_type,
+                                self._id_of(related_type, target_sid, target),
+                                description=link_spec.description,
+                                role=link_spec.role,
                             )
                         )
                 if entries:

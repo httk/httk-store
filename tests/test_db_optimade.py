@@ -2,10 +2,10 @@
 
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 import pytest
-from httk.core.storage import IdentitySkip, Indexed, Unique
+from httk.core.storage import IdentitySkip, Indexed, StorageInfo, Unique, WeakLink
 
 from httk.store.backend.sql import Backend, SqlStore, optimade_filter_searcher
 from httk.store.query.optimade_filters import FilterTranslationError
@@ -197,3 +197,122 @@ def test_unknown_unprefixed_property_matches_nothing(store):
 def test_unmatched_related_class_raises_value_error(store):
     with pytest.raises(ValueError):
         optimade_filter_searcher(store, Material, 'parts.id HAS "parts-1"', related_classes={"parts": Part})
+
+
+# --------------------------------------------------------------------- exposed weak links
+
+
+@dataclass(frozen=True)
+class WAuthor:
+    name: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class WArticle:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        links=(
+            WeakLink("authors", WAuthor, exposed_relationship=True),
+            WeakLink("editors", WAuthor, exposed_relationship=False),
+        )
+    )
+    title: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class AmbiguousArticle:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        links=(WeakLink("authors", WAuthor, exposed_relationship=True),)
+    )
+    title: str
+    lead: WAuthor | None = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+def _weak_store():
+    store = SqlStore(Backend.sqlite(":memory:"), entry_records={})
+    authors = (
+        WAuthor("Ada", "author-1", "author-1~1"),
+        WAuthor("Boole", "author-2", "author-2~1"),
+        WAuthor("Cara", "author-3", "author-3~1"),
+    )
+    articles = (
+        WArticle("Engines", "article-1", "article-1~1"),
+        WArticle("Silence", "article-2", "article-2~1"),
+        WArticle("Void", "article-3", "article-3~1"),
+    )
+    for obj in (*authors, *articles):
+        store.save(obj)
+    store.link(articles[0], "authors", authors[0])
+    store.link(articles[0], "authors", authors[1])
+    store.link(articles[1], "authors", authors[1])
+    return store, authors, articles
+
+
+def test_weak_link_id_has_matches_linked_sources():
+    store, _authors, articles = _weak_store()
+    searcher = optimade_filter_searcher(
+        store, WArticle, 'authors.id HAS "author-2"', related_classes={"authors": WAuthor}
+    )
+    assert results(searcher) == [articles[0], articles[1]]
+
+
+def test_weak_link_id_has_all_requires_every_target():
+    store, _authors, articles = _weak_store()
+    searcher = optimade_filter_searcher(
+        store, WArticle, 'authors.id HAS ALL "author-1","author-2"', related_classes={"authors": WAuthor}
+    )
+    # Only article-1 is linked to both authors; article-2 has just author-2.
+    assert results(searcher) == [articles[0]]
+
+
+def test_weak_link_id_has_only_matches_subset_and_no_links():
+    store, _authors, articles = _weak_store()
+    searcher = optimade_filter_searcher(
+        store, WArticle, 'authors.id HAS ONLY "author-2"', related_classes={"authors": WAuthor}
+    )
+    # article-2 is linked only to author-2; article-3 has no links (vacuous
+    # truth); article-1 also links author-1 and so is excluded.
+    assert results(searcher) == [articles[1], articles[2]]
+
+
+def test_weak_link_id_unknown_matches_nothing():
+    store, _authors, _articles = _weak_store()
+    searcher = optimade_filter_searcher(
+        store, WArticle, 'authors.id HAS "author-9"', related_classes={"authors": WAuthor}
+    )
+    assert results(searcher) == []
+    searcher = optimade_filter_searcher(
+        store, WArticle, 'authors.id HAS ALL "author-1","author-9"', related_classes={"authors": WAuthor}
+    )
+    assert results(searcher) == []
+
+
+def test_weak_link_id_retracted_does_not_match():
+    store, authors, articles = _weak_store()
+    store.unlink(articles[1], "authors", authors[1])
+    searcher = optimade_filter_searcher(
+        store, WArticle, 'authors.id HAS "author-2"', related_classes={"authors": WAuthor}
+    )
+    assert results(searcher) == [articles[0]]
+
+
+def test_weak_link_id_matches_revised_target_by_stable_id():
+    store, authors, articles = _weak_store()
+    store.replace(authors[0], WAuthor("Ada Lovelace", "author-1", "author-1~2"))
+    searcher = optimade_filter_searcher(
+        store, WArticle, 'authors.id HAS "author-1"', related_classes={"authors": WAuthor}
+    )
+    assert results(searcher) == [articles[0]]
+
+
+def test_reference_field_and_exposed_weak_link_to_same_class_is_ambiguous():
+    store = SqlStore(Backend.sqlite(":memory:"), entry_records={})
+    with pytest.raises(ValueError, match="exactly one is required"):
+        optimade_filter_searcher(
+            store, AmbiguousArticle, 'authors.id HAS "author-1"', related_classes={"authors": WAuthor}
+        )

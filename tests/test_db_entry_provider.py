@@ -23,6 +23,7 @@ from httk.core.storage import (
     Shape,
     StorageInfo,
     Unique,
+    WeakLink,
     stored_property,
 )
 from postgres_support import POSTGRES_PARAM, postgres_database
@@ -444,6 +445,126 @@ def test_related_marker_meta_and_serve_false():
                 RelatedEntry("people", "httk.test.person-1-2", role="member"),
                 RelatedEntry("people", "httk.test.person-1-3", role="member"),
             )
+        }
+
+
+# --------------------------------------------------------------------- exposed weak links
+
+
+@dataclass(frozen=True)
+class Author:
+    name: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class Article:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        links=(
+            WeakLink("authors", Author, exposed_relationship=True, role="author", description="Wrote it"),
+            WeakLink("editors", Author, exposed_relationship=False),
+        )
+    )
+    title: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@contextlib.contextmanager
+def weak_store():
+    with Backend.sqlite() as database:
+        yield SqlStore(database, entry_records={})
+
+
+def _weak_provider(store):
+    return StoreEntryProvider(store, {"articles": Article, "authors": Author})
+
+
+def test_exposed_weak_link_renders_as_relationship_with_metadata():
+    with weak_store() as store:
+        ada = Author("Ada", "author-a", "author-a~1")
+        editor = Author("Ed", "author-e", "author-e~1")
+        article = Article("Engines", "article-1", "article-1~1")
+        for obj in (ada, editor, article):
+            store.save(obj)
+        store.link(article, "authors", ada)
+        store.link(article, "editors", editor)  # exposed_relationship=False: serves nothing
+        provider = _weak_provider(store)
+        assert provider.relationships("articles") == {
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
+        }
+        assert provider.relationships("authors") == {}
+
+
+def test_retracted_weak_link_disappears_from_relationships():
+    with weak_store() as store:
+        ada = Author("Ada", "author-a", "author-a~1")
+        article = Article("Engines", "article-1", "article-1~1")
+        store.save(ada)
+        store.save(article)
+        store.link(article, "authors", ada)
+        store.unlink(article, "authors", ada)
+        assert _weak_provider(store).relationships("articles") == {}
+
+
+def test_weak_link_survives_source_lineage_replacement():
+    with weak_store() as store:
+        ada = Author("Ada", "author-a", "author-a~1")
+        article = Article("Engines", "article-1", "article-1~1")
+        store.save(ada)
+        store.save(article)
+        store.link(article, "authors", ada)
+        store.replace(article, Article("Engines, 2nd ed.", "article-1", "article-1~2"))
+        # The link binds the source lineage, so the revised article still serves it.
+        assert _weak_provider(store).relationships("articles") == {
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
+        }
+
+
+def test_weak_link_target_revision_serves_the_same_lineage_id():
+    with weak_store() as store:
+        ada = Author("Ada", "author-a", "author-a~1")
+        article = Article("Engines", "article-1", "article-1~1")
+        store.save(ada)
+        store.save(article)
+        store.link(article, "authors", ada)
+        store.replace(ada, Author("Ada Lovelace", "author-a", "author-a~2"))
+        # id is lineage-level: the revised target resolves to the same id.
+        assert _weak_provider(store).relationships("articles") == {
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
+        }
+
+
+def test_duplicate_pair_lineage_renders_once():
+    with weak_store() as store:
+        ada = Author("Ada", "author-a", "author-a~1")
+        article = Article("Engines", "article-1", "article-1~1")
+        store.save(ada)
+        store.save(article)
+        store.link(article, "authors", ada)
+        # A second live lineage for the same pair (a tolerated concurrency outcome).
+        link_table = store._table("_httk_link_article__author__authors")
+        source_lid = store.sid_of(article)
+        target_lid = store.sid_of(ada)
+        with store._write_connection() as connection:
+            inserted = connection.execute(
+                sqlalchemy.insert(link_table).values(
+                    {
+                        "logical_id": 0,
+                        "source_lid": source_lid,
+                        "target_lid": target_lid,
+                        "retracted": 0,
+                        "store_timestamp": 1,
+                    }
+                )
+            )
+            new_sid = int(inserted.inserted_primary_key[0])
+            connection.execute(
+                sqlalchemy.update(link_table).where(link_table.c.sid == new_sid).values({"logical_id": new_sid})
+            )
+        assert _weak_provider(store).relationships("articles") == {
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
         }
 
 

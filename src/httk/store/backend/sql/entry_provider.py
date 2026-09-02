@@ -40,7 +40,13 @@ instead — when their target class is itself served, each record declares its
 related entries as a flat tuple of :class:`~httk.core.RelatedEntry` values,
 carrying the ``role``/``description`` metadata of an optional
 :class:`~httk.core.storage.Related` field marker (``Related(serve=False)`` suppresses
-the field as a relationship).
+the field as a relationship). Exposed weak links
+(``WeakLink`` declared ``exposed_relationship=True``)
+whose target class is served also surface through
+:meth:`StoreEntryProvider.relationships`: each source lineage's live latest
+link rows become related entries carrying the link's ``role``/``description``,
+resolved to the target lineage's latest revision id (links declared
+``exposed_relationship=False`` are served nowhere).
 """
 
 from collections.abc import Callable, Iterator, Mapping
@@ -58,7 +64,13 @@ from httk.core import (
 
 from httk.store.backend.codecs import codec_named
 from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
-from httk.store.backend.sql.mapping import SID_COLUMN
+from httk.store.backend.sql.mapping import (
+    LOGICAL_ID_COLUMN,
+    RETRACTED_COLUMN,
+    SID_COLUMN,
+    SOURCE_LID_COLUMN,
+    TARGET_LID_COLUMN,
+)
 from httk.store.backend.sql.searcher import SqlColumn, _query_index
 from httk.store.backend.sql.store import SqlStore, _as_fixed_tensor
 from httk.store.query import ID_FIELD
@@ -72,6 +84,35 @@ __all__ = [
     "auto_definition",
     "served_specs",
 ]
+
+
+def _live_targets_by_source(rows: Any) -> dict[int, list[int]]:
+    """The live latest-of-lineage linked target lids per source lid, from raw link rows.
+
+    ``rows`` yields ``(source_lid, target_lid, logical_id, sid, retracted)``.
+    Each pair-lineage (``logical_id``) is reduced to its latest revision; a
+    target is live under a source if any of its pair-lineages is live. The
+    returned target lids are deduplicated and ordered by first-link order (the
+    smallest live pair-lineage root), matching ``linked()``.
+    """
+    latest: dict[int, tuple[int, int, int, int]] = {}  # logical_id -> (sid, retracted, target_lid, source_lid)
+    for source_lid, target_lid, logical_id, sid, retracted in rows:
+        lineage = int(logical_id)
+        previous = latest.get(lineage)
+        if previous is None or int(sid) > previous[0]:
+            latest[lineage] = (int(sid), int(retracted), int(target_lid), int(source_lid))
+    live_root: dict[int, dict[int, int]] = {}  # source_lid -> {target_lid -> smallest live root}
+    for lineage, (_sid, retracted, target_lid, source_lid) in latest.items():
+        if retracted != 0:
+            continue
+        roots = live_root.setdefault(source_lid, {})
+        existing = roots.get(target_lid)
+        if existing is None or lineage < existing:
+            roots[target_lid] = lineage
+    return {
+        source_lid: [tl for tl, _root in sorted(roots.items(), key=lambda item: (item[1], item[0]))]
+        for source_lid, roots in live_root.items()
+    }
 
 
 def _default_id(entry_type: str, sid: int, obj: Any) -> str:
@@ -241,6 +282,22 @@ class StoreEntryProvider(EntryProvider):
                 pairs.append((spec, related))
         return pairs
 
+    def _exposed_link_specs(self, entry_type: str) -> list[tuple[Any, str]]:
+        """The ``(LinkSpec, related entry type)`` weak links served as relationships.
+
+        Only weak links declared ``exposed_relationship=True`` whose target
+        class is itself served contribute; ``exposed_relationship=False`` links
+        contribute nothing anywhere in serving.
+        """
+        pairs: list[tuple[Any, str]] = []
+        for spec in self._schemas[entry_type].links:
+            if not spec.exposed_relationship:
+                continue
+            related = self._entry_type_of.get(spec.target)
+            if related is not None:
+                pairs.append((spec, related))
+        return pairs
+
     # ------------------------------------------------------------------ the provider contract
 
     def entry_types(self) -> Mapping[str, EntryTypeDefinition]:
@@ -298,9 +355,9 @@ class StoreEntryProvider(EntryProvider):
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
         """Return relationships grouped by source entry id.
 
-        Relationships come from stored reference fields and child fields
-        targeting served storable classes; loose-edge projections are not part
-        of this provider contract.
+        Relationships come from stored reference fields, child fields, and
+        exposed weak links targeting served storable classes; loose-edge
+        projections are not part of this provider contract.
 
         :param entry_type: The served entry type whose relationships are read.
         :return: Related entries keyed by source entry id.
@@ -308,7 +365,8 @@ class StoreEntryProvider(EntryProvider):
         """
         cls = self._require_entry_type(entry_type)
         relation_specs = self._relationship_specs(entry_type)
-        if not relation_specs:
+        link_specs = self._exposed_link_specs(entry_type)
+        if not relation_specs and not link_specs:
             return {}
         store = self._store
         if store._missing_tables_for_read((cls,)):
@@ -370,6 +428,8 @@ class StoreEntryProvider(EntryProvider):
                             marker.role if marker is not None else None,
                         )
                     )
+            for link_spec, related in link_specs:
+                self._collect_weak_relationships(connection, schema, table, link_spec, related, related_by_sid)
             for sid in sorted(related_by_sid):
                 record_id = stored_id(connection, entry_type, cls, sid)
                 entries = [
@@ -385,6 +445,67 @@ class StoreEntryProvider(EntryProvider):
                 # occurrence; entries differing only in metadata are both kept.
                 result[record_id] = tuple(dict.fromkeys(entries))
         return result
+
+    def _collect_weak_relationships(
+        self,
+        connection: Any,
+        schema: TableSchema,
+        table: Any,
+        link_spec: Any,
+        related: str,
+        related_by_sid: dict[int, list[tuple[type, int, str, str | None, str | None]]],
+    ) -> None:
+        """Append one exposed weak link's live relationships to ``related_by_sid``.
+
+        Weak links bind lineages: the live latest link rows are scanned in bulk,
+        keyed by source ``logical_id``, and each is attached to *every* revision
+        row of the source lineage (so the served record carries it whether or
+        not ``only_latest`` restricts the revision stream), exactly as reference
+        and child relationships attach to their rows. Each target lid resolves
+        through the target lineage's latest row — the id is lineage-level.
+        """
+        store = self._store
+        link_table = store._table(link_spec.table_name)
+        rows = connection.execute(
+            sqlalchemy.select(
+                link_table.c[SOURCE_LID_COLUMN],
+                link_table.c[TARGET_LID_COLUMN],
+                link_table.c[LOGICAL_ID_COLUMN],
+                link_table.c[SID_COLUMN],
+                link_table.c[RETRACTED_COLUMN],
+            )
+        )
+        targets_by_source = _live_targets_by_source(rows)
+        if not targets_by_source:
+            return
+        # Every revision sid of each live source lineage carries the link.
+        source_sids_by_lid: dict[int, list[int]] = {}
+        for sid_value, lid_value in connection.execute(
+            sqlalchemy.select(table.c[SID_COLUMN], table.c[LOGICAL_ID_COLUMN]).where(
+                table.c[LOGICAL_ID_COLUMN].in_(list(targets_by_source))
+            )
+        ):
+            source_sids_by_lid.setdefault(int(lid_value), []).append(int(sid_value))
+        # Each live target lineage resolves to its latest revision row.
+        target_lids = sorted({tl for tls in targets_by_source.values() for tl in tls})
+        target_table = store._table(resolve_schema(link_spec.target).table_name)
+        target_sid_by_lid: dict[int, int] = {}
+        for lid_value, max_sid in connection.execute(
+            sqlalchemy.select(target_table.c[LOGICAL_ID_COLUMN], sqlalchemy.func.max(target_table.c[SID_COLUMN]))
+            .where(target_table.c[LOGICAL_ID_COLUMN].in_(target_lids))
+            .group_by(target_table.c[LOGICAL_ID_COLUMN])
+        ):
+            if max_sid is not None:  # a None max is a dangling link; fsck reports it
+                target_sid_by_lid[int(lid_value)] = int(max_sid)
+        for source_lid, target_list in targets_by_source.items():
+            for source_sid in source_sids_by_lid.get(source_lid, ()):
+                for target_lid in target_list:
+                    target_sid = target_sid_by_lid.get(target_lid)
+                    if target_sid is None:
+                        continue
+                    related_by_sid.setdefault(source_sid, []).append(
+                        (link_spec.target, target_sid, related, link_spec.description, link_spec.role)
+                    )
 
 
 def _json_value(schema: TableSchema, spec: FieldSpec, value: Any) -> Any:

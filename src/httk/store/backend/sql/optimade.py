@@ -26,7 +26,7 @@ from httk.core import EntryTypeDefinition
 from httk.core.optimade import FilterAst
 
 from httk.store.backend.schema import resolve_schema
-from httk.store.backend.sql.mapping import SID_COLUMN
+from httk.store.backend.sql.mapping import LOGICAL_ID_COLUMN, SID_COLUMN
 from httk.store.backend.sql.searcher import SqlColumn, SqlExpression, SqlSearcher, SqlVariable
 from httk.store.backend.sql.store import SqlStore
 from httk.store.query import Searcher, SearchExpression, SearchVariable
@@ -53,6 +53,41 @@ def _related_id_has_handlers(store: SqlStore, related_cls: type, field: str) -> 
         table = store._table(resolve_schema(related_cls).table_name)
         sids = (sqlalchemy.select(table.c[SID_COLUMN]).where(table.c["id"].in_(values)),)
         return set_handler(field, ops, sids, has_type, search_variable)
+
+    return {'HAS': has_handler}
+
+
+def _weak_link_id_has_handlers(store: SqlStore, related_cls: type, name: str) -> Mapping[str, Callable[..., Any]]:
+    """The ``'<related_type>.id'`` HAS handler over an exposed weak link.
+
+    Each served id resolves to the target lineage id through a subquery over the
+    target table's physical ``id`` column, matched against the link's live
+    latest target lineages. ``HAS ALL`` composes as ANDed per-value ``has_any``
+    over fresh link aliases (mirroring :func:`set_handler`); ``HAS ONLY`` uses
+    the set machinery's ``has_only`` (a no-links source matches vacuously), which
+    expresses the multi-valued semantics faithfully via the subquery passthrough.
+    """
+
+    def has_handler(
+        entry: str, ops: Any, values: Any, search_variable: SearchVariable, has_type: str
+    ) -> SearchExpression:
+        table = store._table(resolve_schema(related_cls).table_name)
+
+        def lineages(selected: Any) -> Any:
+            return sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(table.c["id"].in_(selected))
+
+        if has_type == 'HAS_ALL':
+            # Fresh link alias per conjunct so the ANDed predicates constrain
+            # independent linked rows (a source linked to every id).
+            search = getattr(search_variable.links, name).has_any(lineages(values[:1]))
+            for value in values[1:]:
+                search = search & getattr(search_variable.links, name).has_any(lineages([value]))
+            return search
+        if has_type == 'HAS_ANY':
+            return getattr(search_variable.links, name).has_any(lineages(values))
+        if has_type == 'HAS_ONLY':
+            return getattr(search_variable.links, name).has_only(lineages(values))
+        raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
     return {'HAS': has_handler}
 
@@ -167,16 +202,23 @@ def optimade_filter_searcher(
     if related_classes:
         related = dict(related_classes)
         for related_type, related_cls in related.items():
-            matching = [
+            fields = [
                 spec for spec in schema.fields if spec.target is related_cls and spec.role in ("reference", "child")
             ]
-            if len(matching) != 1:
+            links = [spec for spec in schema.links if spec.exposed_relationship and spec.target is related_cls]
+            total = len(fields) + len(links)
+            if total != 1:
                 raise ValueError(
                     f"related_classes entry {related_type!r} ({related_cls.__name__}) matches "
-                    f"{'no' if not matching else str(len(matching))} reference or child-of-storable "
-                    f"field{'' if len(matching) == 1 else 's'} of {cls.__name__}; exactly one is required"
+                    f"{'no' if not total else str(total)} reference or child-of-storable field"
+                    f"{'' if total == 1 else 's'} or exposed weak link{'' if total == 1 else 's'} "
+                    f"of {cls.__name__}; exactly one is required"
                 )
-            handlers[f"{related_type}.id"] = _related_id_has_handlers(store, related_cls, matching[0].field)
+            handlers[f"{related_type}.id"] = (
+                _related_id_has_handlers(store, related_cls, fields[0].field)
+                if fields
+                else _weak_link_id_has_handlers(store, related_cls, links[0].name)
+            )
         relationship_targets = tuple(related)
 
         def resolve_related(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:

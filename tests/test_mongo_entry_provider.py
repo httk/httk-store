@@ -16,6 +16,7 @@ from httk.core.storage import (
     Shape,
     StorageInfo,
     Unique,
+    WeakLink,
     stored_property,
 )
 
@@ -114,10 +115,42 @@ def _register(name: str, family: type, records: tuple[type, ...]) -> None:
         )
 
 
+@dataclass(frozen=True)
+class WAuthor:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(dedup="content_id")
+    name: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class WArticle:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        dedup="content_id",
+        links=(
+            WeakLink("authors", WAuthor, exposed_relationship=True, role="author", description="Wrote it"),
+            WeakLink("editors", WAuthor, exposed_relationship=False),
+        ),
+    )
+    title: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+class WArticles:
+    type = "warticles"
+
+
+class WAuthors:
+    type = "wauthors"
+
+
 _register("books", MongoBooks, (MongoBook,))
 _register("writers", MongoWriters, (MongoWriter,))
 _register("people", MongoPeople, (MongoPerson,))
 _register("projects", MongoProjects, (MongoProject,))
+_register("warticles", WArticles, (WArticle,))
+_register("wauthors", WAuthors, (WAuthor,))
 
 ADA = MongoWriter("Ada", 1815)
 BOOLE = MongoWriter("Boole", 1815)
@@ -339,6 +372,95 @@ def test_absent_optional_storable_child_is_an_empty_relationship_set(mongo_test_
     store.save(MongoProject("No members"))
     provider = StoreEntryProvider(store, {"people": MongoPerson, "projects": MongoProject}, id_of=_sid_id)
     assert provider.relationships("projects") == {}
+
+
+# --------------------------------------------------------------------- exposed weak links
+
+_WEAK_LINK_COLLECTION = "_httk_link_warticle__wauthor__authors"
+
+
+def _weak_store(database):
+    return MongoStore(database, entry_records={WArticles: WArticle, WAuthors: WAuthor})
+
+
+def _weak_provider(store):
+    return StoreEntryProvider(store, {"warticles": WArticle, "wauthors": WAuthor})
+
+
+def test_exposed_weak_link_renders_as_relationship_with_metadata(mongo_test_database):
+    store = _weak_store(mongo_test_database)
+    ada = WAuthor("Ada", "author-a", "author-a~1")
+    editor = WAuthor("Ed", "author-e", "author-e~1")
+    article = WArticle("Engines", "article-1", "article-1~1")
+    for obj in (ada, editor, article):
+        store.save(obj)
+    store.link(article, "authors", ada)
+    store.link(article, "editors", editor)  # exposed_relationship=False: serves nothing
+    provider = _weak_provider(store)
+    assert provider.relationships("warticles") == {
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+    }
+    assert provider.relationships("wauthors") == {}
+
+
+def test_retracted_weak_link_disappears_from_relationships(mongo_test_database):
+    store = _weak_store(mongo_test_database)
+    ada = WAuthor("Ada", "author-a", "author-a~1")
+    article = WArticle("Engines", "article-1", "article-1~1")
+    store.save(ada)
+    store.save(article)
+    store.link(article, "authors", ada)
+    store.unlink(article, "authors", ada)
+    assert _weak_provider(store).relationships("warticles") == {}
+
+
+def test_weak_link_survives_source_lineage_replacement(mongo_test_database):
+    store = _weak_store(mongo_test_database)
+    ada = WAuthor("Ada", "author-a", "author-a~1")
+    article = WArticle("Engines", "article-1", "article-1~1")
+    store.save(ada)
+    store.save(article)
+    store.link(article, "authors", ada)
+    store.replace(article, WArticle("Engines, 2nd ed.", "article-1", "article-1~2"))
+    assert _weak_provider(store).relationships("warticles") == {
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+    }
+
+
+def test_weak_link_target_revision_serves_the_same_lineage_id(mongo_test_database):
+    store = _weak_store(mongo_test_database)
+    ada = WAuthor("Ada", "author-a", "author-a~1")
+    article = WArticle("Engines", "article-1", "article-1~1")
+    store.save(ada)
+    store.save(article)
+    store.link(article, "authors", ada)
+    store.replace(ada, WAuthor("Ada Lovelace", "author-a", "author-a~2"))
+    assert _weak_provider(store).relationships("warticles") == {
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+    }
+
+
+def test_duplicate_pair_lineage_renders_once(mongo_test_database):
+    store = _weak_store(mongo_test_database)
+    ada = WAuthor("Ada", "author-a", "author-a~1")
+    article = WArticle("Engines", "article-1", "article-1~1")
+    store.save(ada)
+    store.save(article)
+    store.link(article, "authors", ada)
+    # A second live lineage for the same pair (a tolerated concurrency outcome).
+    store._database.database[_WEAK_LINK_COLLECTION].insert_one(
+        {
+            "_id": 987654,
+            "logical_id": 987654,
+            "source_lid": store.sid_of(article),
+            "target_lid": store.sid_of(ada),
+            "retracted": 0,
+            "store_timestamp": 1,
+        }
+    )
+    assert _weak_provider(store).relationships("warticles") == {
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+    }
 
 
 def test_definitions_validation_and_record_validation(provider, store):

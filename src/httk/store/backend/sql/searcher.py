@@ -73,17 +73,21 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import sqlalchemy
+from httk.core.storage import resolve_storage_record
 
 from httk.store.backend.codecs import ValueCodec, codec_named, decode_fracvector_exact
-from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import FieldSpec, LinkSpec, SchemaError, TableSchema, resolve_schema
 from httk.store.backend.sql.mapping import (
     ALT_ID_COLUMN,
     ALT_KIND_COLUMN,
     LOGICAL_ID_COLUMN,
+    RETRACTED_COLUMN,
     SID_COLUMN,
+    SOURCE_LID_COLUMN,
     STORE_TIMESTAMP_COLUMN,
+    TARGET_LID_COLUMN,
 )
-from httk.store.query import SearchResult
+from httk.store.query import SearchResult, UnsupportedQueryError
 from httk.store.store_timestamp import ns_operand_to_store_units
 
 if TYPE_CHECKING:
@@ -92,6 +96,8 @@ if TYPE_CHECKING:
 __all__ = [
     "SqlColumn",
     "SqlExpression",
+    "SqlLinkSet",
+    "SqlLinks",
     "SqlReference",
     "SqlSearcher",
     "SqlVariable",
@@ -237,6 +243,7 @@ class SqlColumn:
     :param codec: The value codec, when the field is encoded.
     :param query_index: The codec-column index used for query comparisons.
     :param from_child: Whether the column comes from a child-table join.
+    :param link_path: Whether the column comes from a weak-link traversal (never projectable).
     :param operand_converter: Optional conversion applied to public comparison operands.
     :param presentation_converter: Optional conversion applied to scalar output values.
     """
@@ -251,6 +258,7 @@ class SqlColumn:
         codec: ValueCodec | None = None,
         query_index: int = 0,
         from_child: bool = False,
+        link_path: bool = False,
         operand_converter: Callable[[object], object] | None = None,
         presentation_converter: Callable[[object], object] | None = None,
     ) -> None:
@@ -261,6 +269,7 @@ class SqlColumn:
         self._codec = codec
         self._query_index = query_index
         self._from_child = from_child
+        self._link_path = link_path
         self._operand_converter = operand_converter
         self._presentation_converter = presentation_converter
 
@@ -594,6 +603,197 @@ class SqlReference:
         return getattr(self._variable._reference_variable(self._spec), name)
 
 
+class SqlLinks:
+    """The ``links`` namespace of a search variable: one weak link per attribute.
+
+    Each attribute access resolves the declared :class:`~httk.store.backend.schema.LinkSpec`
+    of that name and returns a **fresh** :class:`SqlLinkSet` — a new link-table
+    alias every time, never memoized on ``(variable, name)``. That freshness is
+    what lets AND-composed predicates on the same link constrain independent
+    joined rows (so ``(v.links.p.name == 'A') & (v.links.p.name == 'B')`` is a
+    HAS-ALL over two distinct linked targets, exactly as child-field predicates
+    behave).
+
+    :param variable: The query variable whose weak links this namespace exposes.
+    """
+
+    def __init__(self, variable: "SqlVariable") -> None:
+        self._variable = variable
+
+    def __getattr__(self, name: str) -> "SqlLinkSet":
+        if name.startswith("_"):
+            raise AttributeError(name)
+        for spec in self._variable._schema.links:
+            if spec.name == name:
+                return SqlLinkSet(self._variable, spec)
+        declared = ", ".join(link.name for link in self._variable._schema.links) or "none"
+        raise SchemaError(
+            f"{self._variable._cls.__name__} declares no weak link named {name!r} (declared links: {declared})"
+        )
+
+
+class SqlLinkSet:
+    """One weak-link traversal from a search variable to the latest live-linked targets.
+
+    Construction LEFT OUTER JOINs a fresh alias of the link table onto the
+    parent variable, its onclause selecting the source's live, latest-of-lineage
+    link rows (``source_lid == parent.logical_id AND retracted == 0 AND
+    latest-of-lineage`` — plus the candidate-row ``as_of`` cutoff in the
+    onclause, never in WHERE, so no-link LEFT JOIN rows survive for vacuous-truth
+    forms), and switches the searcher into grouped mode. All link and target
+    aliases are *always* latest-filtered: that is what "weak" means, and it is
+    orthogonal to the root-variable ``only_latest`` concern.
+
+    Identity comparisons (``== stored_object`` / ``== target_variable``,
+    :meth:`has_any`, :meth:`has_only`) run over the link row's ``target_lid``
+    through the child-style set-derived path, so ``~has_any(...)`` and
+    ``~(v.links.x == obj)`` negate set-wise. Attribute access chains into a
+    scalar or encoded field of the *latest* target revision.
+
+    :param variable: The query variable the link traverses from.
+    :param spec: The resolved weak-link declaration.
+    """
+
+    def __init__(self, variable: "SqlVariable", spec: LinkSpec) -> None:
+        self._variable = variable
+        self._spec = spec
+        searcher = variable._searcher
+        self._searcher = searcher
+        link_table = searcher._store._table(spec.table_name)
+        alias = link_table.alias()
+        self._alias = alias
+        conds: list[sqlalchemy.ColumnElement[bool]] = [
+            _bool_clause(alias.c[SOURCE_LID_COLUMN] == variable._alias.c[LOGICAL_ID_COLUMN]),
+            _bool_clause(alias.c[RETRACTED_COLUMN] == 0),
+            searcher._latest_of_lineage_in(link_table, alias).where_clause,
+        ]
+        self._append_as_of(conds, alias)
+        variable._joins.append((alias, _bool_clause(sqlalchemy.and_(*conds)), None))
+        searcher._grouped = True
+        self._target_column = SqlColumn(searcher, alias.c[TARGET_LID_COLUMN], from_child=True, link_path=True)
+
+    def _append_as_of(self, conds: list[sqlalchemy.ColumnElement[bool]], alias: sqlalchemy.FromClause) -> None:
+        """Add the candidate-row ``store_timestamp <= as_of`` cutoff to a join onclause, if set."""
+        if self._searcher._as_of is not None:
+            as_of_units = ns_operand_to_store_units(
+                self._searcher._as_of, cast(int, self._searcher._store.store_timestamp_resolution)
+            )
+            conds.append(_bool_clause(alias.c[STORE_TIMESTAMP_COLUMN] <= as_of_units))
+
+    def _operand(self, value: Any) -> Any:
+        """Resolve one identity operand to a target lineage id, a lid column, or a subquery.
+
+        A stored target resolves to its ``logical_id`` through the store; a
+        target search variable to its ``logical_id`` column; a raw SQLAlchemy
+        subquery passes through (for handler-supplied ``SELECT`` bodies). Any
+        other value — a bare string, an unstored object — is a usage error.
+        """
+        if isinstance(value, SqlVariable):
+            if resolve_schema(value._cls).table_name != resolve_schema(self._spec.target).table_name:
+                raise TypeError(
+                    f"weak link {self._spec.name!r} on {self._variable._cls.__name__} expects a "
+                    f"{self._spec.target.__name__} target variable, got {value._cls.__name__}"
+                )
+            return value._alias.c[LOGICAL_ID_COLUMN]
+        if isinstance(value, sqlalchemy.SelectBase):
+            return value
+        try:
+            resolve_storage_record(value)
+        except TypeError:
+            raise TypeError(
+                f"cannot compare weak link {self._spec.name!r} against {value!r}; compare against a stored "
+                f"{self._spec.target.__name__}, a {self._spec.target.__name__} search variable, or chain a "
+                f"target field (for example v.links.{self._spec.name}.<field> == ...)"
+            ) from None
+        store = self._searcher._store
+        with store._read_connection() as connection:
+            return store._link_target_lid(connection, self._spec, value, self._variable._cls, self._spec.name)
+
+    def __eq__(self, other: object) -> SqlExpression:  # type: ignore[override]
+        """Match sources with a live linked target whose lineage equals ``other``."""
+        return self._target_column._plain(self._target_column._element == self._operand(other))
+
+    def __ne__(self, other: object) -> SqlExpression:  # type: ignore[override]
+        """Match sources with no live linked target whose lineage equals ``other`` (set-wise)."""
+        return ~self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def has(self, value: Any) -> SqlExpression:
+        """Match a live linked target among ``value``.
+
+        :param value: The stored target or target variable to match.
+        :return: The matching SQL condition.
+        """
+        return self.has_any(value)
+
+    def has_any(self, *values: Any) -> SqlExpression:
+        """Match at least one live linked target among ``values``.
+
+        :param \\*values: The stored targets, target variables, or a lone subquery to match.
+        :return: The matching SQL condition.
+        """
+        return self._target_column.has_any(*[self._operand(value) for value in values])
+
+    def has_only(self, *values: Any) -> SqlExpression:
+        """Require every live linked target to be among ``values`` (a no-links source matches).
+
+        :param \\*values: The complete set of allowed stored targets, target variables, or a lone subquery.
+        :return: The condition requiring every linked target to match.
+        """
+        return self._target_column.has_only(*[self._operand(value) for value in values])
+
+    def __getattr__(self, name: str) -> SqlColumn:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        target_schema = resolve_schema(self._spec.target)
+        try:
+            spec = target_schema.field(name)
+        except SchemaError:
+            if name == "links":
+                raise UnsupportedQueryError(
+                    f"chaining into the weak links of a weak-link target ({self._spec.target.__name__}.links) "
+                    f"is not supported"
+                ) from None
+            raise AttributeError(
+                f"{self._spec.target.__name__} has no stored field {name!r} to query through weak link "
+                f"{self._spec.name!r}"
+            ) from None
+        if spec.role not in ("scalar", "encoded"):
+            raise UnsupportedQueryError(
+                f"weak-link field chaining reaches only scalar and encoded fields of the target; "
+                f"{self._spec.target.__name__}.{name} is a {spec.role} field (chaining through references, "
+                f"children, tensors, or nested links of a weak-link target is not supported)"
+            )
+        searcher = self._searcher
+        target_table = searcher._store._table(target_schema.table_name)
+        target_alias = target_table.alias()
+        conds: list[sqlalchemy.ColumnElement[bool]] = [
+            _bool_clause(target_alias.c[LOGICAL_ID_COLUMN] == self._alias.c[TARGET_LID_COLUMN]),
+            searcher._latest_of_lineage_in(target_table, target_alias).where_clause,
+        ]
+        self._append_as_of(conds, target_alias)
+        # Fresh target alias per attribute access, LEFT OUTER JOINed after the
+        # link alias it references (join order preserved by the flat join list).
+        self._variable._joins.append((target_alias, _bool_clause(sqlalchemy.and_(*conds)), None))
+        # Rebuilt child-style (from_child, empty group_columns): a multi-row link
+        # join must negate set-wise and must not push target columns into GROUP BY.
+        if spec.role == "scalar":
+            return SqlColumn(searcher, target_alias.c[spec.columns[0].name], from_child=True, link_path=True, spec=spec)
+        assert spec.codec_name is not None
+        codec = codec_named(spec.codec_name)
+        return SqlColumn(
+            searcher,
+            target_alias.c[spec.field + codec.query_suffix],
+            from_child=True,
+            link_path=True,
+            spec=spec,
+            codec=codec,
+            query_index=_query_index(codec),
+        )
+
+
 class SqlVariable:
     """A query variable bound to a fresh alias of a storable class's table.
 
@@ -639,9 +839,14 @@ class SqlVariable:
         """
         return SqlExpression(sqlalchemy.false(), sqlalchemy.false())
 
-    def __getattr__(self, name: str) -> "SqlColumn | SqlReference":
+    def __getattr__(self, name: str) -> "SqlColumn | SqlReference | SqlLinks":
         if name.startswith("_"):
             raise AttributeError(name)
+        if name == "links":
+            # The weak-link namespace ('links' is a reserved field name, so it
+            # never shadows a stored field); attribute access on it resolves a
+            # declared link into a fresh-alias SqlLinkSet.
+            return SqlLinks(self)
         if name == "sid":
             # The store-managed integer primary key ('sid' is a reserved field
             # name, so this never shadows a stored field).
@@ -853,7 +1058,22 @@ class SqlSearcher:
         :param alias: The table alias the restriction correlates against.
         :return: A WHERE-position condition true only for latest-of-lineage rows.
         """
-        newer = self._store._table(schema.table_name).alias()
+        return self._latest_of_lineage_in(self._store._table(schema.table_name), alias)
+
+    def _latest_of_lineage_in(self, table: sqlalchemy.Table, alias: sqlalchemy.FromClause) -> SqlExpression:
+        """A ``NOT EXISTS`` restricting ``alias`` to the latest row of its ``logical_id`` lineage by sid.
+
+        The ``newer`` sibling subquery draws from the same ``table`` — used both
+        for root/reference parent tables (via :meth:`_latest_of_lineage`) and for
+        weak-link and weak-link-target aliases, whose tables carry the same
+        ``logical_id``/``sid`` lineage columns. When an ``as_of`` cutoff is set,
+        the sibling subquery is bounded by it, giving "latest as of T".
+
+        :param table: The table whose lineage siblings the subquery scans.
+        :param alias: The table alias the restriction correlates against.
+        :return: A WHERE-position condition true only for latest-of-lineage rows.
+        """
+        newer = table.alias()
         conds: list[sqlalchemy.ColumnElement[bool]] = [
             _bool_clause(newer.c[LOGICAL_ID_COLUMN] == alias.c[LOGICAL_ID_COLUMN]),
             _bool_clause(newer.c[SID_COLUMN] > alias.c[SID_COLUMN]),
@@ -875,6 +1095,14 @@ class SqlSearcher:
         if isinstance(variable, SqlVariable):
             self._outputs.append(_Output(name, variable._alias.c[SID_COLUMN], variable._cls, False))
         elif isinstance(variable, SqlColumn):
+            if variable._link_path:
+                # Weak-link traversals are variable-length set predicates, not
+                # single-valued projections — the same rule that rejects
+                # child-field projections in results().
+                raise UnsupportedQueryError(
+                    f"output {name!r} projects a weak-link path; weak-link traversals are usable only as "
+                    f"search predicates, not as projected outputs"
+                )
             exact_element = None
             decoder: Any = None
             if variable._spec is not None:

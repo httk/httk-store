@@ -7,8 +7,7 @@ configured backing records are also accepted for the schema-derived provider
 surface used by the SQL provider's parity tests.
 """
 
-import dataclasses
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 from httk.core import (
@@ -19,7 +18,6 @@ from httk.core import (
     RelatedEntry,
     known_definition_prefixes,
 )
-from httk.core.storage import RelationshipLink
 
 from httk.store.backend.codecs import codec_named
 from httk.store.backend.schema import (
@@ -88,16 +86,6 @@ def auto_definition(entry_type: str, schema: TableSchema, prefix: str) -> EntryT
     return base.extended(extra)
 
 
-@dataclasses.dataclass(frozen=True)
-class _LinkScan:
-    declaring: type
-    link: RelationshipLink
-    from_cls: type
-    to_cls: type
-    from_type: str
-    to_type: str
-
-
 class StoreEntryProvider(EntryProvider):
     """Serve configured Mongo entry families or their concrete backings.
 
@@ -118,7 +106,6 @@ class StoreEntryProvider(EntryProvider):
         definitions: Mapping[str, EntryTypeDefinition] | None = None,
         prefix: str = "_httk_",
         id_of: Callable[[str, int, Any], str] | None = None,
-        link_classes: Iterable[type] = (),
         only_latest: bool = True,
     ) -> None:
         if prefix not in known_definition_prefixes():
@@ -178,7 +165,6 @@ class StoreEntryProvider(EntryProvider):
         for entry_type, records in self._record_classes.items():
             for record in records:
                 self._type_for_class[record] = entry_type
-        self._links_by_from = self._build_link_inventory(tuple(link_classes))
 
         for entry_type in self._classes:
             definition = self._definitions.get(entry_type)
@@ -204,40 +190,6 @@ class StoreEntryProvider(EntryProvider):
             f"record class {selected.__name__} is not configured in this MongoStore; "
             "serve a configured entry family or one of its configured backing records"
         )
-
-    def _build_link_inventory(self, link_classes: tuple[type, ...]) -> dict[str, list[_LinkScan]]:
-        inventory: dict[str, list[_LinkScan]] = {}
-        seen: set[type] = set()
-        declaring_classes = [record for records in self._record_classes.values() for record in records]
-        declaring_classes.extend(link_classes)
-        for declaring in declaring_classes:
-            if declaring in seen:
-                continue
-            seen.add(declaring)
-            schema = self._schemas.setdefault(declaring, resolve_schema(declaring))
-            if declaring not in self._type_for_class and not schema.links:
-                raise ValueError(
-                    f"link class {declaring.__name__} declares no relationship links (StorageInfo.links is empty); "
-                    "remove it from link_classes or declare its links"
-                )
-            for link in schema.links:
-                from_cls = schema.field(link.source).target if link.source is not None else declaring
-                to_cls = schema.field(link.target).target if link.target is not None else declaring
-                assert from_cls is not None and to_cls is not None
-                from_type = self._type_for_class.get(from_cls)
-                to_type = self._type_for_class.get(to_cls)
-                if from_type is None or to_type is None:
-                    missing = from_cls if from_type is None else to_cls
-                    side = "FROM" if from_type is None else "TO"
-                    raise ValueError(
-                        f"RelationshipLink({link.source!r}, {link.target!r}) on {declaring.__name__}: the {side}-side "
-                        f"class {missing.__name__} is not served by this provider; every link endpoint must resolve "
-                        "to a served entry type"
-                    )
-                inventory.setdefault(from_type, []).append(
-                    _LinkScan(declaring, link, from_cls, to_cls, from_type, to_type)
-                )
-        return inventory
 
     def _require_entry_type(self, entry_type: str) -> None:
         if entry_type not in self._classes:
@@ -317,7 +269,7 @@ class StoreEntryProvider(EntryProvider):
         return result
 
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
-        """Return direct and link-derived relationships grouped by source id."""
+        """Return direct relationships grouped by source id."""
         self._require_entry_type(entry_type)
         result: dict[str, list[RelatedEntry]] = {}
         for record_type in self._record_classes[entry_type]:
@@ -351,28 +303,6 @@ class StoreEntryProvider(EntryProvider):
                         )
                 if entries:
                     result[self._id_of(entry_type, sid, source)] = entries
-
-        for scan in self._links_by_from.get(entry_type, ()):
-            for link_obj, link_sid in self._iter_records(scan.declaring):
-                source = link_obj if scan.link.source is None else getattr(link_obj, scan.link.source)
-                target = link_obj if scan.link.target is None else getattr(link_obj, scan.link.target)
-                if source is None or target is None:
-                    continue
-                source_sid = (
-                    link_sid if scan.link.source is None else self._store.sid_of(source, as_record=scan.from_cls)
-                )
-                target_sid = self._store.sid_of(target, as_record=scan.to_cls)
-                if source_sid is None or target_sid is None:
-                    continue
-                source_id = self._id_of(entry_type, source_sid, source)
-                result.setdefault(source_id, []).append(
-                    RelatedEntry(
-                        scan.to_type,
-                        self._id_of(scan.to_type, target_sid, target),
-                        description=scan.link.description,
-                        role=scan.link.role,
-                    )
-                )
 
         return {key: tuple(dict.fromkeys(values)) for key, values in result.items()}
 

@@ -15,9 +15,13 @@ from httk.store.backend.sql.graph import LogicalEdgeGraph
 from httk.store.backend.sql.layout import METADATA_TABLE_NAME, actual_table_names
 from httk.store.backend.sql.mapping import (
     CONTENT_ID_COLUMN,
+    LOGICAL_ID_COLUMN,
+    RETRACTED_COLUMN,
     ROLE_COLUMN,
     SID_COLUMN,
+    SOURCE_LID_COLUMN,
     STORE_TIMESTAMP_COLUMN,
+    TARGET_LID_COLUMN,
     backing_dispatch_column_name,
     entry_dispatch_table_name,
 )
@@ -101,7 +105,8 @@ def run_fsck(
     connection_scope = store._read_connection() if verification_only else store._fsck_connection()
     with connection_scope as connection:
         present = actual_table_names(connection)
-        expected = set(graph.tables) | {METADATA_TABLE_NAME, "_httk_sid_counters"}
+        link_tables = {link.table_name for schema in schemas.values() for link in schema.links}
+        expected = set(graph.tables) | {METADATA_TABLE_NAME, "_httk_sid_counters"} | link_tables
         unattributed = sorted(name for name in present if name not in expected and not name.startswith("_httk_"))
         for name in unattributed:
             counters[name].conflicts += 1
@@ -124,6 +129,7 @@ def run_fsck(
         else:
             _repair_dispatches(store, connection, present, counters, violations, False, False)
         marked = _mark(store, connection, graph, present, counters, violations, repair and mutation_allowed)
+        _check_links(store, connection, schemas, present, counters, violations)
         if collect_garbage and not unattributed:
             for table_name, schema in schemas.items():
                 if table_name not in present:
@@ -291,6 +297,95 @@ def _repair_dispatches(
                 values[column] = sid
                 connection.execute(sqlalchemy.insert(dispatch).values(values))
                 counters[name].repaired += 1
+
+
+def _lineage_ids(
+    store: SqlStore,
+    connection: sqlalchemy.Connection,
+    table_name: str,
+    present: set[str] | frozenset[str],
+) -> set[int] | None:
+    """The distinct ``logical_id`` values of a parent table, or None when it cannot be read."""
+    if table_name not in present or table_name not in store._metadata.tables:
+        return None
+    table = store._table(table_name)
+    if LOGICAL_ID_COLUMN not in table.c:
+        return None
+    return {
+        int(value) for value in connection.execute(sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).distinct()).scalars()
+    }
+
+
+def _check_links(
+    store: SqlStore,
+    connection: sqlalchemy.Connection,
+    schemas: dict[str, TableSchema],
+    present: set[str] | frozenset[str],
+    counters: defaultdict[str, _Counter],
+    violations: list[str],
+) -> None:
+    """Verify weak-link tables: valid ``retracted``, lineage integrity, no dangling endpoints.
+
+    Weak links are not ownership/reachability edges: this only reports, retains
+    no rows, and never affects the garbage sweep. A pair carrying more than one
+    lineage (a tolerated concurrency outcome) is a REPAIRABLE note, not
+    corruption, and is not counted as a conflict.
+    """
+    for schema in schemas.values():
+        source_lids: set[int] | None = None
+        for link in schema.links:
+            name = link.table_name
+            if name not in present or name not in store._metadata.tables:
+                continue
+            if source_lids is None:
+                source_lids = _lineage_ids(store, connection, schema.table_name, present)
+            target_lids = _lineage_ids(store, connection, resolve_schema(link.target).table_name, present)
+            table = store._table(name)
+            lineage_min_sid: dict[int, int] = {}
+            pair_lineages: defaultdict[tuple[int, int], set[int]] = defaultdict(set)
+            for sid_v, logical_v, source_v, target_v, retracted_v in connection.execute(
+                sqlalchemy.select(
+                    table.c[SID_COLUMN],
+                    table.c[LOGICAL_ID_COLUMN],
+                    table.c[SOURCE_LID_COLUMN],
+                    table.c[TARGET_LID_COLUMN],
+                    table.c[RETRACTED_COLUMN],
+                )
+            ):
+                sid, logical_id = int(sid_v), int(logical_v)
+                source_lid, target_lid, retracted = int(source_v), int(target_v), int(retracted_v)
+                counters[name].examined += 1
+                if retracted not in (0, 1):
+                    counters[name].conflicts += 1
+                    violations.append(f"link table {name!r} sid {sid} has invalid retracted {retracted!r}")
+                previous = lineage_min_sid.get(logical_id)
+                if previous is None or sid < previous:
+                    lineage_min_sid[logical_id] = sid
+                pair_lineages[(source_lid, target_lid)].add(logical_id)
+                if source_lids is not None and source_lid not in source_lids:
+                    counters[name].conflicts += 1
+                    violations.append(
+                        f"link table {name!r} sid {sid} source_lid {source_lid} matches no "
+                        f"{schema.table_name!r} logical_id"
+                    )
+                if target_lids is not None and target_lid not in target_lids:
+                    counters[name].conflicts += 1
+                    violations.append(
+                        f"link table {name!r} sid {sid} target_lid {target_lid} matches no "
+                        f"{resolve_schema(link.target).table_name!r} logical_id"
+                    )
+            for logical_id, min_sid in lineage_min_sid.items():
+                if logical_id != min_sid:
+                    counters[name].conflicts += 1
+                    violations.append(
+                        f"link table {name!r} lineage logical_id {logical_id} does not equal its founder sid {min_sid}"
+                    )
+            for (source_lid, target_lid), lineages in pair_lineages.items():
+                if len(lineages) > 1:
+                    violations.append(
+                        f"link table {name!r} pair ({source_lid}, {target_lid}) carries {len(lineages)} lineages; "
+                        "deduplicating is a repairable, non-corrupting note"
+                    )
 
 
 def _sweep_ownerless_children(

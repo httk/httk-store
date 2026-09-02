@@ -43,8 +43,7 @@ carrying the ``role``/``description`` metadata of an optional
 the field as a relationship).
 """
 
-import dataclasses
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 import sqlalchemy
@@ -56,7 +55,6 @@ from httk.core import (
     RelatedEntry,
     known_definition_prefixes,
 )
-from httk.core.storage import RelationshipLink
 
 from httk.store.backend.codecs import codec_named
 from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
@@ -84,26 +82,6 @@ def _default_id(entry_type: str, sid: int, obj: Any) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{entry_type} record sid {sid} has a non-string stored id")
     return value
-
-
-@dataclasses.dataclass(frozen=True)
-class _LinkScan:
-    """One relationship-link scan: which table to read and how to interpret its rows.
-
-    Each stored row of ``declaring`` expresses one FROM→TO relationship: the
-    FROM-side sid is read from ``source_column`` and the TO-side sid from
-    ``target_column`` (a reference field's foreign-key column, or the declaring
-    table's own sid column for a ``None`` endpoint).
-    """
-
-    declaring: type
-    schema: TableSchema
-    link: RelationshipLink
-    source_column: str
-    target_column: str
-    from_cls: type
-    to_cls: type
-    to_type: str
 
 
 def auto_definition(entry_type: str, schema: TableSchema, prefix: str) -> EntryTypeDefinition:
@@ -161,8 +139,7 @@ class StoreEntryProvider(EntryProvider):
     ``prefix`` (which must be registered, see
     :func:`~httk.core.register_definition_prefix`). ``id_of`` maps
     ``(entry_type, sid, instance)`` to the served entry id; the default reads
-    the record's store-minted ``id`` field. ``link_classes`` supplies additional storable
-    classes for link metadata validation.
+    the record's store-minted ``id`` field.
 
     See the module docstring for which stored fields are served as properties
     (and how their types map), which are skipped, and which surface through
@@ -173,7 +150,6 @@ class StoreEntryProvider(EntryProvider):
     :param definitions: Optional definitions to use instead of auto-generation.
     :param prefix: The registered prefix for generated property names.
     :param id_of: The function that maps a served record to its public id.
-    :param link_classes: Additional storable classes supplied for link metadata validation.
     :param only_latest: Whether served searchers restrict root variables to the latest row of each lineage.
     """
 
@@ -185,7 +161,6 @@ class StoreEntryProvider(EntryProvider):
         definitions: Mapping[str, EntryTypeDefinition] | None = None,
         prefix: str = "_httk_",
         id_of: Callable[[str, int, Any], str] | None = None,
-        link_classes: Iterable[type] = (),
         only_latest: bool = True,
     ) -> None:
         if prefix not in known_definition_prefixes():
@@ -219,7 +194,6 @@ class StoreEntryProvider(EntryProvider):
                     spec = None
                 if spec is None or spec.role != "scalar" or spec.python_type is not str:
                     raise TypeError(f"{cls.__name__} must declare {required} when served without id_of")
-        self._links_by_from: dict[str, list[_LinkScan]] = self._build_link_inventory(tuple(link_classes))
         self._definitions: dict[str, EntryTypeDefinition] = dict(definitions or {})
         unknown = sorted(name for name in self._definitions if name not in self._classes)
         if unknown:
@@ -236,57 +210,6 @@ class StoreEntryProvider(EntryProvider):
                         f"the supplied definition for entry type {entry_type!r} does not describe the "
                         f"served propert{'y' if len(missing) == 1 else 'ies'}: {', '.join(missing)}"
                     )
-
-    def _build_link_inventory(self, link_classes: tuple[type, ...]) -> dict[str, list[_LinkScan]]:
-        """Collect every RelationshipLink of the served and link classes, indexed by FROM-side entry type.
-
-        Both endpoint classes of every link must be served; a link class whose
-        schema declares no links is a likely user error and rejected.
-        """
-        served = set(self._classes.values())
-        inventory: dict[str, list[_LinkScan]] = {}
-        seen: set[type] = set()
-        for declaring in (*self._classes.values(), *link_classes):
-            if declaring in seen:
-                continue
-            seen.add(declaring)
-            schema = resolve_schema(declaring)
-            if declaring not in served and not schema.links:
-                raise ValueError(
-                    f"link class {declaring.__name__} declares no relationship links (StorageInfo.links "
-                    f"is empty); remove it from link_classes or declare its links"
-                )
-            for link in schema.links:
-                from_cls = schema.field(link.source).target if link.source is not None else declaring
-                to_cls = schema.field(link.target).target if link.target is not None else declaring
-                assert from_cls is not None and to_cls is not None  # link endpoints are reference fields
-                from_type = self._entry_type_of.get(from_cls)
-                to_type = self._entry_type_of.get(to_cls)
-                if from_type is None or to_type is None:
-                    missing = from_cls if from_type is None else to_cls
-                    side = "FROM" if from_type is None else "TO"
-                    raise ValueError(
-                        f"RelationshipLink({link.source!r}, {link.target!r}) on {declaring.__name__}: "
-                        f"the {side}-side class {missing.__name__} is not served by this provider; every "
-                        f"link endpoint must resolve to a served entry type"
-                    )
-                inventory.setdefault(from_type, []).append(
-                    _LinkScan(
-                        declaring=declaring,
-                        schema=schema,
-                        link=link,
-                        source_column=(
-                            schema.field(link.source).columns[0].name if link.source is not None else SID_COLUMN
-                        ),
-                        target_column=(
-                            schema.field(link.target).columns[0].name if link.target is not None else SID_COLUMN
-                        ),
-                        from_cls=from_cls,
-                        to_cls=to_cls,
-                        to_type=to_type,
-                    )
-                )
-        return inventory
 
     # ------------------------------------------------------------------ the served subset
 
@@ -385,13 +308,11 @@ class StoreEntryProvider(EntryProvider):
         """
         cls = self._require_entry_type(entry_type)
         relation_specs = self._relationship_specs(entry_type)
-        link_scans = self._links_by_from.get(entry_type, [])
-        if not relation_specs and not link_scans:
+        if not relation_specs:
             return {}
         store = self._store
         if store._missing_tables_for_read((cls,)):
             return {}
-        link_scans = [scan for scan in link_scans if not store._missing_tables_for_read((scan.declaring,))]
         schema = self._schemas[entry_type]
         table = store._table(schema.table_name)
         reference_specs = [(spec, related) for spec, related in relation_specs if spec.role == "reference"]
@@ -411,8 +332,7 @@ class StoreEntryProvider(EntryProvider):
         with store._read_connection() as connection:
             # The related (target class, target sid, related entry type,
             # description, role) tuples per record sid: forward reference fields
-            # first (in field order), then child fields (by row order), then
-            # link-derived relationships (link declaration order, row-sid order).
+            # first (in field order), then child fields (by row order).
             related_by_sid: dict[int, list[tuple[type, int, str, str | None, str | None]]] = {}
             if reference_specs:
                 columns = [table.c[SID_COLUMN]] + [table.c[spec.columns[0].name] for spec, _related in reference_specs]
@@ -449,17 +369,6 @@ class StoreEntryProvider(EntryProvider):
                             marker.description if marker is not None else None,
                             marker.role if marker is not None else None,
                         )
-                    )
-            for scan in link_scans:
-                link_table = store._table(scan.schema.table_name)
-                statement = sqlalchemy.select(
-                    link_table.c[scan.source_column], link_table.c[scan.target_column]
-                ).order_by(link_table.c[SID_COLUMN])
-                for from_sid, to_sid in connection.execute(statement):
-                    if from_sid is None or to_sid is None:
-                        continue
-                    related_by_sid.setdefault(int(from_sid), []).append(
-                        (scan.to_cls, int(to_sid), scan.to_type, scan.link.description, scan.link.role)
                     )
             for sid in sorted(related_by_sid):
                 record_id = stored_id(connection, entry_type, cls, sid)

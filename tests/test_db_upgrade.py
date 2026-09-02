@@ -7,7 +7,7 @@ from typing import Annotated, ClassVar
 
 import pytest
 import sqlalchemy
-from httk.core.storage import IdentitySkip, Indexed, StorageInfo, content_id, stored_property
+from httk.core.storage import IdentitySkip, Indexed, StorageInfo, WeakLink, content_id, stored_property
 
 from httk.store import EntryFamilyDeclaration, EntryRecordDeclaration
 from httk.store.backend.sql import Backend, SqlStore, StorageLayoutUpgradeRequiredError
@@ -131,6 +131,24 @@ class RecRefNew:
     child: Annotated[UpgradeRefChild | None, _SKIP] = None
 
 
+@dataclass(frozen=True)
+class WeakLinkTarget:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="weak_target", identity_name="weak-target")
+
+    name: str
+
+
+@dataclass(frozen=True)
+class RecWithWeakLink:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        storage_name="upgrade_rec",
+        identity_name="upgrade-rec",
+        links=(WeakLink("targets", WeakLinkTarget),),
+    )
+
+    value: str
+
+
 def _decl(family: type, name: str, record: type) -> EntryFamilyDeclaration:
     return EntryFamilyDeclaration(
         name=name,
@@ -243,6 +261,28 @@ def test_classify_new_referenced_table_is_additive() -> None:
     assert set(plan.added_columns) == {"upgrade_ref_parent"}
 
 
+def test_weak_link_fingerprint_round_trips_deterministically() -> None:
+    first = _fingerprint(UpgradeFamily, "test-upgrade", RecWithWeakLink)
+    second = _fingerprint(UpgradeFamily, "test-upgrade", RecWithWeakLink)
+    assert first == second
+    links = json.loads(first)["tables"]["upgrade_rec"]["links"]
+    assert links == {
+        "targets": {
+            "target": "weak_target",
+            "exposed_relationship": False,
+            "role": None,
+            "description": None,
+        }
+    }
+
+
+def test_classify_added_weak_link_is_rejected() -> None:
+    old = _fingerprint(UpgradeFamily, "test-upgrade", RecOld)
+    new = _fingerprint(UpgradeFamily, "test-upgrade", RecWithWeakLink)
+    reason = classify_schema_upgrade(old, new)
+    assert isinstance(reason, str)
+
+
 # --------------------------------------------------------------------------- end-to-end SqlStore tests
 
 
@@ -282,6 +322,13 @@ def test_reopen_additive_with_upgrade_applies_and_restamps(sql_database: Backend
     # A third plain reopen trusts the re-stamped fingerprint (no upgrade needed).
     reopened = SqlStore(sql_database, entry_families=new_decl)
     assert reopened.fetch(RecNew, sid) == RecNew("kept", None)
+
+
+def test_reopen_gaining_weak_link_raises_even_with_upgrade(sql_database: Backend) -> None:
+    SqlStore(sql_database, entry_families=(_decl(UpgradeFamily, "test-upgrade", RecOld),))
+    # A gained weak link is a non-additive change; upgrade=True refuses (stores rebuild).
+    with pytest.raises(StorageLayoutUpgradeRequiredError):
+        SqlStore(sql_database, entry_families=(_decl(UpgradeFamily, "test-upgrade", RecWithWeakLink),), upgrade=True)
 
 
 def test_upgrade_preserves_content_id_and_dedup(sql_database: Backend) -> None:

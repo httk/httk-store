@@ -35,6 +35,7 @@ from httk.store.backend.schema import (
     ChildTableSpec,
     ColumnSpec,
     FieldSpec,
+    LinkSpec,
     TableSchema,
     resolve_schema,
 )
@@ -45,13 +46,17 @@ __all__ = [
     "CONTENT_ID_COLUMN",
     "DISPATCH_CONTENT_ID_COLUMN",
     "LOGICAL_ID_COLUMN",
+    "RETRACTED_COLUMN",
     "ROLE_COLUMN",
     "SID_COLUMN",
+    "SOURCE_LID_COLUMN",
     "STORE_TIMESTAMP_COLUMN",
+    "TARGET_LID_COLUMN",
     "added_column_ddl",
     "backing_dispatch_column_name",
     "dispatch_table_for",
     "entry_dispatch_table_name",
+    "link_table_for",
     "sqlalchemy_metadata",
     "table_for",
 ]
@@ -79,6 +84,15 @@ ALT_KIND_COLUMN: Final = "alt_kind"
 
 DISPATCH_CONTENT_ID_COLUMN: Final = "content_id"
 """The content identity primary key of an entry-family dispatch table."""
+
+SOURCE_LID_COLUMN: Final = "source_lid"
+"""The source lineage id (a source record's ``logical_id``) of a weak-link row."""
+
+TARGET_LID_COLUMN: Final = "target_lid"
+"""The target lineage id (a target record's ``logical_id``) of a weak-link row."""
+
+RETRACTED_COLUMN: Final = "retracted"
+"""Whether a weak-link revision retracts the pair (``1``) or asserts it (``0``)."""
 
 _MAX_IDENTIFIER_LENGTH: Final = 63
 
@@ -181,9 +195,57 @@ def table_for(schema: TableSchema, metadata: sqlalchemy.MetaData, *, store_times
     for spec in schema.fields:
         if spec.child is not None:
             _build_child_table(schema, spec, spec.child, metadata)
+    # Link tables live beside their source parent table: creating them together
+    # guarantees a link table exists whenever its source table does (weak-link
+    # targets are NOT recursed into — a link table holds plain lid columns, no
+    # foreign key onto the target table object).
+    for link in schema.links:
+        link_table_for(link, metadata, store_timestamps=store_timestamps)
     for target in schema.referenced_classes():
         table_for(resolve_schema(target), metadata, store_timestamps=store_timestamps)
     return table
+
+
+def link_table_for(link: LinkSpec, metadata: sqlalchemy.MetaData, *, store_timestamps: bool = True) -> sqlalchemy.Table:
+    """The append-only link table backing one weak-link declaration, built on first use.
+
+    Columns: an autoincrement ``sid`` primary key, a non-unique-indexed
+    ``logical_id`` lineage column (a fresh row's own sid, copied by a revision),
+    an optional ``store_timestamp`` (present exactly when the store keeps
+    timestamps), the ``source_lid``/``target_lid`` endpoint lineage ids, and a
+    ``retracted`` flag. Indexes cover ``(source_lid, target_lid)`` and
+    ``(target_lid)``.
+    """
+    name = link.table_name
+    existing = metadata.tables.get(name)
+    if existing is not None:
+        return existing
+    items: list[Any] = [
+        sqlalchemy.Column(
+            SID_COLUMN,
+            sqlalchemy.Integer,
+            sqlalchemy.Sequence(f"{name}_sid_seq"),
+            primary_key=True,
+            autoincrement=True,
+        ),
+        sqlalchemy.Column(LOGICAL_ID_COLUMN, sqlalchemy.BigInteger, nullable=False),
+        sqlalchemy.Index(_index_name("ix", name, (LOGICAL_ID_COLUMN,)), LOGICAL_ID_COLUMN),
+    ]
+    if store_timestamps:
+        items.append(sqlalchemy.Column(STORE_TIMESTAMP_COLUMN, sqlalchemy.BigInteger, nullable=False))
+        items.append(sqlalchemy.Index(_index_name("ix", name, (STORE_TIMESTAMP_COLUMN,)), STORE_TIMESTAMP_COLUMN))
+    items.append(sqlalchemy.Column(SOURCE_LID_COLUMN, sqlalchemy.BigInteger, nullable=False))
+    items.append(sqlalchemy.Column(TARGET_LID_COLUMN, sqlalchemy.BigInteger, nullable=False))
+    items.append(
+        sqlalchemy.Column(RETRACTED_COLUMN, sqlalchemy.Integer, nullable=False, server_default=sqlalchemy.text("0"))
+    )
+    items.append(
+        sqlalchemy.Index(
+            _index_name("ix", name, (SOURCE_LID_COLUMN, TARGET_LID_COLUMN)), SOURCE_LID_COLUMN, TARGET_LID_COLUMN
+        )
+    )
+    items.append(sqlalchemy.Index(_index_name("ix", name, (TARGET_LID_COLUMN,)), TARGET_LID_COLUMN))
+    return sqlalchemy.Table(name, metadata, *items)
 
 
 def _index_name(prefix: str, table_name: str, columns: Sequence[str]) -> str:

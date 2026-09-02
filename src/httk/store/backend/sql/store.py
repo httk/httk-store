@@ -67,7 +67,7 @@ from httk.store.backend.codecs import (
     encode_fracvector_exact,
     encode_fracvector_floats,
 )
-from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import FieldSpec, LinkSpec, SchemaError, TableSchema, resolve_schema
 from httk.store.backend.sql.engine import Backend, connection_uses_autocommit
 from httk.store.backend.sql.graph import LogicalEdgeGraph
 from httk.store.backend.sql.layout import (
@@ -94,9 +94,12 @@ from httk.store.backend.sql.mapping import (
     CONTENT_ID_COLUMN,
     DISPATCH_CONTENT_ID_COLUMN,
     LOGICAL_ID_COLUMN,
+    RETRACTED_COLUMN,
     ROLE_COLUMN,
     SID_COLUMN,
+    SOURCE_LID_COLUMN,
     STORE_TIMESTAMP_COLUMN,
+    TARGET_LID_COLUMN,
     added_column_ddl,
     backing_dispatch_column_name,
     dispatch_table_for,
@@ -678,7 +681,16 @@ class SqlStore:
         }
         object_problems: dict[str, object] = {}
         for name, kinds in objects_before.items():
-            if name.startswith("_httk_") and (name not in declaration_owned or kinds != {"table"}):
+            if not name.startswith("_httk_"):
+                continue
+            # A weak-link table (and its backing sid sequence on dialects such as
+            # DuckDB) is store-owned: the reserved _httk_link_ prefix is produced
+            # only by a WeakLink declaration, never by a record's storage name.
+            # It may belong to an ad-hoc (undeclared) record and so is not in
+            # declaration_owned; accept it structurally by prefix.
+            if name.startswith("_httk_link_"):
+                continue
+            if name not in declaration_owned or kinds != {"table"}:
                 object_problems[name] = {
                     "reserved": True,
                     "object_type": _schema_object_type(kinds),
@@ -783,7 +795,14 @@ class SqlStore:
             except SQLAlchemyError:
                 continue
         for name, table in tables.items():
-            if name not in durable_tables or STORE_TIMESTAMP_COLUMN not in table.c or ROLE_COLUMN not in table.c:
+            # Link tables carry store_timestamp but no _httk_role column; their
+            # rows must still advance the clock-regression mark on reopen.
+            is_link = name.startswith("_httk_link_")
+            if (
+                name not in durable_tables
+                or STORE_TIMESTAMP_COLUMN not in table.c
+                or (ROLE_COLUMN not in table.c and not is_link)
+            ):
                 continue
             value = connection.execute(
                 sqlalchemy.select(sqlalchemy.func.max(table.c[STORE_TIMESTAMP_COLUMN]))
@@ -1377,10 +1396,23 @@ class SqlStore:
 
     def _validate_table_names(self, names: Iterable[str]) -> None:
         forbidden = sorted(
-            name for name in names if name.startswith("_httk_") and name not in self._managed_table_names
+            name
+            for name in names
+            if name.startswith("_httk_") and name not in self._managed_table_names and not self._is_link_table(name)
         )
         if forbidden:
             raise ValueError(f"ordinary records may not claim reserved SqlStore table names: {', '.join(forbidden)}")
+
+    def _is_link_table(self, name: str) -> bool:
+        """Whether ``name`` is a registered weak-link table (structurally, by its endpoint columns).
+
+        A weak-link table legitimately owns the reserved ``_httk_`` prefix; it is
+        built only from a declared ``WeakLink``, never
+        from a record's storage name (an ordinary ``_httk_`` storage name has no
+        ``source_lid``/``target_lid`` columns and stays forbidden).
+        """
+        table = self._metadata.tables.get(name)
+        return table is not None and SOURCE_LID_COLUMN in table.c and TARGET_LID_COLUMN in table.c
 
     def _create_tables_for_write(self, connection: sqlalchemy.Connection, classes: Iterable[type]) -> None:
         """Register and create missing record tables for the caller's write operation.
@@ -1486,6 +1518,7 @@ class SqlStore:
         id_series: str | None = None,
         alternative_of: str | None = None,
         alternative_kind: str | None = None,
+        links: Mapping[str, object] | None = None,
     ) -> int:
         """Store ``obj`` (deduplicating per its class's policy) and return its integer sid.
 
@@ -1512,6 +1545,7 @@ class SqlStore:
         :param id_series: Override the configured entry-id series for minted ids.
         :param alternative_of: The stored main entry's id this record is an alternative of, if any.
         :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
+        :param links: Weak links to add after saving, mapping each declared link name to a target or iterable of targets; the save and every link are applied in one atomic transaction.
         :return: The stored row's sid.
         :raises TypeError: If ``obj`` is a cursor row that must be materialized first.
         :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing table, or itself an alternative.
@@ -1525,14 +1559,27 @@ class SqlStore:
             raise ValueError(
                 f"invalid alternative_kind {alternative_kind!r}; expected {ALTERNATIVE_KIND_PATTERN.pattern}"
             )
-        return self._save_top(
-            obj,
-            as_record=as_record,
-            replace_logical_id=None,
-            id_series=id_series,
-            alternative_of=alternative_of,
-            alternative_kind=alternative_kind,
-        )
+        if not links:
+            return self._save_top(
+                obj,
+                as_record=as_record,
+                replace_logical_id=None,
+                id_series=id_series,
+                alternative_of=alternative_of,
+                alternative_kind=alternative_kind,
+            )
+        self._refuse_degraded_links("save(links=...)")
+        with self.transaction():
+            sid = self._save_top(
+                obj,
+                as_record=as_record,
+                replace_logical_id=None,
+                id_series=id_series,
+                alternative_of=alternative_of,
+                alternative_kind=alternative_kind,
+            )
+            self._apply_save_links(resolve_storage_record(obj, as_record=as_record), sid, links)
+        return sid
 
     def _save_top(
         self,
@@ -2689,7 +2736,14 @@ class SqlStore:
                 return [self._fetch(connection, cls, referring_sid) for referring_sid in found_sids]
             return self._fetch_many_lazy(cls, found_sids)
 
-    def replace(self, predecessor: Any, obj: Any, *, id_series: str | None = None) -> int:
+    def replace(
+        self,
+        predecessor: Any,
+        obj: Any,
+        *,
+        id_series: str | None = None,
+        links: Mapping[str, object] | None = None,
+    ) -> int:
         """Store ``obj`` as a logical replacement of ``predecessor`` and return its sid.
 
         The saved row copies ``predecessor``'s ``logical_id`` (its lineage
@@ -2710,13 +2764,28 @@ class SqlStore:
         existing sid, while a different lineage raises
         :class:`EntryReplacementError`.
 
+        ``links`` optionally adds weak links to the replacement's lineage, as in
+        :meth:`save`; the replace and every link are applied in one atomic
+        transaction.
+
         :param predecessor: The stored instance or lazy proxy being replaced; it must have been stored or fetched through this store.
         :param obj: The replacement object to store.
         :param id_series: Override the configured entry-id series when an id must be minted.
+        :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
         :return: The stored replacement row's sid.
         :raises ValueError: If ``predecessor`` is not known to this store, or ``obj``'s record table differs from ``predecessor``'s.
         :raises EntryReplacementError: If ``obj`` deduplicates onto a row from a different lineage.
         """
+        if not links:
+            sid, _obj_type = self._replace_core(predecessor, obj, id_series)
+            return sid
+        self._refuse_degraded_links("replace(links=...)")
+        with self.transaction():
+            sid, obj_type = self._replace_core(predecessor, obj, id_series)
+            self._apply_save_links(obj_type, sid, links)
+        return sid
+
+    def _replace_core(self, predecessor: Any, obj: Any, id_series: str | None) -> tuple[int, type]:
         self._check_mutation_policy("replace")
         self._reject_during_bulk()
         predecessor_sid = self.sid_of(predecessor)
@@ -2771,7 +2840,7 @@ class SqlStore:
                 predecessor_logical_id = int(predecessor_plain[0])
                 predecessor_alt_id = int(predecessor_plain[1])
                 predecessor_entry_id = None
-        return self._save_top(
+        sid = self._save_top(
             obj,
             as_record=None,
             replace_logical_id=predecessor_logical_id,
@@ -2781,6 +2850,317 @@ class SqlStore:
             replace_alt_kind=predecessor_alt_kind,
             replace_alt_main_id=alt_main_id,
         )
+        return sid, obj_type
+
+    # ------------------------------------------------------------------ weak links
+
+    def _link_spec(self, source_cls: type, name: str) -> LinkSpec:
+        """Resolve the source class's declared weak link named ``name``."""
+        schema = resolve_schema(source_cls)
+        for spec in schema.links:
+            if spec.name == name:
+                return spec
+        declared = ", ".join(link.name for link in schema.links) or "none"
+        raise SchemaError(f"{source_cls.__name__} declares no weak link named {name!r} (declared links: {declared})")
+
+    def _refuse_degraded_links(self, operation: str) -> None:
+        if self._write_profile == "degraded":
+            raise RuntimeError(
+                f"{operation} is refused for the degraded SqlStore write profile; weak links require the "
+                "transactional write-after-insert path"
+            )
+
+    def _capture_link_timestamp(self, connection: sqlalchemy.Connection, timestamp_state: Any) -> int | None:
+        """Capture a store timestamp, sharing one value across an open transaction (as save does)."""
+        if timestamp_state is None:
+            return self._capture_store_timestamp(connection)
+        if not timestamp_state["initialized"]:
+            captured = self._capture_store_timestamp(connection)
+            timestamp_state["captured"] = captured
+            timestamp_state["initialized"] = True
+            return captured
+        return cast(int | None, timestamp_state["captured"])
+
+    def _lid_from_sid(self, connection: sqlalchemy.Connection, schema: TableSchema, sid: int) -> int:
+        """The lineage id (``logical_id``) of the row ``sid`` in ``schema``'s parent table."""
+        table = self._table(schema.table_name)
+        found = connection.execute(
+            sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(table.c[SID_COLUMN] == sid)
+        ).scalar_one_or_none()
+        if found is None:
+            raise ValueError(f"no {schema.cls.__name__} row exists for sid {sid}")
+        return int(found)
+
+    def _lid_of(self, connection: sqlalchemy.Connection, cls: type, obj: Any) -> int:
+        """The lineage id of ``obj`` in ``cls``'s table; raises if ``obj`` is not stored."""
+        sid = self.sid_of(obj, as_record=cls)
+        if sid is None:
+            raise ValueError(f"the {type(obj).__name__} instance has not been stored or fetched through this store")
+        return self._lid_from_sid(connection, resolve_schema(cls), sid)
+
+    def _link_target_lid(
+        self, connection: sqlalchemy.Connection, spec: LinkSpec, target: Any, source_cls: type, name: str
+    ) -> int:
+        """Validate ``target``'s type against ``spec`` and resolve its lineage id."""
+        target_cls = resolve_storage_record(target)
+        if resolve_schema(target_cls).table_name != resolve_schema(spec.target).table_name:
+            raise TypeError(
+                f"weak link {name!r} on {source_cls.__name__} expects a {spec.target.__name__} target, "
+                f"got {target_cls.__name__}"
+            )
+        return self._lid_of(connection, target_cls, target)
+
+    def _latest_link_by_lineage(
+        self, connection: sqlalchemy.Connection, link_table: sqlalchemy.Table, source_lid: int, target_lid: int
+    ) -> dict[int, tuple[int, int]]:
+        """Map each pair lineage (``logical_id``) to its latest ``(sid, retracted)``."""
+        rows = connection.execute(
+            sqlalchemy.select(
+                link_table.c[LOGICAL_ID_COLUMN], link_table.c[SID_COLUMN], link_table.c[RETRACTED_COLUMN]
+            ).where(link_table.c[SOURCE_LID_COLUMN] == source_lid, link_table.c[TARGET_LID_COLUMN] == target_lid)
+        ).all()
+        latest: dict[int, tuple[int, int]] = {}
+        for logical_id, sid, retracted in rows:
+            lineage = int(logical_id)
+            previous = latest.get(lineage)
+            if previous is None or int(sid) > previous[0]:
+                latest[lineage] = (int(sid), int(retracted))
+        return latest
+
+    def _insert_link_row(
+        self,
+        connection: sqlalchemy.Connection,
+        link_table: sqlalchemy.Table,
+        *,
+        logical_id: int | None,
+        source_lid: int,
+        target_lid: int,
+        retracted: int,
+        store_timestamp: int | None,
+    ) -> None:
+        """Append one link revision. ``logical_id=None`` founds a fresh own-sid lineage."""
+        values: dict[str, Any] = {
+            SOURCE_LID_COLUMN: source_lid,
+            TARGET_LID_COLUMN: target_lid,
+            RETRACTED_COLUMN: retracted,
+            LOGICAL_ID_COLUMN: logical_id if logical_id is not None else 0,
+        }
+        if store_timestamp is not None:
+            values[STORE_TIMESTAMP_COLUMN] = store_timestamp
+        result = connection.execute(sqlalchemy.insert(link_table).values(values))
+        if logical_id is None:
+            # The sanctioned write-after-insert: a fresh lineage's logical_id is
+            # its own DB-allocated sid, filled inside the same transaction.
+            sid = int(cast(Any, result.inserted_primary_key)[0])
+            connection.execute(
+                sqlalchemy.update(link_table).where(link_table.c[SID_COLUMN] == sid).values({LOGICAL_ID_COLUMN: sid})
+            )
+
+    def _do_link(
+        self,
+        connection: sqlalchemy.Connection,
+        spec: LinkSpec,
+        source_lid: int,
+        target_lid: int,
+        store_timestamp: int | None,
+    ) -> None:
+        """Idempotently assert the pair ``(source_lid, target_lid)`` is linked."""
+        link_table = self._table(spec.table_name)
+        latest = self._latest_link_by_lineage(connection, link_table, source_lid, target_lid)
+        if any(retracted == 0 for _sid, retracted in latest.values()):
+            return  # some lineage is already live: no-op
+        self._insert_link_row(
+            connection,
+            link_table,
+            # All lineages retracted: revive the max-logical_id one. None founds a fresh lineage.
+            logical_id=max(latest) if latest else None,
+            source_lid=source_lid,
+            target_lid=target_lid,
+            retracted=0,
+            store_timestamp=store_timestamp,
+        )
+
+    def _do_unlink(
+        self,
+        connection: sqlalchemy.Connection,
+        spec: LinkSpec,
+        source_lid: int,
+        target_lid: int,
+        store_timestamp: int | None,
+    ) -> None:
+        """Retract every live lineage of the pair ``(source_lid, target_lid)``."""
+        link_table = self._table(spec.table_name)
+        latest = self._latest_link_by_lineage(connection, link_table, source_lid, target_lid)
+        for lineage, (_sid, retracted) in latest.items():
+            if retracted == 0:
+                self._insert_link_row(
+                    connection,
+                    link_table,
+                    logical_id=lineage,
+                    source_lid=source_lid,
+                    target_lid=target_lid,
+                    retracted=1,
+                    store_timestamp=store_timestamp,
+                )
+
+    def _apply_save_links(self, source_cls: type, source_sid: int, links: Mapping[str, object]) -> None:
+        """Add each declared link for the just-saved row, inside the open save transaction."""
+        connection = self._current_connection()
+        assert connection is not None, "_apply_save_links runs inside an open transaction"
+        timestamp_state = getattr(self._local, "store_timestamp_transaction", None)
+        store_timestamp = timestamp_state["captured"] if timestamp_state is not None else None
+        source_lid = self._lid_from_sid(connection, resolve_schema(source_cls), source_sid)
+        for name, targets in links.items():
+            spec = self._link_spec(source_cls, name)
+            for target in _iter_link_targets(targets):
+                target_lid = self._link_target_lid(connection, spec, target, source_cls, name)
+                self._do_link(connection, spec, source_lid, target_lid, store_timestamp)
+
+    def link(self, source: Any, name: str, target: Any) -> None:
+        """Assert a weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+        Weak links live in a dedicated append-only link table and bind
+        *lineages*: both endpoints always resolve to their latest revision. The
+        operation is idempotent per the pair ``(source lineage, target
+        lineage)`` — a live pair is a no-op, a retracted pair is revived, an
+        absent pair founds a fresh link lineage — and duplicate pair lineages
+        (from concurrent writers) are tolerated: the pair is live if any lineage
+        is live.
+
+        :param source: The stored source instance or lazy proxy declaring the link.
+        :param name: The declared weak-link name.
+        :param target: The stored target instance whose type matches the link declaration.
+        :return: None.
+        :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+        :raises TypeError: If ``target``'s type does not match the link's declared target.
+        :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+        :raises RuntimeError: If the store uses the degraded write profile or a bulk-ingest context is open.
+        """
+        self._check_mutation_policy("link")
+        self._reject_during_bulk()
+        self._refuse_degraded_links("link")
+        source_cls = resolve_storage_record(source)
+        spec = self._link_spec(source_cls, name)
+        timestamp_state = getattr(self._local, "store_timestamp_transaction", None)
+        captured: list[int | None] = [None]
+        publish = None if timestamp_state is not None else (lambda: self._advance_store_timestamp_mark(captured[0]))
+        with self._write_connection(_publish_after_commit=publish) as connection:
+            self._create_tables_for_write(connection, (source_cls,))
+            store_timestamp = self._capture_link_timestamp(connection, timestamp_state)
+            captured[0] = store_timestamp
+            source_lid = self._lid_of(connection, source_cls, source)
+            target_lid = self._link_target_lid(connection, spec, target, source_cls, name)
+            self._do_link(connection, spec, source_lid, target_lid, store_timestamp)
+
+    def unlink(self, source: Any, name: str, target: Any) -> None:
+        """Retract the weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+        Retracts every live lineage of the pair (duplicate-tolerant); an absent
+        or already-retracted pair is a no-op. Retraction appends a revision — no
+        row is deleted, and history/``as_of`` still see the earlier live rows.
+
+        :param source: The stored source instance or lazy proxy declaring the link.
+        :param name: The declared weak-link name.
+        :param target: The stored target instance whose type matches the link declaration.
+        :return: None.
+        :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+        :raises TypeError: If ``target``'s type does not match the link's declared target.
+        :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+        :raises RuntimeError: If the store uses the degraded write profile or a bulk-ingest context is open.
+        """
+        self._check_mutation_policy("unlink")
+        self._reject_during_bulk()
+        self._refuse_degraded_links("unlink")
+        source_cls = resolve_storage_record(source)
+        spec = self._link_spec(source_cls, name)
+        timestamp_state = getattr(self._local, "store_timestamp_transaction", None)
+        captured: list[int | None] = [None]
+        publish = None if timestamp_state is not None else (lambda: self._advance_store_timestamp_mark(captured[0]))
+        with self._write_connection(_publish_after_commit=publish) as connection:
+            self._create_tables_for_write(connection, (source_cls,))
+            store_timestamp = self._capture_link_timestamp(connection, timestamp_state)
+            captured[0] = store_timestamp
+            source_lid = self._lid_of(connection, source_cls, source)
+            target_lid = self._link_target_lid(connection, spec, target, source_cls, name)
+            self._do_unlink(connection, spec, source_lid, target_lid, store_timestamp)
+
+    def linked(self, source: Any, name: str, *, eager: bool = False) -> tuple[Any, ...]:
+        """Return the latest revisions of the targets currently linked from ``source`` under ``name``.
+
+        Targets are deduplicated by lineage and ordered by first-link order (the
+        link lineage's root ``logical_id``, ascending; stable across
+        retract+relink). Each returned object is the latest revision of its
+        target lineage, hydrated through the ordinary fetch machinery (a lazy row
+        by default, fully materialized when ``eager`` is true).
+
+        :param source: The stored source instance or lazy proxy declaring the link.
+        :param name: The declared weak-link name.
+        :param eager: Whether to fully materialize each target instead of returning a lazy row.
+        :return: The linked targets' latest revisions, deduplicated and ordered by first-link order.
+        :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+        :raises ValueError: If ``source`` is not stored in this store.
+        """
+        source_cls = resolve_storage_record(source)
+        spec = self._link_spec(source_cls, name)
+        with self._read_connection() as connection:
+            if self._missing_tables_for_read((source_cls,)):
+                raise ValueError(
+                    f"the {type(source).__name__} instance has not been stored or fetched through this store"
+                )
+            source_lid = self._lid_of(connection, source_cls, source)
+        return self._linked_by_lid(spec, source_lid, eager=eager)
+
+    def _linked_by_lid(self, spec: LinkSpec, source_lid: int, *, eager: bool = False) -> tuple[Any, ...]:
+        """Latest live-linked targets of ``source_lid`` under ``spec`` (the query core of :meth:`linked`).
+
+        Shared by :meth:`linked` (which resolves the source lineage id first) and
+        the fetched-row ``.links`` accessor (which already holds the lineage id
+        from the row's chunk). Targets are deduplicated by lineage and ordered by
+        first-link order; each is the latest revision of its target lineage.
+        """
+        target_cls = spec.target
+        with self._read_connection() as connection:
+            link_table = self._table(spec.table_name)
+            rows = connection.execute(
+                sqlalchemy.select(
+                    link_table.c[TARGET_LID_COLUMN],
+                    link_table.c[LOGICAL_ID_COLUMN],
+                    link_table.c[SID_COLUMN],
+                    link_table.c[RETRACTED_COLUMN],
+                ).where(link_table.c[SOURCE_LID_COLUMN] == source_lid)
+            ).all()
+            # Latest revision per link lineage, then per target keep the smallest
+            # live lineage root (first-link order); a target is live if any of
+            # its lineages is live.
+            latest: dict[int, tuple[int, int, int]] = {}  # logical_id -> (sid, retracted, target_lid)
+            for target_lid, logical_id, sid, retracted in rows:
+                lineage = int(logical_id)
+                previous = latest.get(lineage)
+                if previous is None or int(sid) > previous[0]:
+                    latest[lineage] = (int(sid), int(retracted), int(target_lid))
+            live_root: dict[int, int] = {}  # target_lid -> smallest live lineage root
+            for lineage, (_sid, retracted, target_lid) in latest.items():
+                if retracted != 0:
+                    continue
+                existing = live_root.get(target_lid)
+                if existing is None or lineage < existing:
+                    live_root[target_lid] = lineage
+            ordered_target_lids = [
+                target_lid for target_lid, _root in sorted(live_root.items(), key=lambda item: (item[1], item[0]))
+            ]
+            if not ordered_target_lids or self._missing_tables_for_read((target_cls,)):
+                return ()
+            target_table = self._table(resolve_schema(target_cls).table_name)
+            target_sids: list[int] = []
+            for target_lid in ordered_target_lids:
+                max_sid = connection.execute(
+                    sqlalchemy.select(sqlalchemy.func.max(target_table.c[SID_COLUMN])).where(
+                        target_table.c[LOGICAL_ID_COLUMN] == target_lid
+                    )
+                ).scalar_one_or_none()
+                if max_sid is not None:  # a None max is a dangling link; fsck reports it
+                    target_sids.append(int(max_sid))
+        return tuple(self.fetch_many(target_cls, target_sids, eager=eager))
 
     def history(self, obj: Any) -> tuple[Any, ...]:
         """Return every record in ``obj``'s replacement lineage, oldest first.
@@ -3224,6 +3604,14 @@ class SqlStore:
 
     def _remember(self, cls: type, sid: int, obj: Any, *, cache_instance: bool = True) -> None:
         self._identity._remember(cls, sid, obj, cache_instance=cache_instance)
+
+
+def _iter_link_targets(targets: object) -> Iterator[Any]:
+    """Yield one target, or each target of an iterable-of-targets (list/tuple/set)."""
+    if isinstance(targets, (list, tuple, set, frozenset)):
+        yield from targets
+    else:
+        yield targets
 
 
 def _as_fixed_tensor(schema: TableSchema, spec: FieldSpec, shape: Shape, value: Any) -> FracVector:

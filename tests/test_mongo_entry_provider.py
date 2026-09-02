@@ -13,7 +13,6 @@ from httk.core.storage import (
     IdentitySkip,
     Indexed,
     Related,
-    RelationshipLink,
     Shape,
     StorageInfo,
     Unique,
@@ -78,33 +77,6 @@ class MongoProject:
 
 
 @dataclass(frozen=True)
-class MongoSimulation:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
-        dedup="content_id", links=(RelationshipLink("compound", None, role="output"),)
-    )
-    label: str
-    compound: "MongoCompound | None" = None
-    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
-    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class MongoCompound:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(dedup="content_id")
-    formula: str
-    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
-    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class MongoCitation:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(dedup="content_id")
-    doi: str
-    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
-    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
 class MongoIdentityProbe:
     """A non-deduplicated entry used to guard provider cache side effects."""
 
@@ -113,28 +85,6 @@ class MongoIdentityProbe:
     label: str
     id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
     immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class MongoCompoundCitation:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
-        dedup="none", links=(RelationshipLink("compound", "citation", role="citation", description="Cited by"),)
-    )
-    compound: MongoCompound
-    citation: MongoCitation
-
-
-@dataclass(frozen=True)
-class MongoCompoundTag:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
-        dedup="none",
-        links=(
-            RelationshipLink("compound", "citation", role="primary"),
-            RelationshipLink("compound", "citation", role="secondary"),
-        ),
-    )
-    compound: MongoCompound
-    citation: MongoCitation
 
 
 @dataclass(frozen=True)
@@ -154,18 +104,6 @@ class MongoProjects:
     type = "projects"
 
 
-class MongoSimulations:
-    type = "simulations"
-
-
-class MongoCompounds:
-    type = "compounds"
-
-
-class MongoCitations:
-    type = "citations"
-
-
 def _register(name: str, family: type, records: tuple[type, ...]) -> None:
     register_entry_family(name=f"mongo-entry-provider-{name}", family=f"{__name__}:{family.__name__}")
     for record in records:
@@ -180,9 +118,6 @@ _register("books", MongoBooks, (MongoBook,))
 _register("writers", MongoWriters, (MongoWriter,))
 _register("people", MongoPeople, (MongoPerson,))
 _register("projects", MongoProjects, (MongoProject,))
-_register("simulations", MongoSimulations, (MongoSimulation,))
-_register("compounds", MongoCompounds, (MongoCompound,))
-_register("citations", MongoCitations, (MongoCitation,))
 
 ADA = MongoWriter("Ada", 1815)
 BOOLE = MongoWriter("Boole", 1815)
@@ -224,9 +159,6 @@ def store(mongo_test_database):
             MongoWriters: MongoWriter,
             MongoPeople: MongoPerson,
             MongoProjects: MongoProject,
-            MongoSimulations: MongoSimulation,
-            MongoCompounds: MongoCompound,
-            MongoCitations: MongoCitation,
         },
         entry_ids=EntryIdScheme("httk.test", "1"),
     )
@@ -424,109 +356,6 @@ def test_definitions_validation_and_record_validation(provider, store):
         keys = provider.property_keys(kind)
         for row in provider.records(kind):
             validate_record(definition, {name: row[key] for name, key in keys.items()})
-
-
-def test_link_relationships_and_order(mongo_test_database):
-    store = MongoStore(
-        mongo_test_database,
-        entry_records={MongoCompounds: MongoCompound, MongoCitations: MongoCitation},
-        entry_ids=EntryIdScheme("httk.test", "1"),
-    )
-    c1, c2 = MongoCompound("NaCl"), MongoCompound("SiO2")
-    z1, z2 = MongoCitation("10.1/a"), MongoCitation("10.1/b")
-    for obj in (
-        c1,
-        c2,
-        z1,
-        z2,
-        MongoCompoundCitation(c1, z1),
-        MongoCompoundCitation(c1, z2),
-        MongoCompoundCitation(c2, z1),
-    ):
-        store.save(obj)
-    provider = StoreEntryProvider(
-        store,
-        {"compounds": MongoCompound, "citations": MongoCitation},
-        link_classes=[MongoCompoundCitation],
-        id_of=_sid_id,
-    )
-    citations = {row["_httk_custom_doi"]: row["__id"] for row in provider.records("citations")}
-    compounds = {row["_httk_custom_formula"]: row["__id"] for row in provider.records("compounds")}
-    assert provider.relationships("compounds") == {
-        compounds["NaCl"]: (
-            RelatedEntry("citations", citations["10.1/a"], description="Cited by", role="citation"),
-            RelatedEntry("citations", citations["10.1/b"], description="Cited by", role="citation"),
-        ),
-        compounds["SiO2"]: (RelatedEntry("citations", citations["10.1/a"], description="Cited by", role="citation"),),
-    }
-
-
-def test_link_none_endpoint_is_inverse_and_forward_reference_is_direct(mongo_test_database):
-    store = MongoStore(
-        mongo_test_database,
-        entry_records={MongoCompounds: MongoCompound, MongoSimulations: MongoSimulation},
-        entry_ids=EntryIdScheme("httk.test", "1"),
-    )
-    compound = MongoCompound("NaCl")
-    store.save(compound)
-    run = MongoSimulation("run-1", compound)
-    store.save(run)
-    provider = StoreEntryProvider(store, {"compounds": MongoCompound, "simulations": MongoSimulation}, id_of=_sid_id)
-    compound_id = next(row["__id"] for row in provider.records("compounds"))
-    simulation_id = next(row["__id"] for row in provider.records("simulations"))
-    assert provider.relationships("compounds") == {
-        compound_id: (RelatedEntry("simulations", simulation_id, role="output"),)
-    }
-    assert provider.relationships("simulations") == {simulation_id: (RelatedEntry("compounds", compound_id),)}
-
-
-def test_link_deduplication_custom_ids_and_link_class_validation(mongo_test_database):
-    store = MongoStore(
-        mongo_test_database,
-        entry_records={MongoCompounds: MongoCompound, MongoCitations: MongoCitation},
-        entry_ids=EntryIdScheme("httk.test", "1"),
-    )
-    compound, citation = MongoCompound("NaCl"), MongoCitation("10.1/a")
-    for obj in (
-        compound,
-        citation,
-        MongoCompoundTag(compound, citation),
-        MongoCompoundTag(compound, citation),
-        MongoCompoundCitation(compound, citation),
-    ):
-        store.save(obj)
-    provider = StoreEntryProvider(
-        store, {"compounds": MongoCompound, "citations": MongoCitation}, link_classes=[MongoCompoundTag], id_of=_sid_id
-    )
-    assert provider.relationships("compounds") == {
-        next(row["__id"] for row in provider.records("compounds")): (
-            RelatedEntry("citations", next(row["__id"] for row in provider.records("citations")), role="primary"),
-            RelatedEntry("citations", next(row["__id"] for row in provider.records("citations")), role="secondary"),
-        )
-    }
-    custom = StoreEntryProvider(
-        store,
-        {"compounds": MongoCompound, "citations": MongoCitation},
-        link_classes=[MongoCompoundCitation],
-        id_of=lambda kind, _sid, obj: f"{kind}/{obj.formula if kind == 'compounds' else obj.doi}",
-    )
-    assert custom.relationships("compounds") == {
-        "compounds/NaCl": (RelatedEntry("citations", "citations/10.1/a", description="Cited by", role="citation"),)
-    }
-    with pytest.raises(ValueError, match="MongoPerson.*no relationship links"):
-        StoreEntryProvider(store, {"compounds": MongoCompound}, link_classes=[MongoPerson], id_of=_sid_id)
-
-
-def test_link_validation_and_no_relationships_for_unserved_target(mongo_test_database):
-    store = MongoStore(
-        mongo_test_database,
-        entry_records={MongoCompounds: MongoCompound},
-        entry_ids=EntryIdScheme("httk.test", "1"),
-    )
-    with pytest.raises(ValueError, match="MongoCitation.*not served"):
-        StoreEntryProvider(store, {"compounds": MongoCompound}, link_classes=[MongoCompoundCitation], id_of=_sid_id)
-    provider = StoreEntryProvider(store, {"compounds": MongoCompound}, id_of=_sid_id)
-    assert provider.relationships("compounds") == {}
 
 
 def test_configured_family_uses_the_mongo_stored_property_plan(mongo_test_database):

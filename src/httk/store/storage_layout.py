@@ -494,7 +494,17 @@ def _table_fingerprint(schema: TableSchema) -> dict[str, Any]:
         "identity_name": storage_identity_name(schema.cls),
         "dedup": schema.dedup,
         "composite_indexes": [list(index) for index in schema.composite_indexes],
-        "links": [dataclasses.asdict(link) for link in schema.links],
+        # Name-keyed (reorder-immune) and json-safe: the class-valued target is
+        # rendered as its resolved table name, never the class object itself.
+        "links": {
+            link.name: {
+                "target": resolve_schema(link.target).table_name,
+                "exposed_relationship": link.exposed_relationship,
+                "role": link.role,
+                "description": link.description,
+            }
+            for link in schema.links
+        },
         # Keyed by field name so a pure dataclass field reorder (no column,
         # value, or identity change) does not force a store rebuild.
         "fields": {spec.field: _field_fingerprint(spec, hints.get(spec.field)) for spec in schema.fields},

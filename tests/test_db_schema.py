@@ -10,11 +10,11 @@ from httk.core import FracVector
 from httk.core.storage import (
     Indexed,
     Related,
-    RelationshipLink,
     Shape,
     Skip,
     StorageInfo,
     Unique,
+    WeakLink,
     stored_property,
 )
 
@@ -484,68 +484,84 @@ def test_related_marker_on_skipped_field_is_an_error():
 
 
 @dataclass(frozen=True)
-class LinkedJoinRecord:
+class LinkTargetRecord:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="proj")
+
+    name: str
+
+
+@dataclass(frozen=True)
+class WeakLinkedRecord:
     __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
-        links=(RelationshipLink("author", None, role="wrote", description="Inverse of author"),)
+        links=(
+            WeakLink("projects", LinkTargetRecord, exposed_relationship=True, role="wrote", description="Belongs to"),
+        )
     )
 
     title: str
-    author: Author | None = None
 
 
 @dataclass(frozen=True)
-class UnknownLinkFieldRecord:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(links=(RelationshipLink("nope", None),))
-
-    author: Author | None = None
-
-
-@dataclass(frozen=True)
-class ScalarLinkEndpointRecord:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(links=(RelationshipLink("title", None),))
+class FieldCollisionLinkRecord:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(links=(WeakLink("title", LinkTargetRecord),))
 
     title: str
-    author: Author | None = None
 
 
 @dataclass(frozen=True)
-class ChildLinkEndpointRecord:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(links=(RelationshipLink(None, "authors"),))
+class DuplicateLinkRecord:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        links=(WeakLink("projects", LinkTargetRecord), WeakLink("projects", Author))
+    )
 
-    authors: tuple[Author, ...] = ()
+    title: str
 
 
 @dataclass(frozen=True)
-class DoubleDeclaredRecord:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(links=(RelationshipLink(None, "author"),))
-
-    author: Annotated[Author | None, Related(role="creator")] = None
+class LinksFieldRecord:
+    links: str
 
 
-def test_valid_link_carried_on_schema():
-    schema = resolve_schema(LinkedJoinRecord)
-    assert schema.links == (RelationshipLink("author", None, role="wrote", description="Inverse of author"),)
+@dataclass(frozen=True)
+class SelfLinkedRecord:
+    name: str
+
+
+SelfLinkedRecord.__httk_storage__ = StorageInfo(links=(WeakLink("related", SelfLinkedRecord),))  # type: ignore[attr-defined]
+
+
+def test_weak_link_resolved_on_schema():
+    schema = resolve_schema(WeakLinkedRecord)
+    (link,) = schema.links
+    assert link.name == "projects"
+    assert link.target is LinkTargetRecord
+    assert link.exposed_relationship is True
+    assert link.role == "wrote"
+    assert link.description == "Belongs to"
+    assert link.table_name == "_httk_link_weak_linked_record__proj__projects"
 
 
 def test_links_default_empty():
     assert resolve_schema(Author).links == ()
 
 
-def test_link_with_unknown_field_is_an_error():
-    with pytest.raises(SchemaError, match="UnknownLinkFieldRecord.*unknown field 'nope'"):
-        resolve_schema(UnknownLinkFieldRecord)
+def test_weak_link_name_colliding_with_field_is_an_error():
+    with pytest.raises(SchemaError, match="FieldCollisionLinkRecord.*'title'.*field"):
+        resolve_schema(FieldCollisionLinkRecord)
 
 
-def test_link_with_non_reference_endpoint_is_an_error():
-    with pytest.raises(SchemaError, match="ScalarLinkEndpointRecord.*'title'.*'scalar'"):
-        resolve_schema(ScalarLinkEndpointRecord)
+def test_duplicate_weak_link_name_is_an_error():
+    with pytest.raises(SchemaError, match="DuplicateLinkRecord.*'projects'.*more than once"):
+        resolve_schema(DuplicateLinkRecord)
 
 
-def test_link_with_child_endpoint_is_an_error():
-    with pytest.raises(SchemaError, match="ChildLinkEndpointRecord.*'authors'.*'child'"):
-        resolve_schema(ChildLinkEndpointRecord)
+def test_field_named_links_is_reserved():
+    with pytest.raises(SchemaError, match="LinksFieldRecord.links.*reserved"):
+        resolve_schema(LinksFieldRecord)
 
 
-def test_field_declared_via_both_forms_is_an_error():
-    with pytest.raises(SchemaError, match="DoubleDeclaredRecord.author.*both.*Related.*RelationshipLink"):
-        resolve_schema(DoubleDeclaredRecord)
+def test_self_referential_weak_link_resolves_without_recursion():
+    schema = resolve_schema(SelfLinkedRecord)
+    (link,) = schema.links
+    assert link.target is SelfLinkedRecord
+    assert link.table_name == "_httk_link_self_linked_record__self_linked_record__related"

@@ -68,11 +68,11 @@ from httk.core.storage import (
     DedupPolicy,
     Indexed,
     Related,
-    RelationshipLink,
     Shape,
     Skip,
     StorageInfo,
     Unique,
+    WeakLink,
     stored_property,
 )
 
@@ -83,6 +83,7 @@ __all__ = [
     "ColumnSpec",
     "FieldRole",
     "FieldSpec",
+    "LinkSpec",
     "ScalarKind",
     "SchemaError",
     "TableSchema",
@@ -205,6 +206,42 @@ class FieldSpec:
 
 
 @dataclasses.dataclass(frozen=True)
+class LinkSpec:
+    """Describe one resolved weak-link declaration of a storable class.
+
+    A weak link is a store-managed, lineage-level association living in a
+    dedicated append-only link table (never in a record field), declared as a
+    ``WeakLink`` in :attr:`~httk.core.storage.StorageInfo.links`. Endpoints bind
+    *lineages* and always resolve to the latest revision on either side.
+
+    :param name: The link name; namespaces the link (e.g. ``record.links.<name>``).
+    :param target: The storable class this link points at.
+    :param exposed_relationship: Whether the link is served through the OPTIMADE relationship facility.
+    :param role: The machine-readable relationship role, if any.
+    :param description: The human-readable relationship description, if any.
+    :param table_name: The dedicated link table name.
+    """
+
+    name: str
+    """The link name, namespacing it under the source class's ``links``."""
+
+    target: type
+    """The storable class the link points at."""
+
+    exposed_relationship: bool
+    """Whether the link is served through the OPTIMADE relationship facility."""
+
+    role: str | None
+    """The machine-readable relationship role, if any."""
+
+    description: str | None
+    """The human-readable relationship description, if any."""
+
+    table_name: str
+    """The dedicated link table name, ``_httk_link_<source table>__<target table>__<name>``."""
+
+
+@dataclasses.dataclass(frozen=True)
 class TableSchema:
     """Describe the resolved relational schema of one storable class.
 
@@ -213,7 +250,7 @@ class TableSchema:
     :param fields: The stored fields and properties.
     :param composite_indexes: The resolved composite index declarations.
     :param dedup: The deduplication policy applied on save.
-    :param links: The validated relationship declarations.
+    :param links: The resolved weak-link declarations.
     """
 
     cls: type
@@ -235,12 +272,12 @@ class TableSchema:
     dedup: DedupPolicy
     """The deduplication policy applied when instances are saved."""
 
-    links: tuple[RelationshipLink, ...] = ()
-    """The class's :attr:`~httk.core.storage.StorageInfo.links` relationship declarations.
+    links: tuple[LinkSpec, ...] = ()
+    """The class's resolved :attr:`~httk.core.storage.StorageInfo.links` weak-link declarations.
 
-    Each link is validated: every non-``None`` endpoint names an existing
-    reference field of the class (child fields are not valid endpoints — a link
-    row expresses exactly one FROM→TO pair).
+    Each declaration is resolved to a :class:`LinkSpec`: names are unique, valid
+    identifiers that do not collide with field or reserved names, and each is
+    assigned its dedicated link table name.
     """
 
     def field(self, name: str) -> FieldSpec:
@@ -268,7 +305,7 @@ class TableSchema:
 
 
 _RESERVED_FIELD_NAMES: Final = frozenset(
-    {"sid", "content_id", "_httk_role", "store_timestamp", "logical_id", "alt_id", "alt_kind"}
+    {"sid", "content_id", "_httk_role", "store_timestamp", "logical_id", "alt_id", "alt_kind", "links"}
 )
 
 _SCALAR_KINDS: Final[dict[type, ScalarKind]] = {
@@ -386,42 +423,67 @@ def _build_schema(cls: type, override: StorageInfo | None) -> TableSchema:
                 f"{cls.__name__}.{spec.field}_present collides with the store-managed presence column "
                 f"for optional child field {spec.field!r}"
             )
-    _validate_links(cls, info.links, specs)
+    links = _resolve_links(cls, table_name, info.links, specs)
     return TableSchema(
         cls=cls,
         table_name=table_name,
         fields=tuple(specs),
         composite_indexes=composite_indexes,
         dedup=info.dedup,
-        links=info.links,
+        links=links,
     )
 
 
-def _validate_links(cls: type, links: tuple[RelationshipLink, ...], specs: list[FieldSpec]) -> None:
-    """Validate each declared link: named endpoints are reference fields, declared once."""
-    by_name = {spec.field: spec for spec in specs}
+def _storage_name_of(cls: type) -> str:
+    """The target's table/collection storage name, derived without resolving its schema.
+
+    This mirrors the storage-name derivation :func:`resolve_schema` applies to a
+    class itself (registered override, then a ``__httk_storage__`` declaration,
+    then the snake-cased class name), reading only ``storage_name`` so that
+    self-referential and mutually-linked declarations cannot recurse. Deep
+    target storability is validated at store-declaration time, not here.
+    """
+    row_base = getattr(cls, "__httk_row_base__", None)
+    if row_base is not None:
+        cls = row_base
+    info = _schema_overrides.get(cls)
+    if info is None:
+        info = getattr(cls, STORAGE_INFO_ATTRIBUTE, None)
+    if info is not None and info.storage_name is not None:
+        return info.storage_name
+    return snake_case(cls.__name__)
+
+
+def _resolve_links(
+    cls: type, table_name: str, links: tuple[WeakLink, ...], specs: list[FieldSpec]
+) -> tuple[LinkSpec, ...]:
+    """Resolve declared weak links: unique names not colliding with fields/reserved names, table names assigned."""
+    field_names = {spec.field for spec in specs}
+    seen: set[str] = set()
+    resolved: list[LinkSpec] = []
     for link in links:
-        for side, endpoint in (("source", link.source), ("target", link.target)):
-            if endpoint is None:
-                continue
-            spec = by_name.get(endpoint)
-            if spec is None:
-                raise SchemaError(
-                    f"{cls.__name__}: RelationshipLink({link.source!r}, {link.target!r}) {side} names "
-                    f"unknown field {endpoint!r}"
-                )
-            if spec.role != "reference":
-                raise SchemaError(
-                    f"{cls.__name__}: RelationshipLink({link.source!r}, {link.target!r}) {side} field "
-                    f"{endpoint!r} has role {spec.role!r}; link endpoints must be storable-class "
-                    f"reference fields (child fields are not valid endpoints)"
-                )
-        if link.target is not None and by_name[link.target].related is not None:
-            raise SchemaError(
-                f"{cls.__name__}.{link.target}: declared both with a Related marker and as the target of "
-                f"RelationshipLink({link.source!r}, {link.target!r}); declare the relationship once, in "
-                f"either form"
+        name = link.name
+        if name in seen:
+            raise SchemaError(f"{cls.__name__}: weak-link name {name!r} is declared more than once")
+        if name in field_names:
+            raise SchemaError(f"{cls.__name__}: weak-link name {name!r} collides with a stored field name")
+        if name in _RESERVED_FIELD_NAMES:
+            raise SchemaError(f"{cls.__name__}: weak-link name {name!r} is reserved for store-managed use")
+        if not isinstance(link.target, type) or not dataclasses.is_dataclass(link.target):
+            raise SchemaError(f"{cls.__name__}: weak-link {name!r} target {link.target!r} is not a storable dataclass")
+        seen.add(name)
+        target_table = _storage_name_of(link.target)
+        resolved.append(
+            LinkSpec(
+                name=name,
+                target=link.target,
+                exposed_relationship=link.exposed_relationship,
+                role=link.role,
+                description=link.description,
+                table_name=f"_httk_link_{table_name}__{target_table}__{name}",
             )
+        )
+    return tuple(resolved)
 
 
 def _stored_properties(cls: type) -> list[tuple[str, stored_property]]:

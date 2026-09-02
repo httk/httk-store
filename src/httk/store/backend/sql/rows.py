@@ -14,7 +14,8 @@ from httk.core import FracVector
 
 from httk.store.backend.codecs import codec_named, decode_fracvector_exact
 from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
-from httk.store.backend.sql.mapping import SID_COLUMN
+from httk.store.backend.sql.mapping import LOGICAL_ID_COLUMN, SID_COLUMN
+from httk.store.store_common import _LinksAccessor
 
 if typing.TYPE_CHECKING:
     from httk.store.backend.sql.store import SqlStore
@@ -27,6 +28,7 @@ _ROW_SID = "_httk_row_sid_6f4a"
 _ROW_STORE = "_httk_row_store_6f4a"
 _ROW_BASE = "_httk_row_base_6f4a"
 _ROW_VALUE = "_httk_row_value_6f4a_"
+_ROW_LINKS = "_httk_row_links_6f4a"
 
 
 class StaleResultError(RuntimeError):
@@ -404,6 +406,33 @@ class _Field:
         return value
 
 
+class _LinksDescriptor:
+    # A non-data descriptor (``__get__`` only) exposing the weak-link namespace
+    # of a fetched, store-bound row. Like ``_Field`` it memoizes under a private
+    # key (``_ROW_LINKS``), never under ``links`` itself, so the same rollback
+    # liveness check runs on every access. A plain replace()-created instance
+    # carries no chunk and so simply has no ``links`` attribute (documented
+    # limitation: ``store.linked()`` is the always-works path).
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        chunk = instance.__dict__.get(_ROW_CHUNK)
+        if chunk is None:
+            raise AttributeError("links")
+        sid = instance.__dict__[_ROW_SID]
+        if chunk.parent_token is not None or chunk.child_tokens:
+            chunk._check_live(sid, "links")
+        cached = instance.__dict__.get(_ROW_LINKS, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        store = instance.__dict__[_ROW_STORE]
+        schema = chunk.hydrator._schema
+        lid = int(chunk.parent_rows[sid][chunk.columns[LOGICAL_ID_COLUMN]])
+        accessor = _LinksAccessor(schema.links, lambda spec: store._linked_by_lid(spec, lid, eager=False))
+        object.__setattr__(instance, _ROW_LINKS, accessor)
+        return accessor
+
+
 class _DefaultField:
     def __init__(self, field: dataclasses.Field[Any]) -> None:
         self.field = field
@@ -492,6 +521,7 @@ def row_class(cls: type) -> type:
         "__hash__": row_hash,
         "__repr__": row_repr,
         "sid": property(sid),
+        "links": _LinksDescriptor(),
         "_httk_decode": _row_decode,
         "__copy__": lambda self: _reject_copy("copy.copy"),
         "__deepcopy__": lambda self, memo: _reject_copy("copy.deepcopy"),

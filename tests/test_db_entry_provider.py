@@ -20,7 +20,6 @@ from httk.core.storage import (
     IdentitySkip,
     Indexed,
     Related,
-    RelationshipLink,
     Shape,
     StorageInfo,
     Unique,
@@ -421,55 +420,6 @@ class Project:
     immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
 
 
-@dataclass(frozen=True)
-class Compound:
-    formula: str
-    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
-    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class Citation:
-    doi: str
-    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
-    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class CompoundCitation:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
-        dedup="by_value",
-        links=(RelationshipLink("compound", "citation", role="citation", description="Cited by"),),
-    )
-
-    compound: Compound
-    citation: Citation
-
-
-@dataclass(frozen=True)
-class CompoundTag:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
-        dedup="none",
-        links=(
-            RelationshipLink("compound", "citation", role="primary"),
-            RelationshipLink("compound", "citation", role="secondary"),
-        ),
-    )
-
-    compound: Compound
-    citation: Citation
-
-
-@dataclass(frozen=True)
-class Simulation:
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(links=(RelationshipLink("compound", None, role="output"),))
-
-    label: str
-    compound: Compound | None = None
-    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
-    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
-
-
 @contextlib.contextmanager
 def sqlite_store(*objects):
     with Backend.sqlite() as database:
@@ -477,7 +427,7 @@ def sqlite_store(*objects):
         with sql_store.transaction():
             for obj in objects:
                 sql_store.save(obj)
-        _assign_test_ids(sql_store, (Person, Project, Compound, Citation, Simulation))
+        _assign_test_ids(sql_store, (Person, Project))
         yield sql_store
 
 
@@ -494,109 +444,6 @@ def test_related_marker_meta_and_serve_false():
                 RelatedEntry("people", "httk.test.person-1-2", role="member"),
                 RelatedEntry("people", "httk.test.person-1-3", role="member"),
             )
-        }
-
-
-def test_join_class_links_via_link_classes():
-    c1, c2 = Compound("NaCl"), Compound("SiO2")
-    z1, z2 = Citation("10.1/a"), Citation("10.1/b")
-    with sqlite_store(
-        c1, c2, z1, z2, CompoundCitation(c1, z1), CompoundCitation(c1, z2), CompoundCitation(c2, z1)
-    ) as store:
-        provider = StoreEntryProvider(
-            store, {"compounds": Compound, "citations": Citation}, link_classes=[CompoundCitation]
-        )
-        # The join class is not served as an entry type:
-        assert sorted(provider.entry_types()) == ["citations", "compounds"]
-        assert provider.relationships("compounds") == {
-            "httk.test.compound-1-1": (
-                RelatedEntry("citations", "httk.test.citation-1-1", description="Cited by", role="citation"),
-                RelatedEntry("citations", "httk.test.citation-1-2", description="Cited by", role="citation"),
-            ),
-            "httk.test.compound-1-2": (
-                RelatedEntry("citations", "httk.test.citation-1-1", description="Cited by", role="citation"),
-            ),
-        }
-        # Links are indexed by FROM side only; the TO side gains nothing:
-        assert provider.relationships("citations") == {}
-
-
-def test_served_class_link_with_none_target_is_field_inverse():
-    compound = Compound("NaCl")
-    with sqlite_store(compound, Simulation("run-1", compound), Simulation("run-2", None)) as store:
-        provider = StoreEntryProvider(store, {"compounds": Compound, "simulations": Simulation})
-        # compounds gain the inverse relationship to the simulation entry itself;
-        # the NULL-FK row (run-2) is skipped.
-        assert provider.relationships("compounds") == {
-            "httk.test.compound-1-1": (RelatedEntry("simulations", "httk.test.simulation-1-1", role="output"),)
-        }
-        # The forward 'compound' reference field still serves as usual (no meta declared):
-        assert provider.relationships("simulations") == {
-            "httk.test.simulation-1-1": (RelatedEntry("compounds", "httk.test.compound-1-1"),)
-        }
-
-
-def test_missing_link_class_does_not_hide_direct_relationships():
-    compound = Compound("NaCl")
-    with sqlite_store(compound, Simulation("run-1", compound)) as store:
-        provider = StoreEntryProvider(
-            store,
-            {"compounds": Compound, "simulations": Simulation, "citations": Citation},
-            link_classes=[CompoundTag],
-        )
-
-        assert provider.relationships("compounds") == {
-            "httk.test.compound-1-1": (RelatedEntry("simulations", "httk.test.simulation-1-1", role="output"),)
-        }
-
-
-def test_link_ordering_and_dedup():
-    c1 = Compound("NaCl")
-    z1 = Citation("10.1/a")
-    tag = CompoundTag(c1, z1)
-    # dedup="none": saving the same tag twice stores two rows; each row expresses
-    # both declared links, so without dedup compounds-1 would get four entries.
-    with sqlite_store(c1, z1, tag, CompoundTag(c1, z1)) as store:
-        provider = StoreEntryProvider(store, {"compounds": Compound, "citations": Citation}, link_classes=[CompoundTag])
-        # Exact duplicates collapse (first occurrence wins); entries differing
-        # only in meta are both kept, in link declaration order.
-        assert provider.relationships("compounds") == {
-            "httk.test.compound-1-1": (
-                RelatedEntry("citations", "httk.test.citation-1-1", role="primary"),
-                RelatedEntry("citations", "httk.test.citation-1-1", role="secondary"),
-            )
-        }
-
-
-def test_link_with_unserved_endpoint_raises():
-    with sqlite_store() as store:
-        with pytest.raises(ValueError, match="Citation.*not served"):
-            StoreEntryProvider(store, {"compounds": Compound}, link_classes=[CompoundCitation])
-        with pytest.raises(ValueError, match="Compound.*not served"):
-            StoreEntryProvider(store, {"citations": Citation}, link_classes=[CompoundCitation])
-        # A served class declaring a link with an unserved endpoint is just as loud:
-        with pytest.raises(ValueError, match="Compound.*not served"):
-            StoreEntryProvider(store, {"simulations": Simulation})
-
-
-def test_link_class_without_links_raises():
-    with sqlite_store() as store, pytest.raises(ValueError, match="Person.*no relationship links"):
-        StoreEntryProvider(store, {"compounds": Compound}, link_classes=[Person])
-
-
-def test_custom_id_of_used_on_link_paths():
-    c1 = Compound("NaCl")
-    z1 = Citation("10.1/a")
-    with sqlite_store(c1, z1, CompoundCitation(c1, z1)) as store:
-
-        def id_of(entry_type, sid, obj):
-            return f"{entry_type}/{obj.formula if entry_type == 'compounds' else obj.doi}"
-
-        provider = StoreEntryProvider(
-            store, {"compounds": Compound, "citations": Citation}, link_classes=[CompoundCitation], id_of=id_of
-        )
-        assert provider.relationships("compounds") == {
-            "compounds/NaCl": (RelatedEntry("citations", "citations/10.1/a", description="Cited by", role="citation"),)
         }
 
 

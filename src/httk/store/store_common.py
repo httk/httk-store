@@ -6,13 +6,13 @@ import re
 import types
 import typing
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, Any, Protocol, TypeVar, runtime_checkable
 
 from httk.core.storage import IdentitySkip, project_storage_record
 from httk.core.storage.identity import _content_id_uncached, _trusted_content_id
 
-from httk.store.backend.schema import FieldSpec, resolve_schema
+from httk.store.backend.schema import FieldSpec, LinkSpec, resolve_schema
 from httk.store.storage_layout import EntryFamilyLayout
 
 __all__ = [
@@ -26,6 +26,42 @@ __all__ = [
     "SaveProjection",
     "reject_cursor_proxy",
 ]
+
+
+class _LinksAccessor:
+    """Lazy ``.links`` namespace on a fetched, store-bound record instance.
+
+    Backend-neutral and deliberately dumb: it holds only the source record's
+    declared :class:`~httk.store.backend.schema.LinkSpec` set and a per-spec
+    resolver the store supplies (SQL and Mongo differ only in that resolver).
+    Each named link resolves once and is memoized; the staleness contract
+    mirrors reference-field memoization — no re-query per access — so a linked
+    tuple read here reflects the store as of first access, not later.
+
+    :param link_specs: The source record class's declared weak-link specs.
+    :param resolve: A callable turning one spec into its current linked-target tuple.
+    """
+
+    __slots__ = ("_cache", "_resolve", "_specs")
+
+    def __init__(self, link_specs: Sequence[LinkSpec], resolve: Callable[[LinkSpec], tuple[Any, ...]]) -> None:
+        self._specs = {spec.name: spec for spec in link_specs}
+        self._resolve = resolve
+        self._cache: dict[str, tuple[Any, ...]] = {}
+
+    def __getattr__(self, name: str) -> tuple[Any, ...]:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        spec = self._specs.get(name)
+        if spec is None:
+            declared = ", ".join(sorted(self._specs)) or "none"
+            raise AttributeError(f"no weak link named {name!r} (declared links: {declared})")
+        if name not in self._cache:
+            self._cache[name] = self._resolve(spec)
+        return self._cache[name]
+
+    def __dir__(self) -> list[str]:
+        return [*super().__dir__(), *self._specs]
 
 
 @dataclasses.dataclass(frozen=True)

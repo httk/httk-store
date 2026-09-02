@@ -14,14 +14,29 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, cast
 
-from httk.core import ALTERNATIVE_KIND_PATTERN
+import sqlalchemy
+from httk.core import ALTERNATIVE_KIND_PATTERN, RelatedEntry
 from httk.core.optimade import FilterAst
 
+from httk.store.backend.schema import resolve_schema
+from httk.store.backend.sql.entry_provider import _live_targets_by_source
+from httk.store.backend.sql.mapping import (
+    LOGICAL_ID_COLUMN,
+    RETRACTED_COLUMN,
+    SID_COLUMN,
+    SOURCE_LID_COLUMN,
+    TARGET_LID_COLUMN,
+)
+from httk.store.backend.sql.store import SqlStore, _served_definition
 from httk.store.backend.sql.stored_properties import (
     StoredPropertySqlCandidateStream,
     StoredPropertySqlPlan,
 )
 from httk.store.store_common import EntryStore
+
+# The relationship channel keyed by (wire-translated) related entry type.
+_RelatedMap = Mapping[str, tuple[RelatedEntry, ...]]
+_EMPTY_RELATIONSHIPS: Final[_RelatedMap] = MappingProxyType({})
 
 __all__ = [
     "DuplicateEntryIdError",
@@ -114,11 +129,14 @@ class StoredEntryPage:
     :param rows: The rows visible in this page.
     :param total_count: The exact filtered count before paging bounds.
     :param more_data_available: Whether another row exists after this page.
+    :param relationships: The per-row exposed weak-link relationships, aligned
+        with :attr:`rows` (an empty mapping for a row carrying none).
     """
 
     rows: tuple[Mapping[str, Any], ...]
     total_count: int
     more_data_available: bool
+    relationships: tuple[Mapping[str, tuple[RelatedEntry, ...]], ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.rows, tuple):
@@ -127,6 +145,10 @@ class StoredEntryPage:
             raise ValueError("StoredEntryPage.total_count must be a non-negative integer")
         if not isinstance(self.more_data_available, bool):
             raise TypeError("StoredEntryPage.more_data_available must be bool")
+        if not isinstance(self.relationships, tuple):
+            object.__setattr__(self, "relationships", tuple(self.relationships))
+        if len(self.relationships) != len(self.rows):
+            raise ValueError("StoredEntryPage.relationships must be row-aligned with rows")
 
 
 @dataclass(frozen=True)
@@ -208,9 +230,20 @@ class StoredEntryFederation:
     :meth:`audit_duplicate_ids` to detect it.
 
     :param sources: The configured sources to merge in caller order.
+    :param served_type_names: An optional internal-to-wire map applied to the
+        entry-type names emitted on served relationships; unmapped names pass
+        through unchanged.
     """
 
-    def __init__(self, sources: Sequence[StoredEntrySource]) -> None:
+    def __init__(
+        self,
+        sources: Sequence[StoredEntrySource],
+        *,
+        served_type_names: Mapping[str, str] | None = None,
+    ) -> None:
+        if served_type_names is not None and not isinstance(served_type_names, Mapping):
+            raise TypeError("StoredEntryFederation.served_type_names must be a mapping or None")
+        self._served_type_names: Mapping[str, str] = dict(served_type_names or {})
         if isinstance(sources, (str, bytes)):
             raise TypeError("StoredEntryFederation.sources must be a sequence of StoredEntrySource values")
         values = tuple(sources)
@@ -350,7 +383,9 @@ class StoredEntryFederation:
         for candidate in visible:
             self._probe_candidate(candidate, as_of=as_of, revisions=revisions, alternatives=alternatives)
         rows = self._render_page(visible, fields, revisions=revisions, alternatives=alternatives)
-        return StoredEntryPage(rows, total_count, more)
+        collected = self._collect_relationships(visible)
+        relationships = tuple(collected.get(id(candidate), _EMPTY_RELATIONSHIPS) for candidate in visible)
+        return StoredEntryPage(rows, total_count, more, relationships)
 
     def fetch(
         self,
@@ -360,7 +395,7 @@ class StoredEntryFederation:
         fields: Collection[str] | None = None,
         revisions: bool = False,
         alternatives: bool = False,
-    ) -> Mapping[str, Any] | None:
+    ) -> tuple[Mapping[str, Any], Mapping[str, tuple[RelatedEntry, ...]]] | None:
         """Fetch one public id and detect a collision among its possible origins.
 
         :param public_id: The public id to fetch.
@@ -369,7 +404,7 @@ class StoredEntryFederation:
         :param fields: The response property names to render, or ``None`` to render every configured property.
         :param revisions: Whether ``public_id`` addresses an immutable revision instead of a main.
         :param alternatives: Whether ``public_id`` is a composite ``<id>~<kind>`` alternative id.
-        :return: The fetched response row, or ``None`` when it is absent.
+        :return: The fetched ``(row, relationships)`` pair, or ``None`` when absent.
         :raises DuplicateEntryIdError: If the id has multiple origins.
         """
         if not isinstance(public_id, str):
@@ -377,7 +412,7 @@ class StoredEntryFederation:
         matches = self._probe_public_id(public_id, as_of=as_of, revisions=revisions, alternatives=alternatives)
         if not matches:
             return None
-        return self._row(matches[0], fields, revisions=revisions, alternatives=alternatives)
+        return self._row_with_relationships(matches[0], fields, revisions=revisions, alternatives=alternatives)
 
     def fetch_revision(
         self,
@@ -386,8 +421,17 @@ class StoredEntryFederation:
         *,
         as_of: object = None,
         fields: Collection[str] | None = None,
-    ) -> Mapping[str, Any] | None:
-        """Fetch one immutable revision addressed by its lineage and revision ids."""
+    ) -> tuple[Mapping[str, Any], Mapping[str, tuple[RelatedEntry, ...]]] | None:
+        """Fetch one immutable revision addressed by its lineage and revision ids.
+
+        :param entry_id: The public lineage id of the revision.
+        :param immutable_id: The public immutable revision id.
+        :param as_of: Optional historic cutoff. Sources without store timestamps
+            deliberately omit this cutoff and serve their current state.
+        :param fields: The response property names to render, or ``None`` to render every configured property.
+        :return: The fetched ``(row, relationships)`` pair, or ``None`` when absent.
+        :raises DuplicateEntryIdError: If the id has multiple origins.
+        """
         if not isinstance(entry_id, str) or not isinstance(immutable_id, str):
             raise TypeError("StoredEntryFederation.fetch_revision ids must be strings")
         matches: list[_Candidate] = []
@@ -415,7 +459,7 @@ class StoredEntryFederation:
             return None
         if len(matches) > 1:
             raise DuplicateEntryIdError(entry_id, tuple(item.origin for item in matches))
-        return self._row(matches[0], fields, revisions=True)
+        return self._row_with_relationships(matches[0], fields, revisions=True)
 
     def fetch_alternative(
         self,
@@ -424,11 +468,19 @@ class StoredEntryFederation:
         *,
         as_of: object = None,
         fields: Collection[str] | None = None,
-    ) -> Mapping[str, Any] | None:
+    ) -> tuple[Mapping[str, Any], Mapping[str, tuple[RelatedEntry, ...]]] | None:
         """Fetch one named alternative addressed by its group entry id and kind.
 
         The returned alternative is its own latest revision.  A malformed kind
         misses like an absent one, matching :meth:`fetch_revision`.
+
+        :param entry_id: The public group lineage id of the alternative.
+        :param kind: The alternative kind selecting the named alternative.
+        :param as_of: Optional historic cutoff. Sources without store timestamps
+            deliberately omit this cutoff and serve their current state.
+        :param fields: The response property names to render, or ``None`` to render every configured property.
+        :return: The fetched ``(row, relationships)`` pair, or ``None`` when absent.
+        :raises DuplicateEntryIdError: If the id has multiple origins.
         """
         if not isinstance(entry_id, str) or not isinstance(kind, str):
             raise TypeError("StoredEntryFederation.fetch_alternative arguments must be strings")
@@ -456,7 +508,7 @@ class StoredEntryFederation:
             return None
         if len(matches) > 1:
             raise DuplicateEntryIdError(f"{entry_id}~{kind}", tuple(item.origin for item in matches))
-        return self._row(matches[0], fields, alternatives=True)
+        return self._row_with_relationships(matches[0], fields, alternatives=True)
 
     def audit_duplicate_ids(self, *, batch_size: int = _AUDIT_BATCH_SIZE) -> None:
         """Lazily scan sorted ID-only batches and raise on the first collision.
@@ -713,6 +765,195 @@ class StoredEntryFederation:
         eager = fields is None
         record: object = source.source.store.fetch(candidate.stream.backing, candidate.sid, eager=eager)
         return StoredEntryFederation._render(candidate, record, fields, revisions=revisions, alternatives=alternatives)
+
+    def _row_with_relationships(
+        self,
+        candidate: _Candidate,
+        fields: Collection[str] | None,
+        *,
+        revisions: bool = False,
+        alternatives: bool = False,
+    ) -> tuple[Mapping[str, Any], _RelatedMap]:
+        row = self._row(candidate, fields, revisions=revisions, alternatives=alternatives)
+        collected = self._collect_relationships((candidate,))
+        return row, collected.get(id(candidate), _EMPTY_RELATIONSHIPS)
+
+    def _collect_relationships(self, candidates: Sequence[_Candidate]) -> dict[int, _RelatedMap]:
+        """Collect exposed weak-link relationships for a page's candidates.
+
+        Candidates are grouped per ``(source, backing)`` by ``_Stream`` identity
+        exactly like :meth:`_render_page`, so each backing's link tables are
+        scanned once per group.  Only backings that declare exposed
+        ``WeakLink`` specs are scanned; every other group issues no query.  The
+        SQL scan mirrors the in-memory provider path
+        (``StoreEntryProvider._collect_weak_relationships``): links bind
+        lineages, retracted links are excluded, and each target resolves at its
+        lineage's latest revision.  Non-SQL sources are skipped (their
+        relationship serving is a separate backend concern).  Relationships
+        reflect the LIVE link state regardless of a page's ``as_of``: like the
+        lineage-level provider path, a retraction applies retroactively, so a
+        historic page pairs its rows with the current link state.
+
+        :param candidates: The candidates whose relationships are collected.
+        :return: Row relationships keyed by ``id(candidate)``; absent for a candidate carrying none.
+        """
+        groups: dict[int, list[_Candidate]] = {}
+        for candidate in candidates:
+            groups.setdefault(id(candidate.stream), []).append(candidate)
+        collected: dict[int, dict[str, list[RelatedEntry]]] = {}
+        for group in groups.values():
+            store = group[0].stream.source.source.store
+            backing = group[0].stream.backing
+            link_specs = [spec for spec in resolve_schema(backing).links if spec.exposed_relationship]
+            if not link_specs or not isinstance(store, SqlStore):
+                continue
+            self._collect_group_relationships(store, backing, link_specs, group, collected)
+        return {
+            candidate_id: MappingProxyType(
+                {related: tuple(dict.fromkeys(entries)) for related, entries in mapping.items()}
+            )
+            for candidate_id, mapping in collected.items()
+        }
+
+    def _collect_group_relationships(
+        self,
+        store: SqlStore,
+        backing: type,
+        link_specs: Sequence[Any],
+        group: Sequence[_Candidate],
+        collected: dict[int, dict[str, list[RelatedEntry]]],
+    ) -> None:
+        """Scan one backing's exposed link tables for a group of same-backing candidates.
+
+        :param store: The SQL store backing this group.
+        :param backing: The concrete backing class of the group.
+        :param link_specs: The backing's exposed weak-link specs.
+        :param group: The candidates sharing this ``(source, backing)`` stream.
+        :param collected: The mutable relationship accumulator keyed by candidate id.
+        :return: None.
+        """
+        if store._missing_tables_for_read((backing,)):
+            return
+        table = store._table(resolve_schema(backing).table_name)
+        with store._read_connection() as connection:
+            # Each candidate's source-lineage logical_id keys the live link scan.
+            lid_by_sid: dict[int, int] = {
+                int(sid): int(lid)
+                for sid, lid in connection.execute(
+                    sqlalchemy.select(table.c[SID_COLUMN], table.c[LOGICAL_ID_COLUMN]).where(
+                        table.c[SID_COLUMN].in_([candidate.sid for candidate in group])
+                    )
+                )
+            }
+            for link_spec in link_specs:
+                self._collect_link(connection, store, link_spec, group, lid_by_sid, collected)
+
+    def _collect_link(
+        self,
+        connection: Any,
+        store: SqlStore,
+        link_spec: Any,
+        group: Sequence[_Candidate],
+        lid_by_sid: Mapping[int, int],
+        collected: dict[int, dict[str, list[RelatedEntry]]],
+    ) -> None:
+        """Attach one exposed weak link's live relationships to the group's candidates.
+
+        The related entry type is ``served_type_names[internal type]`` when
+        mapped, else the target family's served (wire) name, else the internal
+        type as a last resort.  The related id is the target row's raw
+        stored ``id`` column at its lineage's latest revision (F9: it matches a
+        mounted target endpoint only when that target source's
+        ``public_id_prefix`` is empty; dangling targets are skipped).
+
+        :param connection: The open read connection to ``store``.
+        :param store: The SQL store backing this group.
+        :param link_spec: The exposed weak-link spec being scanned.
+        :param group: The candidates sharing this ``(source, backing)`` stream.
+        :param lid_by_sid: The candidate sid to source-lineage logical_id map.
+        :param collected: The mutable relationship accumulator keyed by candidate id.
+        :return: None.
+        """
+        internal = store._entry_record_types.get(link_spec.target)
+        if internal is None:
+            return
+        related_type = self._served_type_names.get(internal[0])
+        if related_type is None:
+            # No explicit mapping: fall back to the target family's served (wire)
+            # name so an unmapped target still keys the block in the one wire
+            # vocabulary, never the internal one (e.g. "_httk_runs", not "runs").
+            family_layout = store._family_for_backing(link_spec.target)
+            served = _served_definition(family_layout.family) if family_layout is not None else None
+            related_type = served.name if served is not None else internal[0]
+        link_table = store._table(link_spec.table_name)
+        # ponytail: full link-table scan per page; add WHERE source_lid IN (group lids) if link tables grow large.
+        targets_by_source = _live_targets_by_source(
+            connection.execute(
+                sqlalchemy.select(
+                    link_table.c[SOURCE_LID_COLUMN],
+                    link_table.c[TARGET_LID_COLUMN],
+                    link_table.c[LOGICAL_ID_COLUMN],
+                    link_table.c[SID_COLUMN],
+                    link_table.c[RETRACTED_COLUMN],
+                )
+            )
+        )
+        if not targets_by_source:
+            return
+        id_by_lid = self._target_ids(connection, store, link_spec.target, targets_by_source)
+        for candidate in group:
+            source_lid = lid_by_sid.get(int(candidate.sid))
+            if source_lid is None:
+                continue
+            for target_lid in targets_by_source.get(source_lid, ()):
+                target_id = id_by_lid.get(target_lid)
+                if target_id is None:
+                    continue
+                collected.setdefault(id(candidate), {}).setdefault(related_type, []).append(
+                    RelatedEntry(
+                        related_type,
+                        target_id,
+                        description=link_spec.description,
+                        role=link_spec.role,
+                        label=link_spec.name,
+                    )
+                )
+
+    @staticmethod
+    def _target_ids(
+        connection: Any,
+        store: SqlStore,
+        target: type,
+        targets_by_source: Mapping[int, Sequence[int]],
+    ) -> dict[int, str]:
+        """Resolve each linked target lineage to its latest revision's stored id.
+
+        :param connection: The open read connection to ``store``.
+        :param store: The SQL store backing the targets.
+        :param target: The target storable class.
+        :param targets_by_source: The live target lineage ids keyed by source lineage.
+        :return: The raw stored ``id`` column keyed by target lineage id (dangling lineages omitted).
+        """
+        target_lids = sorted({lid for lids in targets_by_source.values() for lid in lids})
+        target_table = store._table(resolve_schema(target).table_name)
+        max_sid_by_lid: dict[int, int] = {
+            int(lid): int(max_sid)
+            for lid, max_sid in connection.execute(
+                sqlalchemy.select(target_table.c[LOGICAL_ID_COLUMN], sqlalchemy.func.max(target_table.c[SID_COLUMN]))
+                .where(target_table.c[LOGICAL_ID_COLUMN].in_(target_lids))
+                .group_by(target_table.c[LOGICAL_ID_COLUMN])
+            )
+            if max_sid is not None  # a None max is a dangling link; fsck reports it
+        }
+        id_by_sid: dict[int, str] = {
+            int(sid): str(value)
+            for sid, value in connection.execute(
+                sqlalchemy.select(target_table.c[SID_COLUMN], target_table.c["id"]).where(
+                    target_table.c[SID_COLUMN].in_(list(max_sid_by_lid.values()))
+                )
+            )
+        }
+        return {lid: id_by_sid[sid] for lid, sid in max_sid_by_lid.items() if sid in id_by_sid}
 
 
 class _BatchedCandidateIterator:

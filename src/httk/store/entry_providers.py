@@ -40,6 +40,12 @@ from httk.core import (
 )
 from httk.core.data_records import RECORDS_DEFINITION_ID
 from httk.core.provenance import RUNS_DEFINITION_ID
+from httk.core.storage import (
+    QueryContext,
+    QueryExpression,
+    QueryLiteralError,
+    StoredPropertyProjection,
+)
 
 from httk.store.query import ID_FIELD
 
@@ -222,32 +228,34 @@ class CalculationEntryProvider(StandardEntryProvider):
         super().__init__(entries, record_type=Calculation, entry_type="calculations", relationships=relationships)
 
 
-def _entry_definition(
-    entry_type: str,
-    definition_id: str,
-    properties: Mapping[str, PropertyDefinition],
-) -> EntryTypeDefinition:
-    base = load_entry_type_definition(definition_id)
-    return EntryTypeDefinition(
-        entry_type,
-        base.description,
-        properties,
-        definition_id=None,
-        extends_id=definition_id,
-    )
+@cache
+def _runs_definition() -> EntryTypeDefinition:
+    """The wire (served) ``_httk_runs`` definition from the internal runs definition."""
+    return load_entry_type_definition(RUNS_DEFINITION_ID).served_form()
 
 
 @cache
-def _runs_definition() -> EntryTypeDefinition:
-    base = load_entry_type_definition(RUNS_DEFINITION_ID)
-    properties = {name: base.properties[name] for name in ("id", "type", "immutable_id", "last_modified")}
-    workflow = base.properties["workflow_declaration_uri"]
-    source = base.properties["source_id"]
-    properties["_httk_workflow_declaration_uri"] = PropertyDefinition.from_optimade(
-        "_httk_workflow_declaration_uri", workflow.as_optimade()
-    )
-    properties["_httk_source_id"] = PropertyDefinition.from_optimade("_httk_source_id", source.as_optimade())
-    return _entry_definition("_httk_runs", RUNS_DEFINITION_ID, properties)
+def _records_definition() -> EntryTypeDefinition:
+    """The wire (served) ``_httk_records`` core definition (without per-record value properties)."""
+    return load_entry_type_definition(RECORDS_DEFINITION_ID).served_form()
+
+
+@cache
+def _wire_entry_type() -> Mapping[str, str]:
+    """Internal entry-type names mapped to their served (wire) names.
+
+    Only the httk-core provider-defined types whose served name differs from
+    their internal name appear here; standard OPTIMADE type names (and any
+    unrecognized target) pass through :meth:`RunEntryProvider.relationships`
+    unchanged.
+    """
+    mapping: dict[str, str] = {}
+    for definition_id in (RUNS_DEFINITION_ID, RECORDS_DEFINITION_ID):
+        internal = load_entry_type_definition(definition_id)
+        served = internal.served_form()
+        if served.name != internal.name:
+            mapping[internal.name] = served.name
+    return mapping
 
 
 class RunEntryProvider(EntryProvider):
@@ -256,9 +264,8 @@ class RunEntryProvider(EntryProvider):
     :param entries: The runs keyed by their served identifiers.
     """
 
-    _entry_type = "_httk_runs"
-
     def __init__(self, entries: Mapping[str, Run | Mapping[str, Any]]) -> None:
+        self._entry_type = _runs_definition().name
         self._entries = {str(key): Run.from_obj(value) for key, value in entries.items()}
 
     def __repr__(self) -> str:
@@ -269,7 +276,10 @@ class RunEntryProvider(EntryProvider):
             raise KeyError(f"{type(self).__name__} serves only the '{self._entry_type}' entry type.")
 
     def entry_types(self) -> Mapping[str, EntryTypeDefinition]:
-        """Return the vendored ``_httk_runs`` entry definition.
+        """Return the served ``_httk_runs`` entry definition.
+
+        The wire naming is the served form of the internal runs definition (see
+        ``EntryTypeDefinition.served_form()``).
 
         :return: The served run entry-type definition.
         """
@@ -313,14 +323,21 @@ class RunEntryProvider(EntryProvider):
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
         """Return run provenance edges with role and edge-label metadata.
 
+        Run edges carry internal entry-type names; this serving edge translates
+        each target type to its served (wire) name (via
+        ``EntryTypeDefinition.served_form()``), so a target such as
+        ``records`` is served as ``_httk_records`` while standard type names
+        pass through unchanged.
+
         :param entry_type: The entry type to inspect.
         :return: Relationships grouped by run identifier.
         :raises KeyError: If ``entry_type`` is not ``_httk_runs``.
         """
         self._check_entry_type(entry_type)
+        wire = _wire_entry_type()
         return {
             entry_id: tuple(
-                RelatedEntry(edge.entry_type, edge.entry_id, role=role, label=edge.label)
+                RelatedEntry(wire.get(edge.entry_type, edge.entry_type), edge.entry_id, role=role, label=edge.label)
                 for role, edges in (("input", run.inputs), ("artifact", run.artifacts), ("output", run.outputs))
                 for edge in edges
             )
@@ -341,8 +358,6 @@ class DataRecordEntryProvider(EntryProvider):
         is inconsistent with the supplied records.
     """
 
-    _entry_type = "_httk_records"
-
     def __init__(
         self,
         entries: Mapping[str, DataRecord | Mapping[str, Any]],
@@ -350,6 +365,7 @@ class DataRecordEntryProvider(EntryProvider):
         definitions: Mapping[str, PropertyDefinition] | None = None,
         relationships: Mapping[str, Iterable[RelatedEntry]] | None = None,
     ) -> None:
+        self._entry_type = _records_definition().name
         self._entries = {str(key): DataRecord.from_obj(value) for key, value in entries.items()}
         self._relationships = _normalized_relationships(relationships)
         resolved = dict(definitions or {})
@@ -382,10 +398,15 @@ class DataRecordEntryProvider(EntryProvider):
                         f"served property {name!r} is non-nullable, but record {missing!r} does not populate it"
                     )
         self._definitions = resolved
-        base = load_entry_type_definition(RECORDS_DEFINITION_ID)
+        base = _records_definition()
         properties = dict(base.properties)
         properties.update(resolved)
-        self._definition = _entry_definition(self._entry_type, RECORDS_DEFINITION_ID, properties)
+        # A redefinition (it adds per-record value properties), so it must not
+        # claim the records document $id: mirror served_form() with a null
+        # definition_id extending the internal records IRI.
+        self._definition = EntryTypeDefinition(
+            base.name, base.description, properties, None, base.extends_id or base.definition_id
+        )
 
     def __repr__(self) -> str:
         return f"DataRecordEntryProvider(entries={len(self._entries)})"
@@ -468,3 +489,44 @@ def product_relationships(links: Iterable[ProductLink]) -> dict[str, dict[str, t
         source_type: {source_id: tuple(entries) for source_id, entries in sources.items()}
         for source_type, sources in result.items()
     }
+
+
+def _string_column_projection(column: str) -> StoredPropertyProjection:
+    """A response/filter/sort projection for a plain nullable-string column read.
+
+    :param column: The durable string column read for response, filter, and sort.
+    :return: The projection reading ``column`` directly.
+    """
+
+    def query(context: QueryContext, operator: str, literal: object) -> QueryExpression:
+        if literal is not None and not isinstance(literal, str):
+            raise QueryLiteralError(f"{column} is a string property; its filter needs a string or null literal")
+        value = context.field(column)
+        if operator == "IS_UNKNOWN":
+            return context.is_null(value)
+        if operator == "IS_KNOWN":
+            return context.not_(context.is_null(value))
+        right = context.null() if literal is None else context.constant(literal)
+        if operator == "=":
+            return context.equal(value, right)
+        if operator == "!=":
+            return context.not_(context.equal(value, right))
+        if operator in {"<", "<=", ">", ">=", "CONTAINS", "STARTS", "ENDS"}:
+            return context.compare(value, operator, right)
+        raise QueryLiteralError(f"unsupported operator for {column}: {operator}")
+
+    return StoredPropertyProjection(
+        response=lambda record: getattr(record, column),
+        query=query,
+        sort=lambda context: context.field(column),
+    )
+
+
+# The capability layer owns the serving glue for core records: declare the wire
+# (served) property projections for a stored ``Run`` beside its provider. The
+# keys are the served names produced by ``EntryTypeDefinition.served_form``; the
+# values read the plain internal columns.
+Run.__httk_stored_properties__ = {  # type: ignore[attr-defined]
+    "_httk_workflow_declaration_uri": _string_column_projection("workflow_declaration_uri"),
+    "_httk_source_id": _string_column_projection("source_id"),
+}

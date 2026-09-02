@@ -145,3 +145,25 @@ def test_mixed_sql_mongo_federation_pages_audits_and_probes_prefix_collisions(mo
 
         assert page_error.value.public_id == public_id
         assert audit_error.value.public_id == public_id
+
+
+def test_mongo_backed_source_serves_no_weak_link_relationships(mongo_test_database):
+    """Documented current behavior: the federation's relationships collector is
+    SQL-only, so a Mongo-backed source's exposed weak links serve nothing (the
+    channel is present but empty for every row)."""
+    from httk.core import Run, RunEntry
+    from test_stored_federation_relationships import ArtifactCalculation, ArtifactRecord
+
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={ArtifactCalculation: (ArtifactRecord,), RunEntry: Run},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    target = store.fetch(Run, store.save(Run(source_id="ws:job")), eager=True)
+    artifact = store.fetch(ArtifactRecord, store.save(ArtifactRecord("a1")), eager=True)
+    store.link(artifact, "produced_by", target)
+
+    federation = StoredEntryFederation((StoredEntrySource(store, ArtifactCalculation, "art"),))
+    page = federation.query()
+    assert len(page.rows) == 1
+    assert all(rel == {} for rel in page.relationships)

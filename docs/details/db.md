@@ -249,10 +249,14 @@ Old, unversioned, or incompatible layouts raise
 `StorageLayoutUpgradeRequiredError`; this redesign does not migrate old stores,
 so rebuild them explicitly — with one exception below.
 
-`Run.source_id` is served as `_httk_source_id` on `_httk_runs`. It is a nullable,
-queryable, sortable string containing the identifier assigned by the system that
-executed the run (for example, an httk-workflow `<workspace_id>:<job_id>`), and
-it participates in the run's content identity. Adding it therefore changes the
+The internal `Run.source_id` field is served under its wire name `_httk_source_id`
+on the `_httk_runs` entry type. That prefixing is not hand-written at the serving
+edge: it is produced by `EntryTypeDefinition.served_form()`, the single wire-naming
+authority, which prefixes the internal `runs`/`source_id` names when the definition
+is served. `_httk_source_id` is a nullable, queryable, sortable string containing
+the identifier assigned by the system that executed the run (for example, an
+httk-workflow `<workspace_id>:<job_id>`), and it participates in the run's content
+identity. Adding it therefore changes the
 `core_run` schema fingerprint and requires rebuilding existing stores; it is not
 an additive `upgrade=True` change.
 
@@ -567,7 +571,7 @@ a retracted link disappears from them. The served id is lineage-level, so
 revising a target keeps the same relationship id. `'<type>.id'` filters (HAS,
 HAS ALL, HAS ONLY) work over exposed weak links. If a reference or child field
 *and* an exposed weak link both target the same served class, id-filter binding
-is ambiguous and raises `ValueError`.
+is ambiguous and raises `ValueError`. `StoredEntryFederation` collects these weak-link relationships for SQL-backed sources only; a Mongo-backed federation source does not yet serve link relationships (its per-row relationships channel is empty). Relationships always reflect the live link state regardless of a page's `as_of`: like the lineage-level in-store path, a retraction applies retroactively, so a historic page pairs its rows with the current link state. An unmapped target family falls back to its own served (wire) type name, never the internal one.
 
 **Fingerprint.** The per-table schema fingerprint includes each link
 declaration (name, target identity, `exposed_relationship`, role, description),

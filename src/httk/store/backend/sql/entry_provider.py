@@ -224,6 +224,9 @@ class StoreEntryProvider(EntryProvider):
         self._only_latest = only_latest
         self._prefix = prefix
         self._id_of: Callable[[str, int, Any], str] = id_of if id_of is not None else _default_id
+        # Keyed by served (wire) entry-type names: relationship targets are
+        # served directly, so this map must resolve a target class to the name
+        # it is served under.
         self._entry_type_of: dict[type, str] = {cls: name for name, cls in self._classes.items()}
         self._schemas: dict[str, TableSchema] = {name: resolve_schema(cls) for name, cls in self._classes.items()}
         if id_of is None:
@@ -303,12 +306,17 @@ class StoreEntryProvider(EntryProvider):
     def entry_types(self) -> Mapping[str, EntryTypeDefinition]:
         """Return the definitions of all served entry types.
 
+        This provider is an OPTIMADE serving edge, so each definition is
+        returned in its wire form via
+        ``EntryTypeDefinition.served_form()`` (idempotent for the
+        already-prefixed supplied and auto-generated definitions).
+
         :return: The served entry-type definitions keyed by entry type.
         """
         return {
             entry_type: (
                 self._definitions[entry_type] if entry_type in self._definitions else self._auto_definition(entry_type)
-            )
+            ).served_form()
             for entry_type in self._classes
         }
 
@@ -389,9 +397,10 @@ class StoreEntryProvider(EntryProvider):
         result: dict[str, tuple[RelatedEntry, ...]] = {}
         with store._read_connection() as connection:
             # The related (target class, target sid, related entry type,
-            # description, role) tuples per record sid: forward reference fields
-            # first (in field order), then child fields (by row order).
-            related_by_sid: dict[int, list[tuple[type, int, str, str | None, str | None]]] = {}
+            # description, role, label) tuples per record sid: forward reference
+            # fields first (in field order), then child fields (by row order).
+            # ``label`` is the weak-link name on the link path, None otherwise.
+            related_by_sid: dict[int, list[tuple[type, int, str, str | None, str | None, str | None]]] = {}
             if reference_specs:
                 columns = [table.c[SID_COLUMN]] + [table.c[spec.columns[0].name] for spec, _related in reference_specs]
                 for row in connection.execute(sqlalchemy.select(*columns).order_by(table.c[SID_COLUMN])):
@@ -407,6 +416,7 @@ class StoreEntryProvider(EntryProvider):
                                     related,
                                     marker.description if marker is not None else None,
                                     marker.role if marker is not None else None,
+                                    None,
                                 )
                             )
             for spec, related in child_specs:
@@ -426,6 +436,7 @@ class StoreEntryProvider(EntryProvider):
                             related,
                             marker.description if marker is not None else None,
                             marker.role if marker is not None else None,
+                            None,
                         )
                     )
             for link_spec, related in link_specs:
@@ -438,8 +449,9 @@ class StoreEntryProvider(EntryProvider):
                         stored_id(connection, related, target_cls, target_sid),
                         description=description,
                         role=role,
+                        label=label,
                     )
-                    for target_cls, target_sid, related, description, role in related_by_sid[sid]
+                    for target_cls, target_sid, related, description, role, label in related_by_sid[sid]
                 ]
                 # Dedup by exact RelatedEntry equality, preserving first
                 # occurrence; entries differing only in metadata are both kept.
@@ -453,7 +465,7 @@ class StoreEntryProvider(EntryProvider):
         table: Any,
         link_spec: Any,
         related: str,
-        related_by_sid: dict[int, list[tuple[type, int, str, str | None, str | None]]],
+        related_by_sid: dict[int, list[tuple[type, int, str, str | None, str | None, str | None]]],
     ) -> None:
         """Append one exposed weak link's live relationships to ``related_by_sid``.
 
@@ -504,7 +516,7 @@ class StoreEntryProvider(EntryProvider):
                     if target_sid is None:
                         continue
                     related_by_sid.setdefault(source_sid, []).append(
-                        (link_spec.target, target_sid, related, link_spec.description, link_spec.role)
+                        (link_spec.target, target_sid, related, link_spec.description, link_spec.role, link_spec.name)
                     )
 
 

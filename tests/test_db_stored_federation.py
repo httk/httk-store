@@ -623,7 +623,7 @@ def test_batched_page_matches_single_id_render(databases):
     assert page.more_data_available is False
     # Each batched row equals the row the single-id render path produces.
     for row in page.rows:
-        assert federation.fetch(row["id"]) == dict(row)
+        assert federation.fetch(row["id"])[0] == dict(row)
 
 
 def test_fields_prunes_unrequested_child_table_selects(databases):

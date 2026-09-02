@@ -790,7 +790,29 @@ class _MongoFieldSortContext:
         return getattr(self._variable, name)
 
 
-def stored_property_mongo_plan(store: Any, family: type) -> MongoStoredPropertyPlan:
+def stored_property_mongo_plan(
+    store: Any, family: type, *, served: EntryTypeDefinition | None = None
+) -> MongoStoredPropertyPlan:
+    """Validate and return the Mongo property plan for one configured logical family.
+
+    The family's internal definition establishes identity only (that the family
+    and its records agree on one durable definition). Everything the plan then
+    serves — the entry ``type``, the property set response and filter/sort
+    validation run against, and the projection names backings must match — is
+    taken from ``served``: the OPTIMADE wire form of that definition (see
+    ``EntryTypeDefinition.served_form()``). A prefixed family
+    declares its ``__httk_stored_properties__`` projections under those served
+    names, so it MUST be planned with ``served=`` set; without it the bare
+    internal definition rejects the prefixed projection keys as unknown. When
+    ``served`` is omitted the internal definition serves itself, which is
+    byte-identical for standard (unprefixed) families.
+
+    :param store: The MongoStore containing the configured family.
+    :param family: The logical entry-family class to validate.
+    :param served: The served (wire) definition to serve, or ``None`` for the internal definition.
+    :return: The validated Mongo property plan.
+    :raises MongoStoredPropertyConfigurationError: If the family or any backing is inconsistent with its definition.
+    """
     layout = next((item for item in store.entry_layout if item.family is family), None)
     if layout is None:
         raise MongoStoredPropertyConfigurationError(
@@ -812,8 +834,14 @@ def stored_property_mongo_plan(store: Any, family: type) -> MongoStoredPropertyP
         or definition.name != entry_type
     ):
         raise MongoStoredPropertyConfigurationError(f"{family.__name__} has an inconsistent entry definition")
+
+    # Identity is settled against the internal definition above; everything the
+    # plan serves runs against the served (wire) definition.
+    served_definition = definition if served is None else served
+    served_entry_type = served_definition.name
+
     plans: list[_BackingPlan] = []
-    names = set(definition.properties)
+    names = set(served_definition.properties)
     for backing in layout.records:
         projections = stored_property_projections(backing)
         reserved, unknown = sorted(set(_INTRINSIC_PROPERTIES) & set(projections)), sorted(set(projections) - names)
@@ -823,11 +851,11 @@ def stored_property_mongo_plan(store: Any, family: type) -> MongoStoredPropertyP
             )
         if unknown:
             raise MongoStoredPropertyConfigurationError(
-                f"{backing.__name__} projects properties absent from {definition_id!r}: {', '.join(unknown)}"
+                f"{backing.__name__} projects properties absent from {served_entry_type!r}: {', '.join(unknown)}"
             )
         required = [
             name
-            for name, item in definition.properties.items()
+            for name, item in served_definition.properties.items()
             if name not in _INTRINSIC_PROPERTIES and not item.nullable and name not in projections
         ]
         if required:
@@ -835,7 +863,7 @@ def stored_property_mongo_plan(store: Any, family: type) -> MongoStoredPropertyP
                 f"{backing.__name__} has no response mapping for non-null property/properties: {', '.join(required)}"
             )
         plans.append(_BackingPlan(backing, projections))
-    return MongoStoredPropertyPlan(store, family, layout, entry_type, definition, tuple(plans))
+    return MongoStoredPropertyPlan(store, family, layout, served_entry_type, served_definition, tuple(plans))
 
 
 def _projection_handlers(

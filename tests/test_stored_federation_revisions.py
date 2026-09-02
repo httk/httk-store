@@ -111,8 +111,8 @@ def test_query_and_fetch_revisions_use_rendered_revision_identity() -> None:
             federation.query('_httk_id = "httk.test-1-1"')
         assert all("_httk_id" not in row for row in latest.rows)
 
-        assert federation.fetch("httk.test-1-1")["_httk_label"] == "A2"
-        assert federation.fetch_revision("httk.test-1-1", "httk.test-1-1~1")["_httk_label"] == "A"
+        assert federation.fetch("httk.test-1-1")[0]["_httk_label"] == "A2"
+        assert federation.fetch_revision("httk.test-1-1", "httk.test-1-1~1")[0]["_httk_label"] == "A"
         assert federation.fetch_revision("httk.test-1-3", "httk.test-1-1~1") is None
         assert federation.query(revisions=True, as_of=2_500).total_count == 2
 

@@ -11,7 +11,7 @@ import typing
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from httk.core import FracVector
+from httk.core import EntryTypeDefinition, FracVector, load_entry_type_definition
 from httk.core.entry_ids import (
     ALTERNATIVE_KIND_PATTERN,
     check_entry_id,
@@ -195,6 +195,28 @@ def _bound_record_class(cls: type) -> type:
     }
     bound_type = type(f"{cls.__name__}Linked", (cls,), attrs)
     return bound_type
+
+
+def _served_definition(family: type) -> EntryTypeDefinition | None:
+    """Return the wire (served) form of a family's internal definition, if resolvable.
+
+    Resolved exactly as :func:`stored_property_mongo_plan` resolves its internal
+    definition (family ``entry_type_definition()`` or, failing that,
+    ``load_entry_type_definition(definition_id)``). Returns ``None`` when the
+    family declares neither, leaving the plan builder to raise its own error.
+
+    :param family: The logical entry-family class to resolve.
+    :return: The served definition, or ``None`` when it cannot be resolved.
+    """
+    factory = getattr(family, "entry_type_definition", None)
+    if callable(factory):
+        internal = factory()
+    else:
+        definition_id = getattr(family, "definition_id", None)
+        if not isinstance(definition_id, str) or not definition_id:
+            return None
+        internal = load_entry_type_definition(definition_id)
+    return internal.served_form() if isinstance(internal, EntryTypeDefinition) else None
 
 
 class _AlternativeRequest(typing.NamedTuple):
@@ -2351,14 +2373,20 @@ class MongoStore:
         return MongoSearcher(self, as_of=as_of, only_latest=only_latest, only_main_alt=only_main_alt)
 
     def stored_property_plan(self, family: type) -> Any:
-        """Return the Mongo stored-property plan for one configured entry family.
+        """Return the wire-form Mongo stored-property plan for one configured entry family.
 
-        :param family: The logical entry-family class.
-        :return: Its validated Mongo stored-property plan.
+        This method is a serving edge: like the entry providers, it serves the
+        family's definition in OPTIMADE wire form (``served_form()``), so a
+        prefixed family whose ``__httk_stored_properties__`` keys are served
+        names plans correctly. ``served_form()`` is idempotent for standard
+        (unprefixed) families, so their plans are byte-identical.
+
+        :param family: The logical entry-family class to plan.
+        :return: The validated Mongo stored-property plan.
         """
         from .stored_properties import stored_property_mongo_plan
 
-        return stored_property_mongo_plan(self, family)
+        return stored_property_mongo_plan(self, family, served=_served_definition(family))
 
     def referring(self, cls: type, *, field: str, to: Any, eager: bool = False) -> list[Any]:
         """Return records whose reference field points at ``to``, ordered by sid.

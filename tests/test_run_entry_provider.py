@@ -15,12 +15,20 @@ from httk.core import (
     Run,
     RunEdge,
     RunEntry,
+    load_entry_type_definition,
 )
+from httk.core.provenance import RUNS_DEFINITION_ID
 from httk.core.storage import content_id
 
 from httk.store import DataRecordEntryProvider, EntryIdScheme, RunEntryProvider, product_relationships, validate_record
 from httk.store.backend.schema import resolve_schema
-from httk.store.backend.sql import Backend, EntryMetadataConflictError, SqlStore
+from httk.store.backend.sql import (
+    Backend,
+    EntryMetadataConflictError,
+    SqlStore,
+    StoredPropertySqlConfigurationError,
+    stored_property_sql_plan,
+)
 
 UTC = datetime.UTC
 ENERGY_ID = "https://schemas.example.org/properties/energy"
@@ -39,9 +47,12 @@ def _definition(name: str, definition_id: str, *, required_response: bool = Fals
 
 def _run() -> Run:
     return Run(
-        inputs=(RunEdge("in-1", "_httk_records", "record-1"), RunEdge("in-2", "structures", "structure-1")),
+        # Run edges carry internal entry-type names; the provider translates
+        # ``records`` -> ``_httk_records`` at the serving edge (standard names
+        # such as ``structures``/``files`` pass through unchanged).
+        inputs=(RunEdge("in-1", "records", "record-1"), RunEdge("in-2", "structures", "structure-1")),
         artifacts=(RunEdge("artifact", "files", "file-1"),),
-        outputs=(RunEdge("out", "_httk_records", "record-2"),),
+        outputs=(RunEdge("out", "records", "record-2"),),
         source_id="ws:job",
         last_modified=datetime.datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
     )
@@ -205,6 +216,46 @@ def test_sql_store_round_trips_provenance_records_and_stored_number() -> None:
         assert [row[0][0].value for row in searcher] == [3.5]
 
 
+def _plan_records(searchers) -> list:
+    return [result[0][0] for searcher in searchers for result in searcher]
+
+
+def test_run_stored_property_plan_serves_prefixed_properties() -> None:
+    served = load_entry_type_definition(RUNS_DEFINITION_ID).served_form()
+    with Backend.sqlite() as database:
+        store = SqlStore(
+            database,
+            entry_records={RunEntry: Run},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
+        store.save(Run(source_id="ws:a", workflow_declaration_uri="https://wf.example/a"))
+        store.save(Run(source_id="ws:b"))
+
+        plan = stored_property_sql_plan(store, RunEntry, served=served)
+
+        # (a) rows serve the two properties' values (not null), under wire names.
+        rows = {row["_httk_source_id"]: row for row in plan.records()}
+        assert set(rows) == {"ws:a", "ws:b"}
+        assert all(row["type"] == "_httk_runs" for row in rows.values())
+        assert rows["ws:a"]["_httk_workflow_declaration_uri"] == "https://wf.example/a"
+        assert rows["ws:b"]["_httk_workflow_declaration_uri"] is None
+
+        # (b) a filter over _httk_source_id returns the right subset.
+        filtered = _plan_records(plan.filter_searchers('_httk_source_id = "ws:a"'))
+        assert [record.source_id for record in filtered] == ["ws:a"]
+
+        # (c) a sort over _httk_source_id orders correctly.
+        ordered = _plan_records(
+            plan.filter_searchers('type = "_httk_runs"', sort=(("_httk_source_id", False),))
+        )
+        assert [record.source_id for record in ordered] == ["ws:a", "ws:b"]
+
+        # (d) planning this prefixed family WITHOUT served= fails loudly: the
+        # bare internal definition sees the served projection keys as unknown.
+        with pytest.raises(StoredPropertySqlConfigurationError, match="_httk_source_id"):
+            stored_property_sql_plan(store, RunEntry)
+
+
 def test_product_link_storage_deduplicates_by_value() -> None:
     with Backend.sqlite() as database:
         store = SqlStore(database, entry_records={})
@@ -222,7 +273,7 @@ def test_run_provider_serves_through_optimade() -> None:
     definition = _definition("_httk_energy", ENERGY_ID)
     record = DataRecord.from_value(ENERGY_ID, "_httk_energy", 3.5)
     product = DataRecord.from_value(FORCE_ID, "_httk_force", 2.0)
-    run = Run(source_id="ws:job", inputs=(RunEdge("labeled-input", "_httk_records", "record-1"),))
+    run = Run(source_id="ws:job", inputs=(RunEdge("labeled-input", "records", "record-1"),))
     product_links = product_relationships(
         [ProductLink("_httk_records", "record-1", "_httk_records", "record-2", "derived")]
     )

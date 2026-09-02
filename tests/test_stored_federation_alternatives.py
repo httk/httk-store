@@ -101,7 +101,7 @@ def test_default_serving_excludes_alternatives() -> None:
         assert page.total_count == 1
         assert [row["id"] for row in page.rows] == [f"one/{main_id}"]
         assert all("_httk_kind" not in row for row in page.rows)
-        assert federation.fetch(f"one/{main_id}")["_httk_label"] == "m1"
+        assert federation.fetch(f"one/{main_id}")[0]["_httk_label"] == "m1"
         # A composite alternative id is not a main; default fetch misses it.
         assert federation.fetch(f"one/{main_id}~conventional") is None
 
@@ -158,6 +158,7 @@ def test_fetch_alternative_hit_and_misses() -> None:
 
         hit = federation.fetch_alternative(f"one/{main_id}", "conventional")
         assert hit is not None
+        hit, _relationships = hit
         assert hit["id"] == f"one/{main_id}~conventional"
         assert hit["_httk_id"] == f"one/{main_id}"
         assert hit["_httk_kind"] == "conventional"
@@ -182,7 +183,7 @@ def test_revisions_are_mains_only() -> None:
 
         # The alternative's revision id is invisible to the mains-only revision path.
         assert federation.fetch_revision(f"one/{main_id}", f"one/{main_id}~conventional~1") is None
-        assert federation.fetch_revision(f"one/{main_id}", f"one/{main_id}~1")["_httk_label"] == "m1"
+        assert federation.fetch_revision(f"one/{main_id}", f"one/{main_id}~1")[0]["_httk_label"] == "m1"
 
 
 def test_two_sources_prefix_disambiguate_alternatives() -> None:
@@ -207,7 +208,7 @@ def test_two_sources_prefix_disambiguate_alternatives() -> None:
             f"two/{id_two}~conventional",
             f"one/{id_one}~primitive",
         ]
-        assert federation.fetch_alternative(f"two/{id_two}", "conventional")["_httk_label"] == "conv2"
+        assert federation.fetch_alternative(f"two/{id_two}", "conventional")[0]["_httk_label"] == "conv2"
 
 
 def test_audit_duplicate_ids_unaffected_by_alternatives() -> None:

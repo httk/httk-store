@@ -492,7 +492,7 @@ def test_exposed_weak_link_renders_as_relationship_with_metadata():
         store.link(article, "editors", editor)  # exposed_relationship=False: serves nothing
         provider = _weak_provider(store)
         assert provider.relationships("articles") == {
-            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author", label="authors"),)
         }
         assert provider.relationships("authors") == {}
 
@@ -518,7 +518,7 @@ def test_weak_link_survives_source_lineage_replacement():
         store.replace(article, Article("Engines, 2nd ed.", "article-1", "article-1~2"))
         # The link binds the source lineage, so the revised article still serves it.
         assert _weak_provider(store).relationships("articles") == {
-            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author", label="authors"),)
         }
 
 
@@ -532,7 +532,7 @@ def test_weak_link_target_revision_serves_the_same_lineage_id():
         store.replace(ada, Author("Ada Lovelace", "author-a", "author-a~2"))
         # id is lineage-level: the revised target resolves to the same id.
         assert _weak_provider(store).relationships("articles") == {
-            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author", label="authors"),)
         }
 
 
@@ -564,7 +564,7 @@ def test_duplicate_pair_lineage_renders_once():
                 sqlalchemy.update(link_table).where(link_table.c.sid == new_sid).values({"logical_id": new_sid})
             )
         assert _weak_provider(store).relationships("articles") == {
-            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author"),)
+            "article-1": (RelatedEntry("authors", "author-a", description="Wrote it", role="author", label="authors"),)
         }
 
 

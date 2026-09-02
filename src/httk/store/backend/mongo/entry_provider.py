@@ -161,6 +161,9 @@ class StoreEntryProvider(EntryProvider):
                 if spec is None or spec.role != "scalar" or spec.python_type is not str:
                     raise TypeError(f"{record.__name__} must declare {required} when served without id_of")
 
+        # Keyed by served (wire) entry-type names: relationship targets are
+        # served directly, so this map resolves a target class to the name it is
+        # served under.
         self._type_for_class: dict[type, str] = {}
         for entry_type, records in self._record_classes.items():
             for record in records:
@@ -205,8 +208,16 @@ class StoreEntryProvider(EntryProvider):
         return auto_definition(entry_type, self._schemas[self._record_classes[entry_type][0]], self._prefix)
 
     def entry_types(self) -> Mapping[str, EntryTypeDefinition]:
-        """Return definitions for all served entry types."""
-        return {entry_type: self._definition(entry_type) for entry_type in self._classes}
+        """Return definitions for all served entry types.
+
+        This provider is an OPTIMADE serving edge, so each definition is returned
+        in its wire form via ``EntryTypeDefinition.served_form()``
+        (idempotent for the already-prefixed supplied and auto-generated
+        definitions).
+
+        :return: The served entry-type definitions keyed by entry type.
+        """
+        return {entry_type: self._definition(entry_type).served_form() for entry_type in self._classes}
 
     def property_keys(self, entry_type: str) -> Mapping[str, str]:
         """Return public property names mapped to Mongo response keys."""
@@ -330,6 +341,7 @@ class StoreEntryProvider(EntryProvider):
                                 self._id_of(related_type, target_sid, target),
                                 description=link_spec.description,
                                 role=link_spec.role,
+                                label=link_spec.name,
                             )
                         )
                 if entries:

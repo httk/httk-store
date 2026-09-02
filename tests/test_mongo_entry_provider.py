@@ -398,9 +398,16 @@ def test_exposed_weak_link_renders_as_relationship_with_metadata(mongo_test_data
     store.link(article, "editors", editor)  # exposed_relationship=False: serves nothing
     provider = _weak_provider(store)
     assert provider.relationships("warticles") == {
-        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author", label="authors"),)
     }
     assert provider.relationships("wauthors") == {}
+    # The weak-link relationship carries the link name as its label and role,
+    # and its target type is the served (wire) name the target is exposed under.
+    related = provider.relationships("warticles")["article-1"][0]
+    assert (related.label, related.role, related.entry_type) == ("authors", "author", "wauthors")
+    # entry_types() surfaces every definition in its wire (served) form.
+    for definition in provider.entry_types().values():
+        assert definition.as_optimade() == definition.served_form().as_optimade()
 
 
 def test_retracted_weak_link_disappears_from_relationships(mongo_test_database):
@@ -423,7 +430,7 @@ def test_weak_link_survives_source_lineage_replacement(mongo_test_database):
     store.link(article, "authors", ada)
     store.replace(article, WArticle("Engines, 2nd ed.", "article-1", "article-1~2"))
     assert _weak_provider(store).relationships("warticles") == {
-        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author", label="authors"),)
     }
 
 
@@ -436,7 +443,7 @@ def test_weak_link_target_revision_serves_the_same_lineage_id(mongo_test_databas
     store.link(article, "authors", ada)
     store.replace(ada, WAuthor("Ada Lovelace", "author-a", "author-a~2"))
     assert _weak_provider(store).relationships("warticles") == {
-        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author", label="authors"),)
     }
 
 
@@ -459,7 +466,7 @@ def test_duplicate_pair_lineage_renders_once(mongo_test_database):
         }
     )
     assert _weak_provider(store).relationships("warticles") == {
-        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author"),)
+        "article-1": (RelatedEntry("wauthors", "author-a", description="Wrote it", role="author", label="authors"),)
     }
 
 

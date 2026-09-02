@@ -987,7 +987,9 @@ class StoredPropertySqlPlan:
         return value
 
 
-def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySqlPlan:
+def stored_property_sql_plan(
+    store: SqlStore, family: type, *, served: EntryTypeDefinition | None = None
+) -> StoredPropertySqlPlan:
     """Validate and return the SQL property plan for one configured logical family.
 
     The family must be present in ``store.entry_layout``; unconfigured family
@@ -997,8 +999,21 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
     and the family's fixed entry type. Backings must not redeclare any intrinsic
     property.
 
+    The family's internal definition is used only to establish identity (that
+    the family and its records agree on one durable definition). Everything the
+    plan then serves — the entry ``type``, the property set that response and
+    filter/sort validation runs against, and the projection names backings must
+    match — is taken from ``served``: the OPTIMADE wire form of that definition
+    (see ``EntryTypeDefinition.served_form()``). A prefixed family
+    declares its ``__httk_stored_properties__`` projections under those served
+    names, so it MUST be planned with ``served=`` set; without it the bare
+    internal definition rejects the prefixed projection keys as unknown. When
+    ``served`` is omitted the internal definition serves itself, which is
+    byte-identical for standard (unprefixed) families.
+
     :param store: The SQL store containing the configured family.
     :param family: The logical entry-family class to validate.
+    :param served: The served (wire) definition to serve, or ``None`` for the internal definition.
     :return: The validated SQL property plan.
     :raises StoredPropertySqlConfigurationError: If the family or any backing is inconsistent with its definition.
     """
@@ -1033,8 +1048,13 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
             f"{family.__name__}.type is {entry_type!r}, but {definition_id!r} defines {definition.name!r}"
         )
 
+    # Identity is settled against the internal definition above; everything the
+    # plan serves runs against the served (wire) definition.
+    served_definition = definition if served is None else served
+    served_entry_type = served_definition.name
+
     backing_plans: list[_BackingPlan] = []
-    definition_names = set(definition.properties)
+    definition_names = set(served_definition.properties)
     for backing in layout.records:
         projections = stored_property_projections(backing)
         reserved = sorted(_INTRINSIC_PROPERTIES & set(projections))
@@ -1045,11 +1065,11 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
         unknown = sorted(set(projections) - definition_names)
         if unknown:
             raise StoredPropertySqlConfigurationError(
-                f"{backing.__name__} projects properties absent from {definition_id!r}: {', '.join(unknown)}"
+                f"{backing.__name__} projects properties absent from {served_entry_type!r}: {', '.join(unknown)}"
             )
         required = sorted(
             name
-            for name, property_definition in definition.properties.items()
+            for name, property_definition in served_definition.properties.items()
             if name not in _INTRINSIC_PROPERTIES and not property_definition.nullable and name not in projections
         )
         if required:
@@ -1057,7 +1077,7 @@ def stored_property_sql_plan(store: SqlStore, family: type) -> StoredPropertySql
                 f"{backing.__name__} has no response mapping for non-null property/properties: {', '.join(required)}"
             )
         backing_plans.append(_BackingPlan(backing, projections))
-    return StoredPropertySqlPlan(store, family, layout, entry_type, definition, tuple(backing_plans))
+    return StoredPropertySqlPlan(store, family, layout, served_entry_type, served_definition, tuple(backing_plans))
 
 
 def _property_fulltypes(

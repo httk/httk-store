@@ -4,7 +4,8 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 
 import pytest
-from httk.core import FracScalar
+from httk.core import FracScalar, Run, RunEntry, load_entry_type_definition
+from httk.core.provenance import RUNS_DEFINITION_ID
 from test_db_stored_properties import (
     FIRST,
     SECOND,
@@ -14,7 +15,7 @@ from test_db_stored_properties import (
 )
 
 from httk.store import EntryIdScheme
-from httk.store.backend.mongo import MongoStore
+from httk.store.backend.mongo import MongoStore, stored_property_mongo_plan
 from httk.store.backend.mongo.evaluator import canonical_predicate, evaluate
 from httk.store.backend.mongo.stored_properties import (
     MongoStoredPropertyConfigurationError,
@@ -101,6 +102,59 @@ def test_mongo_plan_matches_the_sql_stored_property_scenarios(plan, filter_strin
             key=lambda row: row["id"],
         )
         assert mongo_rows == sql_rows
+
+
+def test_run_stored_property_plan_serves_prefixed_properties(mongo_test_database) -> None:
+    """A prefixed family serves its wire property names only when planned with served=."""
+    served = load_entry_type_definition(RUNS_DEFINITION_ID).served_form()
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={RunEntry: Run},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    store.save(Run(source_id="ws:a", workflow_declaration_uri="https://wf.example/a"))
+    store.save(Run(source_id="ws:b"))
+
+    plan = stored_property_mongo_plan(store, RunEntry, served=served)
+
+    # (a) rows serve the two prefixed properties' values (not null), under wire names.
+    rows = {row["_httk_source_id"]: row for row in plan.records()}
+    assert set(rows) == {"ws:a", "ws:b"}
+    assert all(row["type"] == "_httk_runs" for row in rows.values())
+    assert rows["ws:a"]["_httk_workflow_declaration_uri"] == "https://wf.example/a"
+    assert rows["ws:b"]["_httk_workflow_declaration_uri"] is None
+
+    # (b) a filter over _httk_source_id returns the right subset.
+    filtered = _records(plan.filter_searchers('_httk_source_id = "ws:a"'))
+    assert [record.source_id for record in filtered] == ["ws:a"]
+
+    # (c) a sort over _httk_source_id orders correctly.
+    ordered = _records(plan.filter_searchers('type = "_httk_runs"', sort=(("_httk_source_id", False),)))
+    assert [record.source_id for record in ordered] == ["ws:a", "ws:b"]
+
+    # (d) planning this prefixed family WITHOUT served= fails loudly: the bare
+    # internal definition sees the served projection keys as unknown.
+    with pytest.raises(MongoStoredPropertyConfigurationError, match="_httk_source_id"):
+        stored_property_mongo_plan(store, RunEntry)
+
+
+def test_store_accessor_plans_prefixed_family_in_wire_form(mongo_test_database) -> None:
+    """MongoStore.stored_property_plan serves a prefixed family (RunEntry) in wire form."""
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={RunEntry: Run},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    store.save(Run(source_id="ws:a", workflow_declaration_uri="https://wf.example/a"))
+    store.save(Run(source_id="ws:b"))
+
+    plan = store.stored_property_plan(RunEntry)
+
+    rows = {row["_httk_source_id"]: row for row in plan.records()}
+    assert set(rows) == {"ws:a", "ws:b"}
+    assert all(row["type"] == "_httk_runs" for row in rows.values())
+    assert rows["ws:a"]["_httk_workflow_declaration_uri"] == "https://wf.example/a"
+    assert rows["ws:b"]["_httk_workflow_declaration_uri"] is None
 
 
 def test_candidate_streams_are_id_only_and_verified(plan):

@@ -61,8 +61,8 @@ def test_mongo_revision_query_fetch_and_as_of(mongo_test_database):
         "httk.test-1-3",
     ]
     assert federation.query('_httk_id = "httk.test-1-1"', revisions=True).total_count == 2
-    assert federation.fetch("httk.test-1-1")["_httk_label"] == "A2"
-    assert federation.fetch_revision("httk.test-1-1", "httk.test-1-1~1")["_httk_label"] == "A"
+    assert federation.fetch("httk.test-1-1")[0]["_httk_label"] == "A2"
+    assert federation.fetch_revision("httk.test-1-1", "httk.test-1-1~1")[0]["_httk_label"] == "A"
     assert federation.fetch_revision("httk.test-1-3", "httk.test-1-1~1") is None
     assert federation.query(revisions=True, as_of=2_500).total_count == 2
 

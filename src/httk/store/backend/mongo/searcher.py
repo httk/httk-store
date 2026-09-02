@@ -404,11 +404,10 @@ def _render_child_string(
 
 
 def _reject_link_output(value: Any) -> None:
-    """Reject projecting a weak-link path (variable-length, like a child role)."""
+    """Reject projecting or sorting by a weak-link path (variable-length, like a child role)."""
     if isinstance(value, (MongoLinkSet, MongoLinkField)):
         raise UnsupportedQueryError(
-            "projecting a weak-link path is not supported; a weak link is variable-length and cannot be a "
-            "scalar or object output"
+            "a weak-link path is variable-length and cannot be a scalar or object output or sort key"
         )
 
 
@@ -860,9 +859,17 @@ class MongoLinkSet:
         store = self._searcher._store
         return store._link_target_lid(self._spec, value, self._variable._cls, self._spec.name)
 
+    def _has_any_lids(self, lids: list[int]) -> MongoExpression:
+        """Match a source with a live linked target among ``lids`` (the node :meth:`has_any` emits)."""
+        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$in": lids}}, False))
+
+    def _has_only_lids(self, lids: list[int]) -> MongoExpression:
+        """Require every live linked target among ``lids`` (the node :meth:`has_only` emits)."""
+        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$nin": lids}}, True))
+
     def __eq__(self, other: object) -> MongoExpression:  # type: ignore[override]
         """Match sources with a live linked target whose lineage equals ``other``."""
-        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$in": [self._operand(other)]}}, False))
+        return self._has_any_lids([self._operand(other)])
 
     def __ne__(self, other: object) -> MongoExpression:  # type: ignore[override]
         """Match sources with no live linked target whose lineage equals ``other`` (set-wise)."""
@@ -885,8 +892,7 @@ class MongoLinkSet:
         :param \\*values: The stored targets to match.
         :return: The matching expression.
         """
-        lids = [self._operand(value) for value in values]
-        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$in": lids}}, False))
+        return self._has_any_lids([self._operand(value) for value in values])
 
     def has_only(self, *values: Any) -> MongoExpression:
         """Require every live linked target to be among ``values`` (a no-links source matches).
@@ -894,8 +900,7 @@ class MongoLinkSet:
         :param \\*values: The complete set of allowed stored targets.
         :return: The condition requiring every linked target to match.
         """
-        lids = [self._operand(value) for value in values]
-        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$nin": lids}}, True))
+        return self._has_only_lids([self._operand(value) for value in values])
 
     def __getattr__(self, name: str) -> "MongoLinkField":
         if name.startswith("_"):
@@ -1250,6 +1255,7 @@ class MongoSearcher:
         nulls: Literal["first", "last"] = "last",
     ) -> None:
         """Append a stable scalar sort with an explicit null rank."""
+        _reject_link_output(field)
         if not isinstance(field, MongoField):
             raise TypeError(f"add_sort() takes a MongoField, got {type(field).__name__}")
         if nulls not in {"first", "last"}:

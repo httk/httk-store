@@ -384,7 +384,8 @@ def _check_links(
                 if len(lineages) > 1:
                     violations.append(
                         f"link table {name!r} pair ({source_lid}, {target_lid}) carries {len(lineages)} lineages; "
-                        "deduplicating is a repairable, non-corrupting note"
+                        "a tolerated concurrency outcome (the pair stays live) — deduplicating is safe but is "
+                        "NOT performed by repair"
                     )
 
 

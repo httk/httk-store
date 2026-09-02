@@ -475,12 +475,20 @@ class SqlColumn:
         :param \\*values: The complete set of allowed child values.
         :return: The condition requiring every child value to match.
         """
-        members: Any = (
-            values[0]
-            if len(values) == 1 and isinstance(values[0], sqlalchemy.SelectBase)
-            else self._encode_set_values(values)
-        )
-        outside = self._element.notin_(members)
+        if not values:
+            # An empty allowed set: only the empty collection is a subset of it.
+            # ``notin_([])`` renders constant true, which would wrongly count the
+            # LEFT-JOIN NULL row of a no-children/no-links source as an outsider;
+            # ``IS NOT NULL`` instead counts only real values, so a source with
+            # no rows matches (vacuous truth) and any populated one fails.
+            outside: sqlalchemy.ColumnElement[bool] = self._element.is_not(None)
+        else:
+            members: Any = (
+                values[0]
+                if len(values) == 1 and isinstance(values[0], sqlalchemy.SelectBase)
+                else self._encode_set_values(values)
+            )
+            outside = self._element.notin_(members)
         return SqlExpression(
             sqlalchemy.true(),
             _bool_clause(self._match_count(outside) == 0),
@@ -1163,7 +1171,16 @@ class SqlSearcher:
         :param field: The column used as the next sort key.
         :param descending: Whether the key is ordered from highest to lowest.
         :return: None.
+        :raises httk.store.query.protocols.UnsupportedQueryError: If ``field`` is a weak-link path.
         """
+        if field._link_path:
+            # A weak-link traversal is a variable-length joined column; ordering
+            # by it would ORDER BY an unaggregated joined column under grouped
+            # mode (a dialect error or an arbitrary pick). Same rule as the
+            # projection rejection in output().
+            raise UnsupportedQueryError(
+                "cannot sort by a weak-link path; weak-link traversals are usable only as search predicates"
+            )
         self._sorts.append((field, descending))
 
     def set_limit(self, limit: int) -> None:

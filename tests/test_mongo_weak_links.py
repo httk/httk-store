@@ -604,6 +604,20 @@ def test_link_path_projection_is_rejected(mongo_test_database):
         searcher.results(pname=v.links.projects.name)
 
 
+def test_link_path_sort_is_rejected(mongo_test_database):
+    store = _store(mongo_test_database)
+    p = Project("P")
+    store.save(p)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    with pytest.raises(UnsupportedQueryError, match="weak-link path"):
+        searcher.add_sort(v.links.projects.name)
+
+
 # --------------------------------------------------------------------------- .links accessor on fetched records
 
 
@@ -651,7 +665,7 @@ def test_bound_instance_equals_plain_instance(mongo_test_database):
 
 def _violations_only_dup(summary):
     for violation in summary.violations:
-        assert "repairable, non-corrupting note" in violation, violation
+        assert "non-corrupting state that fsck repair does not deduplicate" in violation, violation
 
 
 def test_fsck_is_clean_for_healthy_links(mongo_test_database):
@@ -716,7 +730,11 @@ def test_fsck_reports_duplicate_pair_as_repairable_note(mongo_test_database):
         }
     )
     summary = store.fsck(known_types=(Result, Project), repair=False, collect_garbage=False)
-    notes = [violation for violation in summary.violations if "repairable, non-corrupting note" in violation]
+    notes = [
+        violation
+        for violation in summary.violations
+        if "non-corrupting state that fsck repair does not deduplicate" in violation
+    ]
     assert len(notes) == 1
     link_counter = summary.collections.get(_LINK_COLLECTION)
     assert link_counter is None or link_counter.conflicts == 0  # a tolerated duplicate is not corruption

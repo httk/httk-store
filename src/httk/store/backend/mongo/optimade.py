@@ -14,7 +14,6 @@ from httk.core.optimade import FilterAst
 
 from httk.store.backend.mongo.mapping import collection_name_for
 from httk.store.backend.mongo.searcher import (
-    LinkPredicateNode,
     MongoExpression,
     MongoField,
     MongoReference,
@@ -138,21 +137,19 @@ def _weak_link_id_has_handlers(store: MongoStore, related_cls: type, name: str) 
         entry: str, ops: Any, values: Any, search_variable: MongoVariable, has_type: str
     ) -> MongoExpression:
         lids = _weak_target_lids(store, related_cls, values)
-        # The link set registers the lookup; MongoLinkSet.has_any/has_only accept
-        # only stored records, so the lid membership node is built directly (the
-        # same LinkPredicateNode those methods emit).
-        path = getattr(search_variable.links, name)._path
+        # MongoLinkSet.has_any/has_only accept only stored records; the internal
+        # _has_any_lids/_has_only_lids build exactly the nodes those emit, over
+        # already-resolved lineage ids, and register the lookup once per access.
+        link_set = getattr(search_variable.links, name)
         if has_type == "HAS_ALL":
-            expression = MongoExpression(LinkPredicateNode(path, {"target_lid": {"$in": [lids[0]]}}, False))
+            expression = link_set._has_any_lids([lids[0]])
             for lid in lids[1:]:
-                expression = expression & MongoExpression(
-                    LinkPredicateNode(path, {"target_lid": {"$in": [lid]}}, False)
-                )
+                expression = expression & link_set._has_any_lids([lid])
             return expression
         if has_type == "HAS_ANY":
-            return MongoExpression(LinkPredicateNode(path, {"target_lid": {"$in": lids}}, False))
+            return link_set._has_any_lids(lids)
         if has_type == "HAS_ONLY":
-            return MongoExpression(LinkPredicateNode(path, {"target_lid": {"$nin": lids}}, True))
+            return link_set._has_only_lids(lids)
         raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
     return {"HAS": has_handler}

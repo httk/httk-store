@@ -436,11 +436,13 @@ def _check_links(
                     )
             for (source_lid, target_lid), lineages in pair_lineages.items():
                 if len(lineages) > 1:
-                    # A tolerated concurrency outcome: a repairable note, not
-                    # corruption, so it is NOT counted through _record_violation.
+                    # A tolerated concurrency outcome: a non-corrupting note, so
+                    # it is NOT counted through _record_violation. Deduplicating
+                    # the pair to one lineage is safe but fsck repair does NOT
+                    # perform it (linked() already dedups the pair at read time).
                     message = (
                         f"link collection {name!r} pair ({source_lid}, {target_lid}) carries {len(lineages)} "
-                        "lineages; deduplicating is a repairable, non-corrupting note"
+                        "lineages; this is a tolerated, non-corrupting state that fsck repair does not deduplicate"
                     )
                     violations.append(message)
                     _LOGGER.warning("MongoStore fsck: %s", message, extra={"context": "storage"})

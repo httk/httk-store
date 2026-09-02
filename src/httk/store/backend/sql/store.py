@@ -684,12 +684,18 @@ class SqlStore:
             if not name.startswith("_httk_"):
                 continue
             # A weak-link table (and its backing sid sequence on dialects such as
-            # DuckDB) is store-owned: the reserved _httk_link_ prefix is produced
-            # only by a WeakLink declaration, never by a record's storage name.
-            # It may belong to an ad-hoc (undeclared) record and so is not in
-            # declaration_owned; accept it structurally by prefix.
+            # DuckDB/Postgres) is store-owned: the reserved _httk_link_ prefix is
+            # produced only by a WeakLink declaration, never by a record's storage
+            # name. It may belong to an ad-hoc (undeclared) record and so is not
+            # in declaration_owned, and at reopen it is not yet in metadata — so
+            # accept it structurally from the live schema: a real link table
+            # carries the source_lid/target_lid endpoint columns, its sid sequence
+            # is a column-less sequence, and an alien table/view merely wearing
+            # the prefix has neither and is flagged.
             if name.startswith("_httk_link_"):
-                continue
+                columns = actual_columns(connection, name) if "table" in kinds else frozenset()
+                if kinds == {"sequence"} or (SOURCE_LID_COLUMN in columns and TARGET_LID_COLUMN in columns):
+                    continue
             if name not in declaration_owned or kinds != {"table"}:
                 object_problems[name] = {
                     "reserved": True,

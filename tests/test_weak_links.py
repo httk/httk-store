@@ -50,7 +50,7 @@ def _names(objects):
 def _fsck_clean_or_dup(summary):
     """Assert an fsck summary carries no violations except tolerated duplicate-pair notes."""
     for violation in summary.violations:
-        assert "repairable, non-corrupting note" in violation, violation
+        assert "NOT performed by repair" in violation, violation
 
 
 # --------------------------------------------------------------------------- link/unlink idempotency
@@ -442,7 +442,13 @@ def test_fsck_reports_duplicate_pair_as_repairable_note(store_factory):
         # outcome). Founded correctly: its logical_id equals its own sid.
         result_insert = connection.execute(
             sqlalchemy.insert(link_table).values(
-                {"logical_id": 0, "source_lid": source_lid, "target_lid": target_lid, "retracted": 0, "store_timestamp": 1}
+                {
+                    "logical_id": 0,
+                    "source_lid": source_lid,
+                    "target_lid": target_lid,
+                    "retracted": 0,
+                    "store_timestamp": 1,
+                }
             )
         )
         new_sid = int(result_insert.inserted_primary_key[0])
@@ -450,7 +456,7 @@ def test_fsck_reports_duplicate_pair_as_repairable_note(store_factory):
             sqlalchemy.update(link_table).where(link_table.c.sid == new_sid).values({"logical_id": new_sid})
         )
     summary = store.fsck(known_types=(Result, Project), repair=False, collect_garbage=False, exclusive=True)
-    notes = [violation for violation in summary.violations if "repairable, non-corrupting note" in violation]
+    notes = [violation for violation in summary.violations if "NOT performed by repair" in violation]
     assert len(notes) == 1
     # A tolerated duplicate is not counted as corruption.
     link_counter = summary.tables.get("_httk_link_result__project__projects")
@@ -522,9 +528,7 @@ def test_spike_not_exists_in_left_join_onclause(store_factory):
     )
     # The same join WITHOUT the NOT EXISTS, to prove the latest-of-lineage
     # clause is load-bearing (not incidentally true on this data).
-    onclause_no_latest = sqlalchemy.and_(
-        link_alias.c.source_lid == result.c.logical_id, link_alias.c.retracted == 0
-    )
+    onclause_no_latest = sqlalchemy.and_(link_alias.c.source_lid == result.c.logical_id, link_alias.c.retracted == 0)
     statement_no_latest = (
         sqlalchemy.select(result.c.label, sqlalchemy.func.count(link_alias.c.sid))
         .select_from(result.outerjoin(link_alias, onclause_no_latest))
@@ -892,3 +896,55 @@ def test_links_accessor_on_a_freshly_fetched_row(store_factory):
     # A plain, unbound instance has no accessor at all.
     with pytest.raises(AttributeError):
         _ = Result("plain").links
+
+
+# =========================================================================== #
+# P2b review follow-ups — empty has_only() vacuous truth + sort rejection.
+# =========================================================================== #
+
+
+def test_weak_link_has_only_empty_matches_only_zero_link_sources(store_factory):
+    store = _sql_store(store_factory)
+    p1 = Project("P1")
+    store.save(p1)
+    linked = Result("linked")
+    store.save(linked)
+    store.link(linked, "projects", p1)
+    unlinked = Result("unlinked")
+    store.save(unlinked)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    searcher.add(v.links.projects.has_only())  # empty allowed set: only no-link sources qualify
+    assert _query_labels(searcher, v) == ["unlinked"]
+
+
+def test_child_field_has_only_empty_matches_only_empty_collections(store_factory):
+    # Guards the shared SqlColumn.has_only empty-values fix: child fields and
+    # weak links both route through it, so a child-field empty has_only() is the
+    # neutral witness that the LEFT-JOIN NULL row is not miscounted as an outsider.
+    store = _sql_store(store_factory)
+    store.save(Team("lead-a", ("x", "y")))
+    store.save(Team("lead-b", ()))
+
+    searcher = store.searcher()
+    v = searcher.variable(Team)
+    searcher.add(v.members.has_only())
+    searcher.output(v, "t")
+    assert sorted(row.values[0].lead for row in searcher) == ["lead-b"]
+
+
+def test_sort_by_weak_link_path_is_rejected(store_factory):
+    from httk.store.query import UnsupportedQueryError
+
+    store = _sql_store(store_factory)
+    p = Project("P")
+    store.save(p)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    with pytest.raises(UnsupportedQueryError, match="sort by a weak-link path"):
+        searcher.add_sort(v.links.projects.name)

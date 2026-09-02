@@ -11,9 +11,12 @@ from dataclasses import dataclass
 from itertools import islice
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from httk.core.storage import resolve_storage_record
+
 from httk.store.backend.codecs import ValueCodec, codec_named
 from httk.store.backend.schema import (
     FieldSpec,
+    LinkSpec,
     SchemaError,
     TableSchema,
     resolve_schema,
@@ -30,8 +33,12 @@ __all__ = [
     "AndNode",
     "ComparisonNode",
     "IsInNode",
+    "LinkPredicateNode",
     "MongoExpression",
     "MongoField",
+    "MongoLinkField",
+    "MongoLinkSet",
+    "MongoLinks",
     "MongoSearcher",
     "MongoVariable",
     "NotNode",
@@ -100,6 +107,26 @@ class ReferenceEqualityNode:
 
 
 @dataclass(frozen=True, slots=True)
+class LinkPredicateNode:
+    """A no-``$unwind`` existential/universal predicate over a weak-link target array.
+
+    The link ``$lookup`` leaves each source document carrying an array field at
+    ``path`` of its live, latest-of-lineage link elements (each with ``target_lid``
+    and an embedded ``_httk_target`` doc). ``predicate`` is an ``$elemMatch`` body
+    matching one such element. For an existential (``universal=False``: ``==`` /
+    ``has_any`` / a chained-field comparison) the truth is "some element matches"
+    and the falsity "no element matches" — the latter vacuously true for a
+    zero-link source, so ``~`` negates set-wise. For a universal (``universal=True``:
+    ``has_only``) ``predicate`` matches an *outsider*: truth is "no outsider",
+    falsity "some outsider".
+    """
+
+    path: str
+    predicate: dict[str, Any]
+    universal: bool
+
+
+@dataclass(frozen=True, slots=True)
 class StringMatchNode:
     """Match literal text in a scalar string field."""
 
@@ -148,6 +175,7 @@ Node = (
     | ChildComparisonNode
     | ChildStringNode
     | ReferenceEqualityNode
+    | LinkPredicateNode
     | StringMatchNode
     | AndNode
     | OrNode
@@ -375,6 +403,30 @@ def _render_child_string(
     return _render_child_predicate(node.field, {key: {"$regex": pattern}})
 
 
+def _reject_link_output(value: Any) -> None:
+    """Reject projecting a weak-link path (variable-length, like a child role)."""
+    if isinstance(value, (MongoLinkSet, MongoLinkField)):
+        raise UnsupportedQueryError(
+            "projecting a weak-link path is not supported; a weak link is variable-length and cannot be a "
+            "scalar or object output"
+        )
+
+
+def _render_link(node: LinkPredicateNode) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Render a weak-link array predicate to its TRUE and FALSE Mongo filters.
+
+    The link array is always present (produced by ``$lookup``), so no null/array
+    domain guard is needed; ``$not $elemMatch`` alone gives set-wise negation and
+    vacuous truth on a zero-link source.
+    """
+    member = {node.path: {"$elemMatch": node.predicate}}
+    no_member = {node.path: {"$not": {"$elemMatch": node.predicate}}}
+    if node.universal:
+        # ``predicate`` matches an outsider: true iff no outsider exists.
+        return no_member, member
+    return member, no_member
+
+
 def _render_string(node: StringMatchNode) -> tuple[dict[str, Any], dict[str, Any]]:
     path = node.field._path
     escaped = re.escape(node.text)
@@ -403,6 +455,8 @@ def render_node(node: Node) -> tuple[dict[str, Any], dict[str, Any]]:
         left = node.reference._field
         right = node.variable.sid
         return _render_comparison(ComparisonNode(left, "eq", _FieldReference(right)))
+    if isinstance(node, LinkPredicateNode):
+        return _render_link(node)
     if isinstance(node, StringMatchNode):
         return _render_string(node)
     if isinstance(node, AndNode):
@@ -649,6 +703,318 @@ class MongoReference:
         return getattr(self._target(), name)
 
 
+class MongoLinks:
+    """The ``links`` namespace of a query variable: one weak link per attribute.
+
+    Each attribute access resolves the declared :class:`~httk.store.backend.schema.LinkSpec`
+    and returns a **fresh** :class:`MongoLinkSet` — a new link ``$lookup`` array
+    every time, never memoized on ``(variable, name)``. That freshness lets
+    AND-composed predicates on the same link constrain independent link elements
+    (so ``(v.links.p.name == 'A') & (v.links.p.name == 'B')`` is a HAS-ALL over
+    two distinct linked targets), matching the SQL backend and OPTIMADE HAS ALL.
+
+    :param variable: The query variable whose weak links this namespace exposes.
+    """
+
+    __slots__ = ("_variable",)
+
+    def __init__(self, variable: "MongoVariable") -> None:
+        self._variable = variable
+
+    def __getattr__(self, name: str) -> "MongoLinkSet":
+        if name.startswith("_"):
+            raise AttributeError(name)
+        for spec in self._variable._schema.links:
+            if spec.name == name:
+                return MongoLinkSet(self._variable, spec)
+        declared = ", ".join(link.name for link in self._variable._schema.links) or "none"
+        raise SchemaError(
+            f"{self._variable._cls.__name__} declares no weak link named {name!r} (declared links: {declared})"
+        )
+
+
+class MongoLinkSet:
+    """One weak-link traversal from a query variable to the latest live-linked targets.
+
+    Construction registers a ``$lookup`` that leaves each source document carrying
+    an array field (``_httk_link_<n>``) of its live, latest-of-lineage link
+    elements, each embedding the latest revision of its target lineage as
+    ``_httk_target`` (bounded by ``as_of`` when set). The array is deliberately
+    **not** ``$unwind``-ed — that would multiply source documents and break
+    grouped multiplicity and count(); predicates are no-unwind ``$elemMatch``
+    array predicates instead (see :class:`LinkPredicateNode`).
+
+    Identity comparisons (``== stored_object``, :meth:`has_any`, :meth:`has_only`)
+    run over each element's ``target_lid``; attribute access chains into a scalar
+    or encoded field of the latest target revision.
+
+    :param variable: The query variable the link traverses from.
+    :param spec: The resolved weak-link declaration.
+    """
+
+    __slots__ = ("_path", "_searcher", "_spec", "_variable")
+
+    def __init__(self, variable: "MongoVariable", spec: LinkSpec) -> None:
+        self._variable = variable
+        self._spec = spec
+        searcher = variable._searcher
+        self._searcher = searcher
+        self._path = f"_httk_link_{searcher._next_link_index()}"
+        searcher._link_lookups.append(self._build_lookup_stage())
+
+    def _as_of_units(self) -> int | None:
+        if self._searcher._as_of is None:
+            return None
+        return ns_operand_to_store_units(
+            self._searcher._as_of,
+            cast(int, self._searcher._store.store_timestamp_resolution),
+        )
+
+    def _latest_anti_join(self, collection: str, id_field: str) -> list[dict[str, Any]]:
+        """A correlated self-``$lookup`` + anti-match keeping only latest-of-lineage rows."""
+        as_of_units = self._as_of_units()
+        newer: list[dict[str, Any]] = [
+            {"$eq": ["$logical_id", "$$httklid"]},
+            {"$gt": ["$_id", "$$httksid"]},
+        ]
+        if as_of_units is not None:
+            newer.append({"$lte": ["$store_timestamp", as_of_units]})
+        alias = f"_httk_newer_{id_field}"
+        return [
+            {
+                "$lookup": {
+                    "from": collection,
+                    "let": {"httklid": "$logical_id", "httksid": "$_id"},
+                    "pipeline": [{"$match": {"$expr": {"$and": newer}}}, {"$limit": 1}],
+                    "as": alias,
+                }
+            },
+            {"$match": {alias: {"$eq": []}}},
+        ]
+
+    def _build_lookup_stage(self) -> dict[str, Any]:
+        from httk.store.backend.mongo.mapping import collection_name_for
+
+        as_of_units = self._as_of_units()
+        link_collection = self._spec.table_name
+        target_collection = collection_name_for(resolve_schema(self._spec.target))
+        local = f"{self._variable._document_path}.logical_id" if self._variable._document_path else "logical_id"
+
+        candidate: list[dict[str, Any]] = [
+            {"$eq": ["$source_lid", "$$httpsrclid"]},
+            {"$eq": ["$retracted", 0]},
+        ]
+        if as_of_units is not None:
+            candidate.append({"$lte": ["$store_timestamp", as_of_units]})
+
+        target_pipeline: list[dict[str, Any]] = [
+            {"$match": {"$expr": {"$eq": ["$logical_id", "$$httptgtlid"]}}},
+            *self._latest_anti_join(target_collection, "target"),
+        ]
+        if as_of_units is not None:
+            target_pipeline.append({"$match": {"$expr": {"$lte": ["$store_timestamp", as_of_units]}}})
+
+        inner: list[dict[str, Any]] = [
+            {"$match": {"$expr": {"$and": candidate}}},
+            *self._latest_anti_join(link_collection, "link"),
+            {
+                "$lookup": {
+                    "from": target_collection,
+                    "let": {"httptgtlid": "$target_lid"},
+                    "pipeline": target_pipeline,
+                    "as": "_httk_target",
+                }
+            },
+            {"$unwind": {"path": "$_httk_target", "preserveNullAndEmptyArrays": True}},
+        ]
+        return {
+            "$lookup": {
+                "from": link_collection,
+                "let": {"httpsrclid": f"${local}"},
+                "pipeline": inner,
+                "as": self._path,
+            }
+        }
+
+    def _operand(self, value: Any) -> int:
+        """Resolve one identity operand to a target lineage id.
+
+        A stored target resolves to its ``logical_id`` through the store. A target
+        search variable is rejected (unsupported on this backend); any other value
+        — a bare string, an unstored object — is a usage error.
+        """
+        if isinstance(value, MongoVariable):
+            raise UnsupportedQueryError(
+                f"comparing weak link {self._spec.name!r} against a target search variable is not supported on the "
+                f"Mongo backend; compare against a stored {self._spec.target.__name__} or chain a target field "
+                f"(for example v.links.{self._spec.name}.<field> == ...)"
+            )
+        try:
+            resolve_storage_record(value)
+        except TypeError:
+            raise TypeError(
+                f"cannot compare weak link {self._spec.name!r} against {value!r}; compare against a stored "
+                f"{self._spec.target.__name__} or chain a target field "
+                f"(for example v.links.{self._spec.name}.<field> == ...)"
+            ) from None
+        store = self._searcher._store
+        return store._link_target_lid(self._spec, value, self._variable._cls, self._spec.name)
+
+    def __eq__(self, other: object) -> MongoExpression:  # type: ignore[override]
+        """Match sources with a live linked target whose lineage equals ``other``."""
+        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$in": [self._operand(other)]}}, False))
+
+    def __ne__(self, other: object) -> MongoExpression:  # type: ignore[override]
+        """Match sources with no live linked target whose lineage equals ``other`` (set-wise)."""
+        return ~self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def has(self, value: Any) -> MongoExpression:
+        """Match a live linked target among ``value``.
+
+        :param value: The stored target to match.
+        :return: The matching expression.
+        """
+        return self.has_any(value)
+
+    def has_any(self, *values: Any) -> MongoExpression:
+        """Match at least one live linked target among ``values``.
+
+        :param \\*values: The stored targets to match.
+        :return: The matching expression.
+        """
+        lids = [self._operand(value) for value in values]
+        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$in": lids}}, False))
+
+    def has_only(self, *values: Any) -> MongoExpression:
+        """Require every live linked target to be among ``values`` (a no-links source matches).
+
+        :param \\*values: The complete set of allowed stored targets.
+        :return: The condition requiring every linked target to match.
+        """
+        lids = [self._operand(value) for value in values]
+        return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$nin": lids}}, True))
+
+    def __getattr__(self, name: str) -> "MongoLinkField":
+        if name.startswith("_"):
+            raise AttributeError(name)
+        target_schema = resolve_schema(self._spec.target)
+        try:
+            spec = target_schema.field(name)
+        except SchemaError:
+            if name == "links":
+                raise UnsupportedQueryError(
+                    f"chaining into the weak links of a weak-link target ({self._spec.target.__name__}.links) "
+                    f"is not supported"
+                ) from None
+            raise AttributeError(
+                f"{self._spec.target.__name__} has no stored field {name!r} to query through weak link "
+                f"{self._spec.name!r}"
+            ) from None
+        if spec.role not in ("scalar", "encoded"):
+            raise UnsupportedQueryError(
+                f"weak-link field chaining reaches only scalar and encoded fields of the target; "
+                f"{self._spec.target.__name__}.{name} is a {spec.role} field (chaining through references, "
+                f"children, tensors, or nested links of a weak-link target is not supported)"
+            )
+        return MongoLinkField(self, spec)
+
+
+class MongoLinkField:
+    """A scalar or encoded field of a weak-link target, compared existentially.
+
+    Each comparison yields a :class:`LinkPredicateNode` whose ``$elemMatch`` body
+    reaches into the embedded ``_httk_target`` doc of a link element: the match is
+    "some live-linked target satisfies the comparison", and ``~`` negates set-wise
+    (including a vacuous match on a zero-link source).
+
+    :param link_set: The traversal supplying the link array path and target codec context.
+    :param spec: The resolved scalar or encoded target field.
+    """
+
+    __slots__ = ("_codec", "_path", "_spec", "_value_key")
+
+    def __init__(self, link_set: MongoLinkSet, spec: FieldSpec) -> None:
+        self._path = link_set._path
+        self._spec = spec
+        if spec.role == "scalar":
+            self._codec = None
+            self._value_key = f"_httk_target.f.{spec.columns[0].name}"
+        else:
+            assert spec.codec_name is not None
+            codec = codec_named(spec.codec_name)
+            self._codec = codec
+            query_column = next(column for column in spec.columns if column.name == spec.field + codec.query_suffix)
+            self._value_key = f"_httk_target.f.{query_column.name}"
+
+    def _encode(self, value: Any) -> Any:
+        if value is None or self._codec is None:
+            return value
+        if isinstance(value, self._codec.python_type):
+            query_index = next(
+                index for index, (suffix, _kind) in enumerate(self._codec.columns) if suffix == self._codec.query_suffix
+            )
+            return self._codec.encode(value)[query_index]
+        return value
+
+    def _predicate(self, op: Literal["eq", "ne", "lt", "le", "gt", "ge"], value: Any) -> dict[str, Any]:
+        key = self._value_key
+        if op == "eq":
+            return {key: {"$eq": value}}
+        if op == "ne":
+            # Some element with a known value differing from ``value``.
+            return {key: {"$nin": [None, value]}}
+        operators = {"lt": "$lt", "le": "$lte", "gt": "$gt", "ge": "$gte"}
+        return {key: {"$ne": None, operators[op]: value}}
+
+    def _comparison(self, op: Literal["eq", "ne", "lt", "le", "gt", "ge"], value: Any) -> MongoExpression:
+        return MongoExpression(LinkPredicateNode(self._path, self._predicate(op, self._encode(value)), False))
+
+    def __eq__(self, other: object) -> MongoExpression:  # type: ignore[override]
+        return self._comparison("eq", other)
+
+    def __ne__(self, other: object) -> MongoExpression:  # type: ignore[override]
+        return self._comparison("ne", other)
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __lt__(self, other: Any) -> MongoExpression:
+        return self._comparison("lt", other)
+
+    def __le__(self, other: Any) -> MongoExpression:
+        return self._comparison("le", other)
+
+    def __gt__(self, other: Any) -> MongoExpression:
+        return self._comparison("gt", other)
+
+    def __ge__(self, other: Any) -> MongoExpression:
+        return self._comparison("ge", other)
+
+    def _string_match(self, mode: Literal["contains", "startswith", "endswith"], text: str) -> MongoExpression:
+        escaped = re.escape(text)
+        pattern = {
+            "contains": f".*{escaped}.*",
+            "startswith": f"^{escaped}",
+            "endswith": f"{escaped}$",
+        }[mode]
+        return MongoExpression(LinkPredicateNode(self._path, {self._value_key: {"$regex": pattern}}, False))
+
+    def contains(self, text: str) -> MongoExpression:
+        """Match a live-linked target whose field contains ``text`` (case-sensitive)."""
+        return self._string_match("contains", text)
+
+    def startswith(self, prefix: str) -> MongoExpression:
+        """Match a live-linked target whose field starts with ``prefix``."""
+        return self._string_match("startswith", prefix)
+
+    def endswith(self, suffix: str) -> MongoExpression:
+        """Match a live-linked target whose field ends with ``suffix``."""
+        return self._string_match("endswith", suffix)
+
+
 class MongoVariable:
     """A query variable, optionally produced by a lookup from another variable."""
 
@@ -678,6 +1044,11 @@ class MongoVariable:
     def always_false(self) -> MongoExpression:
         """Return an expression matching no stored document."""
         return MongoExpression(AlwaysFalseNode())
+
+    @property
+    def links(self) -> MongoLinks:
+        """Return the weak-link namespace of this variable."""
+        return MongoLinks(self)
 
     def __getattr__(self, name: str) -> MongoField | MongoReference:
         if name.startswith("_"):
@@ -779,6 +1150,10 @@ class MongoSearcher:
         self._sorts: list[tuple[MongoField, bool, str]] = []
         self._limit: int | None = None
         self.offset = 0
+        # Weak-link ``$lookup`` stages (one per link namespace access), emitted
+        # after reference lookups and before the truth ``$match``.
+        self._link_lookups: list[dict[str, Any]] = []
+        self._link_index = 0
         # Phase 5 attaches its client-authoritative predicate evaluator here.
         # MongoResultSet owns the single candidate iterator that applies it.
         self._row_verifier: Callable[[dict[str, Any]], bool] | None = None
@@ -810,6 +1185,12 @@ class MongoSearcher:
             raise ValueError("row verifier requires a canonical identity payload")
         if self._row_verifier is None and self._row_verifier_identity is not None:
             raise ValueError("row verifier identity requires a row verifier")
+
+    def _next_link_index(self) -> int:
+        """Return a fresh index for a weak-link ``$lookup`` array field."""
+        index = self._link_index
+        self._link_index += 1
+        return index
 
     def variable(self, target: type) -> MongoVariable:
         """Bind a query variable; each additional one must be join-connected."""
@@ -850,6 +1231,7 @@ class MongoSearcher:
 
     def output(self, variable: MongoVariable | MongoField, name: str) -> None:
         """Declare an object variable or scalar field output."""
+        _reject_link_output(variable)
         if not isinstance(variable, (MongoVariable, MongoField)):
             raise TypeError(f"output() takes a Mongo variable or field, got {type(variable).__name__}")
         self._outputs.append(_MongoOutput(name, variable))
@@ -1075,6 +1457,10 @@ class MongoSearcher:
             raise ValueError("this searcher has no query variables; call variable() first")
         self._require_verifier_identity()
         pipeline = self._lookup_stages()
+        # Weak-link arrays depend only on the source document's logical_id (and,
+        # for a lookup-variable source, its already-unwound alias), so they follow
+        # the reference lookups and precede the truth match that reads them.
+        pipeline.extend(self._link_lookups)
         pipeline.append({"$match": self._truth_filter()})
         if self._only_main_alt:
             pipeline.extend(self._main_alt_stages())
@@ -1183,6 +1569,8 @@ class MongoSearcher:
 
     def results(self, **outputs: Any) -> Any:
         """Return a materialized :class:`~httk.store.backend.mongo.results.MongoResultSet` for this query."""
+        for value in outputs.values():
+            _reject_link_output(value)
         selected = [_MongoOutput(name, value) for name, value in outputs.items()] if outputs else None
         return __import__("httk.store.backend.mongo.results", fromlist=["MongoResultSet"]).MongoResultSet(
             self, selected

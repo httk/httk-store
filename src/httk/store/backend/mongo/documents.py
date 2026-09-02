@@ -184,13 +184,18 @@ def _decode_child(spec: FieldSpec, value: Any, resolve_reference: Callable[[type
 
 
 def decode_record(
-    schema: TableSchema, document: Mapping[str, Any], resolve_reference: Callable[[type, int], Any]
+    schema: TableSchema,
+    document: Mapping[str, Any],
+    resolve_reference: Callable[[type, int], Any],
+    *,
+    record_class: type | None = None,
 ) -> Any:
     """Decode a MongoDB record document into its concrete storable instance.
 
     :param schema: The resolved record schema.
     :param document: The complete MongoDB record document.
     :param resolve_reference: Callback hydrating a referenced sid.
+    :param record_class: An alternate (store-bound) subclass of ``schema.cls`` to construct instead of ``schema.cls``.
     :return: A concrete record instance.
     """
     fields = {item.field: item for item in document_fields_for(schema)}
@@ -220,7 +225,7 @@ def decode_record(
             assert spec.target is not None
             sid = embedded.get(plan.keys[0])
             values[spec.field] = None if sid is None else resolve_reference(spec.target, int(sid))
-    return schema.cls(**values)
+    return (record_class or schema.cls)(**values)
 
 
 def preflight_document(document: Mapping[str, Any], max_bson_size: int, record_type: type) -> None:

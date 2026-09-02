@@ -6,7 +6,7 @@ from typing import Any, Final
 
 from pymongo import ReturnDocument
 
-from httk.store.backend.schema import FieldSpec, TableSchema
+from httk.store.backend.schema import FieldSpec, LinkSpec, TableSchema
 from httk.store.storage_layout import EntryFamilyLayout
 
 __all__ = [
@@ -21,6 +21,8 @@ __all__ = [
     "document_fields_for",
     "entry_dispatch_table_name",
     "index_specs_for",
+    "link_index_specs_for",
+    "link_validator_for",
     "validator_for",
 ]
 
@@ -435,6 +437,57 @@ def dispatch_index_specs(family: EntryFamilyLayout) -> list[IndexSpec]:
             _index_name("uq", collection, ("record", "sid")),
             True,
         )
+    ]
+
+
+def link_validator_for(link: LinkSpec, *, store_timestamps: bool = True) -> dict[str, Any]:
+    """Build the writer-owned ``$jsonSchema`` validator for a weak-link collection.
+
+    A link document is ``{_id (sid), logical_id, source_lid, target_lid,
+    retracted[, store_timestamp]}``; ``store_timestamp`` is required exactly when
+    the store keeps timestamps, mirroring the parent-record convention.
+
+    :param link: The resolved weak-link declaration.
+    :param store_timestamps: Whether link documents require a timestamp.
+    :return: A MongoDB collection validator command fragment.
+    """
+    properties: dict[str, Any] = {
+        "_id": {"bsonType": ["int", "long"]},
+        "logical_id": {"bsonType": ["int", "long"]},
+        "source_lid": {"bsonType": ["int", "long"]},
+        "target_lid": {"bsonType": ["int", "long"]},
+        "retracted": {"bsonType": ["int", "long"]},
+    }
+    required = ["_id", "logical_id", "source_lid", "target_lid", "retracted"]
+    if store_timestamps:
+        properties["store_timestamp"] = {"bsonType": ["long", "int"]}
+        required.append("store_timestamp")
+    return {
+        "$jsonSchema": {
+            "bsonType": "object",
+            "required": required,
+            "properties": properties,
+            "additionalProperties": False,
+        }
+    }
+
+
+def link_index_specs_for(link: LinkSpec) -> list[IndexSpec]:
+    """Derive a weak-link collection's indexes: ``(source_lid, target_lid)`` and ``(target_lid)``.
+
+    :param link: The resolved weak-link declaration.
+    :return: The deterministically ordered link index specifications.
+    """
+    collection = link.table_name
+    return [
+        IndexSpec(
+            (("source_lid", 1), ("target_lid", 1)),
+            _index_name("ix", collection, ("source_lid", "target_lid")),
+        ),
+        IndexSpec(
+            (("target_lid", 1),),
+            _index_name("ix", collection, ("target_lid",)),
+        ),
     ]
 
 

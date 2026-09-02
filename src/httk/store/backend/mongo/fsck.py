@@ -322,7 +322,10 @@ def _report_unattributed_collections(
     expected_dispatch = {
         entry_dispatch_table_name(family.name) for family in store.layout.families if len(family.records) > 1
     }
-    reserved = {METADATA_COLLECTION, COUNTERS_COLLECTION, *expected_dispatch}
+    # Weak-link collections (``_httk_link_*``) are reserved but attributable to a
+    # known source schema, so they are not "unrecognized reserved collections".
+    expected_links = {link.table_name for schema in schemas.values() for link in schema.links}
+    reserved = {METADATA_COLLECTION, COUNTERS_COLLECTION, *expected_dispatch, *expected_links}
     unattributed: list[str] = []
     for name in store._database.database.list_collection_names():
         if name.startswith("system.") or name in schemas or name in reserved:
@@ -355,6 +358,92 @@ def _sweep(
             query["_id"] = {"$nin": list(survivors)}
         result = collection.delete_many(query)
         counters[collection_name].deleted += result.deleted_count
+
+
+def _lineage_ids(store: MongoStore, collection_name: str) -> set[int]:
+    """The distinct ``logical_id`` values of a parent collection."""
+    return {
+        int(value) for value in store._database.database[collection_name].distinct("logical_id") if value is not None
+    }
+
+
+def _check_links(
+    store: MongoStore,
+    schemas: Mapping[str, TableSchema],
+    counters: dict[str, _Counters],
+    violations: list[str],
+) -> None:
+    """Verify weak-link collections: valid ``retracted``, lineage integrity, no dangling endpoints.
+
+    Weak links are not ownership/reachability edges: this only reports, retains
+    no documents, and never affects the garbage sweep. A pair carrying more than
+    one lineage (a tolerated concurrency outcome) is a REPAIRABLE note, not
+    corruption, and is not counted as a conflict.
+    """
+    existing = set(store._database.database.list_collection_names())
+    for schema in schemas.values():
+        source_lids: set[int] | None = None
+        for link in schema.links:
+            name = link.table_name
+            if name not in existing:
+                continue
+            if source_lids is None:
+                source_lids = _lineage_ids(store, collection_name_for(schema))
+            target_name = collection_name_for(resolve_schema(link.target))
+            target_lids = _lineage_ids(store, target_name) if target_name in existing else set()
+            lineage_min_sid: dict[int, int] = {}
+            pair_lineages: dict[tuple[int, int], set[int]] = {}
+            for document in store._database.database[name].find():
+                sid, logical_id = int(document["_id"]), int(document["logical_id"])
+                source_lid, target_lid = int(document["source_lid"]), int(document["target_lid"])
+                retracted = int(document["retracted"])
+                counters[name].examined += 1
+                if retracted not in (0, 1):
+                    _record_violation(
+                        violations,
+                        counters,
+                        name,
+                        f"link collection {name!r} sid {sid} has invalid retracted {retracted!r}",
+                    )
+                previous = lineage_min_sid.get(logical_id)
+                if previous is None or sid < previous:
+                    lineage_min_sid[logical_id] = sid
+                pair_lineages.setdefault((source_lid, target_lid), set()).add(logical_id)
+                if source_lid not in source_lids:
+                    _record_violation(
+                        violations,
+                        counters,
+                        name,
+                        f"link collection {name!r} sid {sid} source_lid {source_lid} matches no "
+                        f"{collection_name_for(schema)!r} logical_id",
+                    )
+                if target_lid not in target_lids:
+                    _record_violation(
+                        violations,
+                        counters,
+                        name,
+                        f"link collection {name!r} sid {sid} target_lid {target_lid} matches no "
+                        f"{target_name!r} logical_id",
+                    )
+            for logical_id, min_sid in lineage_min_sid.items():
+                if logical_id != min_sid:
+                    _record_violation(
+                        violations,
+                        counters,
+                        name,
+                        f"link collection {name!r} lineage logical_id {logical_id} does not equal its "
+                        f"founder sid {min_sid}",
+                    )
+            for (source_lid, target_lid), lineages in pair_lineages.items():
+                if len(lineages) > 1:
+                    # A tolerated concurrency outcome: a repairable note, not
+                    # corruption, so it is NOT counted through _record_violation.
+                    message = (
+                        f"link collection {name!r} pair ({source_lid}, {target_lid}) carries {len(lineages)} "
+                        "lineages; deduplicating is a repairable, non-corrupting note"
+                    )
+                    violations.append(message)
+                    _LOGGER.warning("MongoStore fsck: %s", message, extra={"context": "storage"})
 
 
 def run_fsck(
@@ -408,6 +497,7 @@ def run_fsck(
             )
             if repair:
                 _integrity_pass(store, schemas, counters, violations, repair_conflicts=repair_conflicts, lease=lease)
+            _check_links(store, schemas, counters, violations)
             marked = _mark(store, schemas, counters, violations, lease=lease)
             if collect_garbage and unattributed:
                 message = (

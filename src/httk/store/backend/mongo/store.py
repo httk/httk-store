@@ -1,7 +1,9 @@
 """MongoDB store layout initialization and collection preparation."""
 
 import contextlib
+import dataclasses
 import datetime
+import functools
 import logging
 import threading
 import time
@@ -25,7 +27,7 @@ from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
 from httk.store.backend.codecs import codec_named, decode_fracvector_exact
-from httk.store.backend.schema import SchemaError, resolve_schema
+from httk.store.backend.schema import LinkSpec, SchemaError, TableSchema, resolve_schema
 from httk.store.storage_layout import (
     ADDITIVE_UPGRADE_HINT,
     DECLARATION_PROTOCOL_VERSION,
@@ -53,6 +55,7 @@ from httk.store.store_common import (
     EntryReplacementError,
     IdentityCaches,
     SaveProjection,
+    _LinksAccessor,
     _metadata_plan,
     reject_cursor_proxy,
 )
@@ -79,6 +82,8 @@ from .mapping import (
     document_fields_for,
     entry_dispatch_table_name,
     index_specs_for,
+    link_index_specs_for,
+    link_validator_for,
     validator_for,
 )
 
@@ -86,6 +91,7 @@ __all__ = ["MongoStore", "StoreClockRegressionError"]
 
 _DOCUMENT_LAYOUT = "mongo-v2"
 _RESERVED_PREFIX = "_httk_"
+_LINK_COLLECTION_PREFIX = "_httk_link_"
 _METADATA_KEYS = frozenset(
     {
         "_id",
@@ -99,6 +105,96 @@ _METADATA_KEYS = frozenset(
 )
 _LOGGER = logging.getLogger("httk.store.backend.mongo")
 _TRANSACTION_ATTEMPTS = 5
+_MISSING = object()
+_BOUND_STORE = "_httk_bound_store"
+_BOUND_LID = "_httk_bound_lid"
+_BOUND_LINKS = "_httk_bound_links"
+
+
+def _iter_link_targets(targets: object) -> typing.Iterator[Any]:
+    """Yield one target, or each target of an iterable-of-targets (list/tuple/set)."""
+    if isinstance(targets, (list, tuple, set, frozenset)):
+        yield from targets
+    else:
+        yield targets
+
+
+class _LinksDescriptor:
+    """The ``links`` non-data descriptor of a fetched, store-bound record.
+
+    Mirrors the SQL ``row_class`` accessor: it reads the hidden store reference
+    and lineage id set on the instance by :meth:`MongoStore._fetch`, then returns
+    a memoized shared :class:`~httk.store.store_common._LinksAccessor`. A plain,
+    unbound instance carries neither and so simply has no ``links`` attribute.
+    """
+
+    __slots__ = ("_specs",)
+
+    def __init__(self, specs: tuple[LinkSpec, ...]) -> None:
+        self._specs = specs
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        try:
+            store = instance.__dict__[_BOUND_STORE]
+            lid = instance.__dict__[_BOUND_LID]
+        except KeyError:
+            raise AttributeError("links") from None
+        cached = instance.__dict__.get(_BOUND_LINKS, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        accessor = _LinksAccessor(self._specs, lambda spec: store._linked_by_lid(spec, lid))
+        object.__setattr__(instance, _BOUND_LINKS, accessor)
+        return accessor
+
+
+@functools.cache
+def _bound_record_class(cls: type) -> type:
+    """Return the cached thin subclass of a link-declaring record with a ``.links`` accessor.
+
+    The subclass keeps the base dataclass behaviour intact — equality, hash and
+    repr compare the same fields and treat a bound instance and a plain one as
+    equal — and adds only the ``links`` descriptor plus the hidden store/lid slots
+    set by :meth:`MongoStore._fetch`.
+    """
+    specs = resolve_schema(cls).links
+    fields = dataclasses.fields(cls)
+    compare_fields = tuple(field for field in fields if field.compare)
+    hash_fields = tuple(field for field in fields if field.hash is True or (field.hash is None and field.compare))
+    repr_fields = tuple(field for field in fields if field.repr)
+    bound_type: type
+
+    def eq(self: Any, other: Any) -> Any:
+        if type(other) is not cls and type(other) is not bound_type:
+            return NotImplemented
+        return tuple(getattr(self, field.name) for field in compare_fields) == tuple(
+            getattr(other, field.name) for field in compare_fields
+        )
+
+    def ne(self: Any, other: Any) -> Any:
+        result = eq(self, other)
+        return NotImplemented if result is NotImplemented else not result
+
+    def bound_hash(self: Any) -> int:
+        return hash(tuple(getattr(self, field.name) for field in hash_fields))
+
+    def bound_repr(self: Any) -> str:
+        values = ", ".join(f"{field.name}={getattr(self, field.name)!r}" for field in repr_fields)
+        return f"{cls.__qualname__}({values})"
+
+    attrs: dict[str, Any] = {
+        "__module__": cls.__module__,
+        "__httk_storage_record__": cls,
+        "__httk_row_base__": cls,
+        "__eq__": eq,
+        "__ne__": ne,
+        "__hash__": bound_hash,
+        "__repr__": bound_repr,
+        "links": _LinksDescriptor(specs),
+    }
+    bound_type = type(f"{cls.__name__}Linked", (cls,), attrs)
+    return bound_type
 
 
 class _AlternativeRequest(typing.NamedTuple):
@@ -418,6 +514,12 @@ class MongoStore:
         }
         problems: dict[str, object] = {}
         for name in collection_names:
+            # Weak-link collections (``_httk_link_*``) belong to storable source
+            # classes that need not be declared to reopen a store (e.g. non-entry
+            # records), so they cannot be enumerated here; fsck attributes and
+            # structurally validates them instead.
+            if name.startswith(_LINK_COLLECTION_PREFIX):
+                continue
             if name.startswith(_RESERVED_PREFIX) and name not in expected_reserved:
                 problems[name] = {
                     "reserved": True,
@@ -522,6 +624,20 @@ class MongoStore:
                     )
                 )
                 seen.add(name)
+            # A source class's weak-link collections are created together with
+            # its own collection, so the searcher and linked() may assume they
+            # exist whenever the source collection does (SQL parity).
+            for link in schema.links:
+                if link.table_name in seen:
+                    continue
+                requested.append(
+                    (
+                        link.table_name,
+                        link_validator_for(link, store_timestamps=self._store_timestamps),
+                        link_index_specs_for(link),
+                    )
+                )
+                seen.add(link.table_name)
             for family in self.layout.families:
                 if cls not in family.records or len(family.records) < 2:
                     continue
@@ -576,17 +692,26 @@ class MongoStore:
             self._store_timestamp_mark = None
             return
         maximum: int | None = None
-        names = {
-            name
-            for name in self._database.database.list_collection_names()
-            if not name.startswith("system.") and not name.startswith(_RESERVED_PREFIX)
+        all_names = self._database.database.list_collection_names()
+        record_names = {
+            name for name in all_names if not name.startswith("system.") and not name.startswith(_RESERVED_PREFIX)
         }
-        for name in names:
-            collection = self._database.database[name]
-            document = collection.find_one(
+        # Weak-link revisions carry the same clock as record saves, so a link
+        # holding the newest timestamp must advance the reopen mark too (SQL
+        # parity). Link docs have no ``_httk_role``, so scan them unfiltered.
+        link_names = {name for name in all_names if name.startswith(_LINK_COLLECTION_PREFIX)}
+        for name in record_names:
+            document = self._database.database[name].find_one(
                 {"_httk_role": {"$in": ["main", "dep"]}},
                 {"store_timestamp": 1},
                 sort=[("store_timestamp", -1)],
+            )
+            if document is not None and document.get("store_timestamp") is not None:
+                value = int(document["store_timestamp"])
+                maximum = value if maximum is None else max(maximum, value)
+        for name in link_names:
+            document = self._database.database[name].find_one(
+                {}, {"store_timestamp": 1}, sort=[("store_timestamp", -1)]
             )
             if document is not None and document.get("store_timestamp") is not None:
                 value = int(document["store_timestamp"])
@@ -803,6 +928,7 @@ class MongoStore:
         id_series: str | None = None,
         alternative_of: str | None = None,
         alternative_kind: str | None = None,
+        links: Mapping[str, object] | None = None,
     ) -> int:
         """Store an object graph and return its integer sid.
 
@@ -818,6 +944,7 @@ class MongoStore:
         :param id_series: Override the configured entry-id series when an id must be minted.
         :param alternative_of: The stored main entry's id this record is an alternative of, if any.
         :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
+        :param links: Weak links to add after saving, mapping each declared link name to a target or iterable of targets; the save and every link are applied in one atomic transaction.
         :return: The stored sid.
         :raises TypeError: If ``obj`` is a cursor proxy.
         :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing collection, or itself an alternative.
@@ -830,14 +957,26 @@ class MongoStore:
             raise ValueError(
                 f"invalid alternative_kind {alternative_kind!r}; expected {ALTERNATIVE_KIND_PATTERN.pattern}"
             )
-        return self._save_graph(
-            obj,
-            as_record=as_record,
-            replace_logical_id=None,
-            id_series=id_series,
-            alternative_of=alternative_of,
-            alternative_kind=alternative_kind,
-        )
+        if not links:
+            return self._save_graph(
+                obj,
+                as_record=as_record,
+                replace_logical_id=None,
+                id_series=id_series,
+                alternative_of=alternative_of,
+                alternative_kind=alternative_kind,
+            )
+        with self.transaction():
+            sid = self._save_graph(
+                obj,
+                as_record=as_record,
+                replace_logical_id=None,
+                id_series=id_series,
+                alternative_of=alternative_of,
+                alternative_kind=alternative_kind,
+            )
+            self._apply_save_links(resolve_storage_record(obj, as_record=as_record), sid, links)
+        return sid
 
     def _save_graph(
         self,
@@ -1620,11 +1759,20 @@ class MongoStore:
         if document is None:
             raise KeyError(cls, int(sid))
         self._prefetch_references(schema, document, context)
+        # A class declaring weak links is fetched as a cached thin subclass
+        # carrying the store reference and its lineage id, so ``.links`` resolves
+        # on the fetched record. Identity-cache/pending hits above return the
+        # user's plain saved instance without ``.links`` (documented limitation).
+        record_class = _bound_record_class(cls) if schema.links else None
         instance = decode_record(
             schema,
             document,
             lambda target, target_sid: self._fetch(target, target_sid, context),
+            record_class=record_class,
         )
+        if record_class is not None:
+            object.__setattr__(instance, _BOUND_STORE, self)
+            object.__setattr__(instance, _BOUND_LID, int(document["logical_id"]))
         self._remember(cls, int(sid), instance)
         return instance
 
@@ -1775,7 +1923,14 @@ class MongoStore:
         self._remember(record_type, sid, obj, cache_instance=type(obj) is record_type)
         return sid
 
-    def replace(self, predecessor: Any, obj: Any, *, id_series: str | None = None) -> int:
+    def replace(
+        self,
+        predecessor: Any,
+        obj: Any,
+        *,
+        id_series: str | None = None,
+        links: Mapping[str, object] | None = None,
+    ) -> int:
         """Store ``obj`` as a logical replacement of ``predecessor`` and return its sid.
 
         The saved document copies ``predecessor``'s ``logical_id`` (its lineage
@@ -1796,13 +1951,26 @@ class MongoStore:
         existing sid, while a different lineage raises
         :class:`~httk.store.store_common.EntryReplacementError`.
 
+        ``links`` optionally adds weak links to the replacement's lineage, as in
+        :meth:`save`; the replace and every link are applied in one atomic
+        transaction.
+
         :param predecessor: The stored instance being replaced; it must have been stored or fetched through this store.
         :param obj: The replacement object to store.
         :param id_series: Override the configured entry-id series when an id must be minted.
+        :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
         :return: The stored replacement document's sid.
         :raises ValueError: If ``predecessor`` is not known to this store, or ``obj``'s record collection differs from ``predecessor``'s.
         :raises ~httk.store.store_common.EntryReplacementError: If ``obj`` deduplicates onto a document from a different lineage.
         """
+        if links:
+            with self.transaction():
+                sid = self._replace_core(predecessor, obj, id_series)
+                self._apply_save_links(resolve_storage_record(obj), sid, links)
+            return sid
+        return self._replace_core(predecessor, obj, id_series)
+
+    def _replace_core(self, predecessor: Any, obj: Any, id_series: str | None) -> int:
         predecessor_sid = self.sid_of(predecessor)
         if predecessor_sid is None:
             raise ValueError(
@@ -1853,6 +2021,276 @@ class MongoStore:
             replace_alt_kind=(predecessor_alt_kind if isinstance(predecessor_alt_kind, str) else None),
             replace_alt_main_id=alt_main_id,
         )
+
+    # ------------------------------------------------------------------ weak links
+
+    def _link_spec(self, source_cls: type, name: str) -> LinkSpec:
+        """Resolve the source class's declared weak link named ``name``."""
+        schema = resolve_schema(source_cls)
+        for spec in schema.links:
+            if spec.name == name:
+                return spec
+        declared = ", ".join(link.name for link in schema.links) or "none"
+        raise SchemaError(f"{source_cls.__name__} declares no weak link named {name!r} (declared links: {declared})")
+
+    def _lid_from_sid(self, schema: TableSchema, sid: int) -> int:
+        """The lineage id (``logical_id``) of the document ``sid`` in ``schema``'s collection."""
+        document = self._database.database[collection_name_for(schema)].find_one(
+            {"_id": int(sid)}, {"logical_id": 1}, **self._session_kwargs()
+        )
+        if document is None:
+            raise ValueError(f"no {schema.cls.__name__} document exists for sid {sid}")
+        return int(document["logical_id"])
+
+    def _lid_of(self, cls: type, obj: Any) -> int:
+        """The lineage id of ``obj`` in ``cls``'s collection; raises if ``obj`` is not stored."""
+        sid = self.sid_of(obj, as_record=cls)
+        if sid is None:
+            raise ValueError(f"the {type(obj).__name__} instance has not been stored or fetched through this store")
+        return self._lid_from_sid(resolve_schema(cls), sid)
+
+    def _link_target_lid(self, spec: LinkSpec, target: Any, source_cls: type, name: str) -> int:
+        """Validate ``target``'s type against ``spec`` and resolve its lineage id."""
+        target_cls = resolve_storage_record(target)
+        if collection_name_for(resolve_schema(target_cls)) != collection_name_for(resolve_schema(spec.target)):
+            raise TypeError(
+                f"weak link {name!r} on {source_cls.__name__} expects a {spec.target.__name__} target, "
+                f"got {target_cls.__name__}"
+            )
+        return self._lid_of(target_cls, target)
+
+    def _latest_link_by_lineage(self, spec: LinkSpec, source_lid: int, target_lid: int) -> dict[int, tuple[int, int]]:
+        """Map each pair lineage (``logical_id``) to its latest ``(sid, retracted)``."""
+        collection = self._database.database[spec.table_name]
+        latest: dict[int, tuple[int, int]] = {}
+        for row in collection.find(
+            {"source_lid": source_lid, "target_lid": target_lid},
+            {"logical_id": 1, "_id": 1, "retracted": 1},
+            **self._session_kwargs(),
+        ):
+            lineage = int(row["logical_id"])
+            sid, retracted = int(row["_id"]), int(row["retracted"])
+            previous = latest.get(lineage)
+            if previous is None or sid > previous[0]:
+                latest[lineage] = (sid, retracted)
+        return latest
+
+    def _insert_link_row(
+        self,
+        spec: LinkSpec,
+        *,
+        logical_id: int | None,
+        source_lid: int,
+        target_lid: int,
+        retracted: int,
+        store_timestamp: int | None,
+    ) -> None:
+        """Append one link revision. ``logical_id=None`` founds a fresh own-sid lineage.
+
+        Mongo mints the sid up front (unlike SQL's write-after-insert), so a
+        fresh lineage simply sets ``logical_id`` to that sid before the insert.
+        """
+        sid = counter_next(self._database.database, spec.table_name, session=self._write_session())
+        document: dict[str, Any] = {
+            "_id": sid,
+            "logical_id": sid if logical_id is None else logical_id,
+            "source_lid": source_lid,
+            "target_lid": target_lid,
+            "retracted": retracted,
+        }
+        if store_timestamp is not None:
+            document["store_timestamp"] = store_timestamp
+        self._database.database[spec.table_name].insert_one(document, **self._session_kwargs())
+
+    def _do_link(
+        self,
+        spec: LinkSpec,
+        source_lid: int,
+        target_lid: int,
+        store_timestamp: int | None,
+    ) -> None:
+        """Idempotently assert the pair ``(source_lid, target_lid)`` is linked."""
+        latest = self._latest_link_by_lineage(spec, source_lid, target_lid)
+        if any(retracted == 0 for _sid, retracted in latest.values()):
+            return  # some lineage is already live: no-op
+        self._insert_link_row(
+            spec,
+            # All lineages retracted: revive the max-logical_id one. None founds a fresh lineage.
+            logical_id=max(latest) if latest else None,
+            source_lid=source_lid,
+            target_lid=target_lid,
+            retracted=0,
+            store_timestamp=store_timestamp,
+        )
+
+    def _do_unlink(
+        self,
+        spec: LinkSpec,
+        source_lid: int,
+        target_lid: int,
+        store_timestamp: int | None,
+    ) -> None:
+        """Retract every live lineage of the pair ``(source_lid, target_lid)``."""
+        latest = self._latest_link_by_lineage(spec, source_lid, target_lid)
+        for lineage, (_sid, retracted) in latest.items():
+            if retracted == 0:
+                self._insert_link_row(
+                    spec,
+                    logical_id=lineage,
+                    source_lid=source_lid,
+                    target_lid=target_lid,
+                    retracted=1,
+                    store_timestamp=store_timestamp,
+                )
+
+    def _apply_save_links(self, source_cls: type, source_sid: int, links: Mapping[str, object]) -> None:
+        """Add each declared link for the just-saved document, inside the open save transaction."""
+        transaction = self._current_transaction()
+        assert transaction is not None, "_apply_save_links runs inside an open transaction"
+        source_lid = self._lid_from_sid(resolve_schema(source_cls), source_sid)
+        for name, targets in links.items():
+            spec = self._link_spec(source_cls, name)
+            for target in _iter_link_targets(targets):
+                target_lid = self._link_target_lid(spec, target, source_cls, name)
+                self._do_link(spec, source_lid, target_lid, transaction.store_timestamp)
+
+    def _link_timestamp(self) -> int | None:
+        """Capture (once per transaction) the store timestamp for a link revision."""
+        transaction = self._current_transaction()
+        assert transaction is not None, "_link_timestamp runs inside an open transaction"
+        if not transaction.timestamp_initialized:
+            transaction.store_timestamp = self._capture_store_timestamp()
+            transaction.timestamp_initialized = True
+        return transaction.store_timestamp
+
+    def link(self, source: Any, name: str, target: Any) -> None:
+        """Assert a weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+        Weak links live in a dedicated append-only link collection and bind
+        *lineages*: both endpoints always resolve to their latest revision. The
+        operation is idempotent per the pair ``(source lineage, target
+        lineage)`` — a live pair is a no-op, a retracted pair is revived, an
+        absent pair founds a fresh link lineage — and duplicate pair lineages
+        (from concurrent writers, which Mongo transactions do not exclude) are
+        tolerated: the pair is live if any lineage is live.
+
+        :param source: The stored source instance declaring the link.
+        :param name: The declared weak-link name.
+        :param target: The stored target instance whose type matches the link declaration.
+        :return: None.
+        :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+        :raises TypeError: If ``target``'s type does not match the link's declared target.
+        :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+        :raises TransactionsUnavailableError: If this store is in degraded mode.
+        """
+        source_cls = resolve_storage_record(source)
+        spec = self._link_spec(source_cls, name)
+        if self._current_transaction() is None:
+            self._ensure_graph_collections(source_cls)
+            self._ensure_counter_collection()
+        with self.transaction():
+            store_timestamp = self._link_timestamp()
+            source_lid = self._lid_of(source_cls, source)
+            target_lid = self._link_target_lid(spec, target, source_cls, name)
+            self._do_link(spec, source_lid, target_lid, store_timestamp)
+
+    def unlink(self, source: Any, name: str, target: Any) -> None:
+        """Retract the weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+        Retracts every live lineage of the pair (duplicate-tolerant); an absent
+        or already-retracted pair is a no-op. Retraction appends a revision — no
+        document is deleted, and history/``as_of`` still see the earlier live rows.
+
+        :param source: The stored source instance declaring the link.
+        :param name: The declared weak-link name.
+        :param target: The stored target instance whose type matches the link declaration.
+        :return: None.
+        :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+        :raises TypeError: If ``target``'s type does not match the link's declared target.
+        :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+        :raises TransactionsUnavailableError: If this store is in degraded mode.
+        """
+        source_cls = resolve_storage_record(source)
+        spec = self._link_spec(source_cls, name)
+        if self._current_transaction() is None:
+            self._ensure_graph_collections(source_cls)
+            self._ensure_counter_collection()
+        with self.transaction():
+            store_timestamp = self._link_timestamp()
+            source_lid = self._lid_of(source_cls, source)
+            target_lid = self._link_target_lid(spec, target, source_cls, name)
+            self._do_unlink(spec, source_lid, target_lid, store_timestamp)
+
+    def linked(self, source: Any, name: str, *, eager: bool = False) -> tuple[Any, ...]:
+        """Return the latest revisions of the targets currently linked from ``source`` under ``name``.
+
+        Targets are deduplicated by lineage and ordered by first-link order (the
+        link lineage's root ``logical_id``, ascending; stable across
+        retract+relink). Each returned object is the latest revision of its
+        target lineage. ``eager`` is accepted for interface parity with the SQL
+        store; a Mongo fetch is always fully materialized.
+
+        :param source: The stored source instance declaring the link.
+        :param name: The declared weak-link name.
+        :param eager: Accepted for interface parity; a materialized record is always returned.
+        :return: The linked targets' latest revisions, deduplicated and ordered by first-link order.
+        :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+        :raises ValueError: If ``source`` is not stored in this store.
+        """
+        source_cls = resolve_storage_record(source)
+        spec = self._link_spec(source_cls, name)
+        source_lid = self._lid_of(source_cls, source)
+        return self._linked_by_lid(spec, source_lid)
+
+    def _linked_by_lid(self, spec: LinkSpec, source_lid: int) -> tuple[Any, ...]:
+        """Latest live-linked targets of ``source_lid`` under ``spec`` (the query core of :meth:`linked`).
+
+        Shared by :meth:`linked` (which resolves the source lineage id first) and
+        the fetched record's ``.links`` accessor (which already holds the lineage
+        id). Targets are deduplicated by lineage and ordered by first-link order;
+        each is the latest revision of its target lineage.
+        """
+        collection = self._database.database[spec.table_name]
+        latest: dict[int, tuple[int, int, int]] = {}  # logical_id -> (sid, retracted, target_lid)
+        for row in collection.find(
+            {"source_lid": source_lid},
+            {"target_lid": 1, "logical_id": 1, "_id": 1, "retracted": 1},
+            **self._session_kwargs(),
+        ):
+            lineage = int(row["logical_id"])
+            sid, retracted, target_lid = (
+                int(row["_id"]),
+                int(row["retracted"]),
+                int(row["target_lid"]),
+            )
+            previous = latest.get(lineage)
+            if previous is None or sid > previous[0]:
+                latest[lineage] = (sid, retracted, target_lid)
+        live_root: dict[int, int] = {}  # target_lid -> smallest live lineage root
+        for lineage, (_sid, retracted, target_lid) in latest.items():
+            if retracted != 0:
+                continue
+            existing = live_root.get(target_lid)
+            if existing is None or lineage < existing:
+                live_root[target_lid] = lineage
+        ordered_target_lids = [
+            target_lid for target_lid, _root in sorted(live_root.items(), key=lambda item: (item[1], item[0]))
+        ]
+        if not ordered_target_lids:
+            return ()
+        target_schema = resolve_schema(spec.target)
+        target_collection = self._database.database[collection_name_for(target_schema)]
+        target_sids: list[int] = []
+        for target_lid in ordered_target_lids:
+            document = target_collection.find_one(
+                {"logical_id": target_lid},
+                {"_id": 1},
+                sort=[("_id", -1)],
+                **self._session_kwargs(),
+            )
+            if document is not None:  # a missing target is a dangling link; fsck reports it
+                target_sids.append(int(document["_id"]))
+        return tuple(self.fetch_many(spec.target, target_sids))
 
     def history(self, obj: Any) -> tuple[Any, ...]:
         """Return every record in ``obj``'s replacement lineage, oldest first.

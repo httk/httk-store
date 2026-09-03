@@ -157,6 +157,10 @@ nitpick_ignore = [
     # StoredPropertyProjection is new in the sibling core workspace; the
     # committed release inventory cannot name it until core is released.
     ("py:class", "httk.core.storage.StoredPropertyProjection"),
+    # StrongLink is likewise new in the sibling core workspace (the provenance
+    # edge marker); the committed release inventory cannot name it until core is
+    # released, so its cross-reference is ignored exactly as the sibling markers.
+    ("py:class", "httk.core.storage.StrongLink"),
     # AutoAPI renders ResultSetLike.one as a bare method reference in the
     # protocol and implementing result-set summaries.  There is no module-level
     # ``one`` method for Sphinx to resolve; the qualified class members remain

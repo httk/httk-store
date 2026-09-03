@@ -7,7 +7,8 @@ from fractions import Fraction
 from typing import Annotated, ClassVar
 
 import pytest
-from httk.core import EntryTypeDefinition, FracVector, RelatedEntry
+from httk.core import EntryTypeDefinition, FracVector, RelatedEntry, Run, RunEdge, RunEntry
+from httk.core.data_records import RECORDS_DEFINITION_ID
 from httk.core.register import register_entry_family, register_entry_record
 from httk.core.storage import (
     IdentitySkip,
@@ -537,3 +538,60 @@ def test_optimade_adapter_consumes_mongo_provider_records(provider):
     )
     assert len(results) == 1
     assert results[0].values["_httk_custom_title"] == "Analytical Engines"
+
+
+@dataclass(frozen=True)
+class MongoRecordRow:
+    """A minimal ``records`` backing for Mongo provenance-edge parity."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="mongo_prov_record")
+
+    name: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+class MongoRecordFamily:
+    """The records family (prefixed wire name ``_httk_records``)."""
+
+    type = "records"
+    definition_id = RECORDS_DEFINITION_ID
+
+
+register_entry_family(
+    name="mongo-prov-records", family=f"{__name__}:MongoRecordFamily", definition_id=RECORDS_DEFINITION_ID
+)
+register_entry_record(name="mongo-prov-records-rec", family="mongo-prov-records", record=f"{__name__}:MongoRecordRow")
+
+
+def test_mongo_provider_forward_and_reverse_provenance_edges(mongo_test_database):
+    """Mongo forward/reverse StrongLink serving parity with the SQL provider."""
+    store = MongoStore(
+        mongo_test_database,
+        entry_records={RunEntry: Run, MongoRecordFamily: MongoRecordRow},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    rec = store.fetch(MongoRecordRow, store.save(MongoRecordRow("r")), eager=True).id
+    run = Run(
+        inputs=(RunEdge("in-rec", "records", rec),),
+        artifacts=(RunEdge("art-rec", "records", rec),),
+        source_id="ws:job",
+    )
+    run_id = store.fetch(Run, store.save(run), eager=True).id
+    provider = StoreEntryProvider(store, {"_httk_runs": Run, "_httk_records": MongoRecordRow})
+
+    forward = {e.relationship: e for e in dict(provider.relationships("_httk_runs"))[run_id]}
+    assert forward["_httk_has_input"] == RelatedEntry(
+        "_httk_records", rec, role="input", label="in-rec", relationship="_httk_has_input"
+    )
+    assert forward["_httk_has_artifact"] == RelatedEntry(
+        "_httk_records", rec, role="artifact", label="art-rec", relationship="_httk_has_artifact"
+    )
+
+    reverse = {e.relationship: e for e in dict(provider.relationships("_httk_records"))[rec]}
+    assert reverse["_httk_is_input"] == RelatedEntry(
+        "_httk_runs", run_id, role="input", label="in-rec", relationship="_httk_is_input"
+    )
+    assert reverse["_httk_is_artifact"] == RelatedEntry(
+        "_httk_runs", run_id, role="artifact", label="art-rec", relationship="_httk_is_artifact"
+    )

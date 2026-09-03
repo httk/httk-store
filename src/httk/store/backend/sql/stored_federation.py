@@ -27,11 +27,19 @@ from httk.store.backend.sql.mapping import (
     SOURCE_LID_COLUMN,
     TARGET_LID_COLUMN,
 )
+from httk.store.backend.sql.provenance_edges import (
+    StrongLinkFamily,
+    forward_run_edges,
+    reverse_run_edges,
+    strong_link_families,
+    wire_type_for_internal,
+)
 from httk.store.backend.sql.store import SqlStore, _served_definition
 from httk.store.backend.sql.stored_properties import (
     StoredPropertySqlCandidateStream,
     StoredPropertySqlPlan,
 )
+from httk.store.entry_providers import wire_relationship_key
 from httk.store.store_common import EntryStore
 
 # The relationship channel keyed by (wire-translated) related entry type.
@@ -383,7 +391,7 @@ class StoredEntryFederation:
         for candidate in visible:
             self._probe_candidate(candidate, as_of=as_of, revisions=revisions, alternatives=alternatives)
         rows = self._render_page(visible, fields, revisions=revisions, alternatives=alternatives)
-        collected = self._collect_relationships(visible)
+        collected = self._collect_relationships(visible, alternatives=alternatives)
         relationships = tuple(collected.get(id(candidate), _EMPTY_RELATIONSHIPS) for candidate in visible)
         return StoredEntryPage(rows, total_count, more, relationships)
 
@@ -775,26 +783,38 @@ class StoredEntryFederation:
         alternatives: bool = False,
     ) -> tuple[Mapping[str, Any], _RelatedMap]:
         row = self._row(candidate, fields, revisions=revisions, alternatives=alternatives)
-        collected = self._collect_relationships((candidate,))
+        collected = self._collect_relationships((candidate,), alternatives=alternatives)
         return row, collected.get(id(candidate), _EMPTY_RELATIONSHIPS)
 
-    def _collect_relationships(self, candidates: Sequence[_Candidate]) -> dict[int, _RelatedMap]:
-        """Collect exposed weak-link relationships for a page's candidates.
+    def _collect_relationships(
+        self, candidates: Sequence[_Candidate], *, alternatives: bool = False
+    ) -> dict[int, _RelatedMap]:
+        """Collect exposed weak-link and StrongLink relationships for a page's candidates.
 
         Candidates are grouped per ``(source, backing)`` by ``_Stream`` identity
-        exactly like :meth:`_render_page`, so each backing's link tables are
-        scanned once per group.  Only backings that declare exposed
-        ``WeakLink`` specs are scanned; every other group issues no query.  The
-        SQL scan mirrors the in-memory provider path
-        (``StoreEntryProvider._collect_weak_relationships``): links bind
-        lineages, retracted links are excluded, and each target resolves at its
-        lineage's latest revision.  Non-SQL sources are skipped (their
-        relationship serving is a separate backend concern).  Relationships
-        reflect the LIVE link state regardless of a page's ``as_of``: like the
-        lineage-level provider path, a retraction applies retroactively, so a
-        historic page pairs its rows with the current link state.
+        exactly like :meth:`_render_page`, so each backing's link and edge tables
+        are scanned once per group.  Three independent collections run per group,
+        each issuing no query when it does not apply:
+
+        - **Weak links**: exposed ``WeakLink`` specs on the backing, mirroring the
+          in-memory provider path (links bind lineages, retracted links excluded,
+          each target at its lineage's latest revision).
+        - **Forward StrongLink edges**: a run backing's own provenance edges under
+          their forward wire key (e.g. ``_httk_has_input``).
+        - **Reverse StrongLink edges**: the runs that point at each candidate,
+          derived by scanning THIS candidate's own source store's StrongLink
+          families (store-scoped, never global), lineage-level (only a run
+          lineage's latest main revision contributes). Reverse edges are
+          suppressed on an alternatives page: an alternative cell must not claim a
+          reverse relationship.
+
+        Non-SQL sources are skipped (their relationship serving is a separate
+        backend concern).  Relationships reflect the LIVE link/edge state
+        regardless of a page's ``as_of``, so a historic page pairs its rows with
+        the current state.
 
         :param candidates: The candidates whose relationships are collected.
+        :param alternatives: Whether this is an alternatives page (reverse edges suppressed).
         :return: Row relationships keyed by ``id(candidate)``; absent for a candidate carrying none.
         """
         groups: dict[int, list[_Candidate]] = {}
@@ -804,10 +824,19 @@ class StoredEntryFederation:
         for group in groups.values():
             store = group[0].stream.source.source.store
             backing = group[0].stream.backing
-            link_specs = [spec for spec in resolve_schema(backing).links if spec.exposed_relationship]
-            if not link_specs or not isinstance(store, SqlStore):
+            if not isinstance(store, SqlStore):
                 continue
-            self._collect_group_relationships(store, backing, link_specs, group, collected)
+            link_specs = [spec for spec in resolve_schema(backing).links if spec.exposed_relationship]
+            if link_specs:
+                self._collect_group_relationships(store, backing, link_specs, group, collected)
+            strong = strong_link_families(store)
+            forward_family = next((family for family in strong if family.backing is backing), None)
+            if forward_family is not None:
+                self._collect_forward_edges(store, forward_family, group, collected)
+            if not alternatives and strong:
+                internal_target = getattr(group[0].stream.source.source.entry_family, "type", None)
+                if isinstance(internal_target, str):
+                    self._collect_reverse_edges(store, internal_target, strong, group, collected)
         return {
             candidate_id: MappingProxyType(
                 {related: tuple(dict.fromkeys(entries)) for related, entries in mapping.items()}
@@ -847,6 +876,88 @@ class StoredEntryFederation:
             }
             for link_spec in link_specs:
                 self._collect_link(connection, store, link_spec, group, lid_by_sid, collected)
+
+    def _collect_forward_edges(
+        self,
+        store: SqlStore,
+        family: StrongLinkFamily,
+        group: Sequence[_Candidate],
+        collected: dict[int, dict[str, list[RelatedEntry]]],
+    ) -> None:
+        """Attach a run backing's own forward provenance edges to its candidates.
+
+        :param store: The SQL store backing this group.
+        :param family: The group backing's StrongLink family.
+        :param group: The candidates sharing this ``(source, backing)`` stream.
+        :param collected: The mutable relationship accumulator keyed by candidate id.
+        :return: None.
+        """
+        if store._missing_tables_for_read((family.backing,)):
+            return
+        with store._read_connection() as connection:
+            edges_by_sid = forward_run_edges(connection, store, family, [candidate.sid for candidate in group])
+        for candidate in group:
+            for (edge_type, edge_id, label), marker in edges_by_sid.get(int(candidate.sid), []):
+                key = wire_relationship_key(marker.relationship, family.definition_id)
+                collected.setdefault(id(candidate), {}).setdefault(key, []).append(
+                    RelatedEntry(
+                        wire_type_for_internal(store, edge_type),
+                        edge_id,
+                        role=marker.role,
+                        label=label,
+                        relationship=key,
+                    )
+                )
+
+    def _collect_reverse_edges(
+        self,
+        store: SqlStore,
+        internal_target: str,
+        families: Sequence[StrongLinkFamily],
+        group: Sequence[_Candidate],
+        collected: dict[int, dict[str, list[RelatedEntry]]],
+    ) -> None:
+        """Attach the reverse provenance edges naming runs that point at each candidate.
+
+        Reverse matching is against the candidate's raw stored id (F: custom
+        ``id_of`` remapping is not attempted).  Only this store's StrongLink
+        families are scanned, so a target served from a store without the run
+        family gets no reverse edges.
+
+        :param store: The candidate's own source store.
+        :param internal_target: The candidate family's internal (unprefixed) type name.
+        :param families: The store's StrongLink families whose reverse edges are derived.
+        :param group: The candidates sharing this ``(source, backing)`` stream.
+        :param collected: The mutable relationship accumulator keyed by candidate id.
+        :return: None.
+        """
+        # A revisions page shares one raw entry_id across every revision of a
+        # lineage, so a raw id maps to a LIST of candidates; each reverse hit
+        # must attach to all of them (not just the last in group order).
+        candidates_by_raw: dict[str, list[_Candidate]] = {}
+        for candidate in group:
+            candidates_by_raw.setdefault(candidate.entry_id, []).append(candidate)
+        target_ids = list(candidates_by_raw)
+        with store._read_connection() as connection:
+            for family in families:
+                if store._missing_tables_for_read((family.backing,)):
+                    continue
+                reverse = reverse_run_edges(connection, store, family, internal_target, target_ids)
+                for raw_id, hits in reverse.items():
+                    for run_id, label, marker in hits:
+                        if marker.reverse is None:
+                            continue
+                        key = wire_relationship_key(marker.reverse, family.definition_id)
+                        for candidate in candidates_by_raw.get(raw_id, ()):
+                            collected.setdefault(id(candidate), {}).setdefault(key, []).append(
+                                RelatedEntry(
+                                    family.wire_type,
+                                    run_id,
+                                    role=marker.role,
+                                    label=label,
+                                    relationship=key,
+                                )
+                            )
 
     def _collect_link(
         self,

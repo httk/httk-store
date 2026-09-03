@@ -49,7 +49,7 @@ resolved to the target lineage's latest revision id (links declared
 ``exposed_relationship=False`` are served nowhere).
 """
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 import sqlalchemy
@@ -71,8 +71,16 @@ from httk.store.backend.sql.mapping import (
     SOURCE_LID_COLUMN,
     TARGET_LID_COLUMN,
 )
+from httk.store.backend.sql.provenance_edges import (
+    forward_run_edges,
+    latest_main_run_sids,
+    reverse_run_edges,
+    strong_link_families,
+    wire_type_for_internal,
+)
 from httk.store.backend.sql.searcher import SqlColumn, _query_index
 from httk.store.backend.sql.store import SqlStore, _as_fixed_tensor
+from httk.store.entry_providers import wire_relationship_key
 from httk.store.query import ID_FIELD
 from httk.store.served_specs import _fulltype_of as _served_fulltype_of
 from httk.store.served_specs import served_specs
@@ -360,12 +368,25 @@ class StoreEntryProvider(EntryProvider):
                 row[name] = _json_value(schema, spec, getattr(obj, spec.field))
             yield row
 
+    def _internal_type(self, cls: type) -> str | None:
+        """Return the internal (unprefixed) family type name backing ``cls``, if configured."""
+        family = self._store._family_for_backing(cls)
+        if family is None:
+            return None
+        internal = getattr(family.family, "type", None)
+        return internal if isinstance(internal, str) else None
+
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
         """Return relationships grouped by source entry id.
 
-        Relationships come from stored reference fields, child fields, and
-        exposed weak links targeting served storable classes; loose-edge
-        projections are not part of this provider contract.
+        Related entries come from stored reference fields, child fields, exposed
+        weak links targeting served storable classes, and StrongLink provenance
+        edges in both directions: a run's own edges under their forward wire key
+        (e.g. ``_httk_has_input``), and the derived reverse edges naming the runs
+        that point at each served target under their reverse wire key (e.g.
+        ``_httk_is_input``). The reverse view is store-scoped (only this store's
+        StrongLink families are scanned) and lineage-level (only a run lineage's
+        latest main revision contributes).
 
         :param entry_type: The served entry type whose relationships are read.
         :return: Related entries keyed by source entry id.
@@ -374,9 +395,13 @@ class StoreEntryProvider(EntryProvider):
         cls = self._require_entry_type(entry_type)
         relation_specs = self._relationship_specs(entry_type)
         link_specs = self._exposed_link_specs(entry_type)
-        if not relation_specs and not link_specs:
-            return {}
         store = self._store
+        strong_families = strong_link_families(store)
+        forward_family = next((family for family in strong_families if family.backing is cls), None)
+        internal_target = self._internal_type(cls)
+        reverse_families = [family for family in strong_families if family.markers] if internal_target else []
+        if not relation_specs and not link_specs and forward_family is None and not reverse_families:
+            return {}
         if store._missing_tables_for_read((cls,)):
             return {}
         schema = self._schemas[entry_type]
@@ -441,9 +466,10 @@ class StoreEntryProvider(EntryProvider):
                     )
             for link_spec, related in link_specs:
                 self._collect_weak_relationships(connection, schema, table, link_spec, related, related_by_sid)
+            accumulated: dict[str, list[RelatedEntry]] = {}
             for sid in sorted(related_by_sid):
                 record_id = stored_id(connection, entry_type, cls, sid)
-                entries = [
+                accumulated.setdefault(record_id, []).extend(
                     RelatedEntry(
                         related,
                         stored_id(connection, related, target_cls, target_sid),
@@ -452,11 +478,106 @@ class StoreEntryProvider(EntryProvider):
                         label=label,
                     )
                     for target_cls, target_sid, related, description, role, label in related_by_sid[sid]
-                ]
-                # Dedup by exact RelatedEntry equality, preserving first
-                # occurrence; entries differing only in metadata are both kept.
+                )
+            if forward_family is not None:
+                self._collect_forward_edges(connection, cls, entry_type, forward_family, stored_id, accumulated)
+            if reverse_families and internal_target is not None:
+                self._collect_reverse_edges(
+                    connection, cls, entry_type, table, internal_target, reverse_families, stored_id, accumulated
+                )
+            # Dedup by exact RelatedEntry equality, preserving first occurrence;
+            # entries differing only in metadata are both kept.
+            for record_id, entries in accumulated.items():
                 result[record_id] = tuple(dict.fromkeys(entries))
         return result
+
+    def _collect_forward_edges(
+        self,
+        connection: Any,
+        cls: type,
+        entry_type: str,
+        family: Any,
+        stored_id: Callable[[Any, str, type, int], str],
+        accumulated: dict[str, list[RelatedEntry]],
+    ) -> None:
+        """Append a run family's own forward edges to ``accumulated`` by run id.
+
+        :param connection: The open read connection.
+        :param cls: The served run backing class.
+        :param entry_type: The served run entry type.
+        :param family: The run's :class:`~httk.store.backend.sql.provenance_edges.StrongLinkFamily`.
+        :param stored_id: The hydrating id resolver ``(connection, entry_type, cls, sid) -> id``.
+        :param accumulated: The mutable per-record-id related-entry accumulator.
+        :return: None.
+        """
+        store = self._store
+        run_table = store._table(family.schema.table_name)
+        run_sids = set(latest_main_run_sids(connection, run_table).values())
+        edges_by_sid = forward_run_edges(connection, store, family, run_sids)
+        for sid, edges in edges_by_sid.items():
+            record_id = stored_id(connection, entry_type, cls, sid)
+            for (edge_type, edge_id, label), marker in edges:
+                accumulated.setdefault(record_id, []).append(
+                    RelatedEntry(
+                        wire_type_for_internal(store, edge_type),
+                        edge_id,
+                        role=marker.role,
+                        label=label,
+                        relationship=wire_relationship_key(marker.relationship, family.definition_id),
+                    )
+                )
+
+    def _collect_reverse_edges(
+        self,
+        connection: Any,
+        cls: type,
+        entry_type: str,
+        table: Any,
+        internal_target: str,
+        families: Sequence[Any],
+        stored_id: Callable[[Any, str, type, int], str],
+        accumulated: dict[str, list[RelatedEntry]],
+    ) -> None:
+        """Append the reverse edges naming runs that point at each served target.
+
+        :param connection: The open read connection.
+        :param cls: The served target backing class.
+        :param entry_type: The served target entry type.
+        :param table: The target family's parent table.
+        :param internal_target: The target family's internal (unprefixed) type name.
+        :param families: The store's StrongLink families whose reverse edges are derived.
+        :param stored_id: The hydrating id resolver ``(connection, entry_type, cls, sid) -> id``.
+        :param accumulated: The mutable per-record-id related-entry accumulator.
+        :return: None.
+        """
+        store = self._store
+        sid_by_raw: dict[str, int] = {
+            str(raw_id): int(sid)
+            for sid, raw_id in connection.execute(
+                sqlalchemy.select(table.c[SID_COLUMN], table.c["id"]).where(
+                    table.c[SID_COLUMN].in_(sorted(set(latest_main_run_sids(connection, table).values())))
+                )
+            )
+        }
+        if not sid_by_raw:
+            return
+        target_ids = sorted(sid_by_raw)
+        for family in families:
+            reverse = reverse_run_edges(connection, store, family, internal_target, target_ids)
+            for raw_id, hits in reverse.items():
+                record_id = stored_id(connection, entry_type, cls, sid_by_raw[raw_id])
+                for run_id, label, marker in hits:
+                    if marker.reverse is None:
+                        continue
+                    accumulated.setdefault(record_id, []).append(
+                        RelatedEntry(
+                            family.wire_type,
+                            run_id,
+                            role=marker.role,
+                            label=label,
+                            relationship=wire_relationship_key(marker.reverse, family.definition_id),
+                        )
+                    )
 
     def _collect_weak_relationships(
         self,

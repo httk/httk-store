@@ -71,6 +71,7 @@ from httk.core.storage import (
     Shape,
     Skip,
     StorageInfo,
+    StrongLink,
     Unique,
     WeakLink,
     stored_property,
@@ -195,6 +196,17 @@ class FieldSpec:
     Only reference fields and child fields of storable elements can carry one;
     the marker's metadata flows into the relationships an entry provider emits
     for the field.
+    """
+
+    strong_link: StrongLink | None = None
+    """The :class:`~httk.core.storage.StrongLink` edge-collection marker of the field, if any.
+
+    Carried on a child field whose element class is an edge record with the
+    string fields ``label``, ``entry_type``, and ``entry_id``. It is presentation
+    metadata for the serving edge (which projects the field as forward and
+    reverse OPTIMADE relationships); it is deliberately excluded from the schema
+    fingerprint, exactly as :class:`~httk.core.storage.StrongLink` is excluded
+    from content identity.
     """
 
     derived: bool = False
@@ -521,6 +533,7 @@ def _resolve_field(
     shape: Shape | None = None
     skipped = False
     related: Related | None = None
+    strong_link: StrongLink | None = None
     while True:
         origin = typing.get_origin(base)
         if origin is Annotated:
@@ -536,6 +549,8 @@ def _resolve_field(
                     shape = marker
                 elif isinstance(marker, Related):
                     related = marker
+                elif isinstance(marker, StrongLink):
+                    strong_link = marker
             base = arguments[0]
             continue
         if origin is typing.Union or origin is types.UnionType:
@@ -553,6 +568,10 @@ def _resolve_field(
     if skipped:
         if related is not None:
             raise SchemaError(f"{cls.__name__}.{name}: a Skip'd field is not stored and cannot carry a Related marker")
+        if strong_link is not None:
+            raise SchemaError(
+                f"{cls.__name__}.{name}: a Skip'd field is not stored and cannot carry a StrongLink marker"
+            )
         if not derived and not has_default:
             raise SchemaError(
                 f"{cls.__name__}.{name}: a Skip'd field must have a default so instances can be "
@@ -568,7 +587,42 @@ def _resolve_field(
                 f"field or a list/tuple of storable classes, not to a {spec.role!r} field"
             )
         spec = dataclasses.replace(spec, related=related)
+    if strong_link is not None:
+        _validate_strong_link(cls, name, spec)
+        spec = dataclasses.replace(spec, strong_link=strong_link)
     return spec
+
+
+_STRONG_LINK_EDGE_FIELDS: Final = ("label", "entry_type", "entry_id")
+
+
+def _validate_strong_link(cls: type, name: str, spec: FieldSpec) -> None:
+    """Validate that a StrongLink-annotated field is a tuple of edge records.
+
+    :param cls: The declaring storable class (named in error messages).
+    :param name: The field name (named in error messages).
+    :param spec: The resolved field spec of the annotated field.
+    :raises SchemaError: If the field is not a child field of a storable element
+        class exposing the string edge fields ``label``, ``entry_type``, and
+        ``entry_id``.
+    """
+    element = spec.target
+    if spec.role != "child" or element is None:
+        raise SchemaError(
+            f"{cls.__name__}.{name}: a StrongLink marker applies only to a list/tuple of edge records "
+            f"(a storable element class), not to a {spec.role!r} field"
+        )
+    element_schema = resolve_schema(element)
+    for edge_field in _STRONG_LINK_EDGE_FIELDS:
+        try:
+            edge_spec = element_schema.field(edge_field)
+        except SchemaError:
+            edge_spec = None
+        if edge_spec is None or edge_spec.role != "scalar" or edge_spec.python_type is not str:
+            raise SchemaError(
+                f"{cls.__name__}.{name}: a StrongLink edge element class ({element.__name__}) must declare "
+                f"string fields {list(_STRONG_LINK_EDGE_FIELDS)}; {edge_field!r} is missing or not a string"
+            )
 
 
 def _resolve_unwrapped_field(

@@ -8,6 +8,7 @@ surface used by the SQL provider's parity tests.
 """
 
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from httk.core import (
@@ -17,7 +18,9 @@ from httk.core import (
     PropertyDefinition,
     RelatedEntry,
     known_definition_prefixes,
+    load_entry_type_definition,
 )
+from httk.core.storage import StrongLink
 
 from httk.store.backend.codecs import codec_named
 from httk.store.backend.schema import (
@@ -26,6 +29,7 @@ from httk.store.backend.schema import (
     TableSchema,
     resolve_schema,
 )
+from httk.store.entry_providers import strong_link_markers, wire_relationship_key
 from httk.store.query import ID_FIELD
 from httk.store.served_specs import served_specs
 
@@ -33,6 +37,30 @@ from .documents import _as_fixed_tensor
 from .stored_properties import MongoStoredPropertyPlan
 
 __all__ = ["StoreEntryProvider", "auto_definition", "served_specs"]
+
+
+@dataclass(frozen=True)
+class _MongoStrongFamily:
+    """A store family whose backing declares StrongLink edge fields (Mongo path)."""
+
+    internal_type: str
+    wire_type: str
+    definition_id: str | None
+    backing: type
+    markers: Mapping[str, StrongLink]
+
+
+def _served_family_name(family: type, internal: str) -> str:
+    """Return a family's served (wire) name, falling back to its internal name."""
+    factory = getattr(family, "entry_type_definition", None)
+    if callable(factory):
+        definition = factory()
+    else:
+        definition_id = getattr(family, "definition_id", None)
+        if not isinstance(definition_id, str) or not definition_id:
+            return internal
+        definition = load_entry_type_definition(definition_id)
+    return definition.served_form().name if isinstance(definition, EntryTypeDefinition) else internal
 
 
 def _default_id(_entry_type: str, _sid: int, obj: Any) -> str:
@@ -294,11 +322,101 @@ class StoreEntryProvider(EntryProvider):
                 result.append((spec, related))
         return result
 
+    def _strong_families(self) -> list[_MongoStrongFamily]:
+        """Return the store's registered families whose backings declare StrongLink fields."""
+        families: list[_MongoStrongFamily] = []
+        for family in self._store.layout.families:
+            internal = getattr(family.family, "type", None)
+            if not isinstance(internal, str):
+                continue
+            wire = _served_family_name(family.family, internal)
+            for backing in family.records:
+                markers = strong_link_markers(backing)
+                if markers:
+                    families.append(_MongoStrongFamily(internal, wire, family.definition_id, backing, markers))
+        return families
+
+    def _wire_type_for_internal(self, internal_type: str) -> str:
+        """Return the served (wire) entry-type name for an edge's internal target type."""
+        for family in self._store.layout.families:
+            if family.definition_id is not None and getattr(family.family, "type", None) == internal_type:
+                return _served_family_name(family.family, internal_type)
+        return internal_type
+
+    def _family_internal_type(self, entry_type: str) -> str | None:
+        """Return the internal (unprefixed) family type name serving ``entry_type``."""
+        backing = self._record_classes[entry_type][0]
+        for family in self._store.layout.families:
+            if backing in family.records:
+                internal = getattr(family.family, "type", None)
+                return internal if isinstance(internal, str) else None
+        return None
+
+    def _reverse_edge_index(self, families: list[_MongoStrongFamily]) -> dict[tuple[str, str], list[RelatedEntry]]:
+        """Build the derived reverse edges keyed by ``(internal target type, raw target id)``.
+
+        Run rows are iterated through ``_iter_records`` with the provider's own
+        ``only_latest`` setting: with the default ``only_latest=True`` this is
+        the SQL reverse scan's latest-main-per-lineage view; with
+        ``only_latest=False`` every retained run revision (still mains only)
+        contributes, so this provider then diverges from the SQL latest-main
+        pinning.
+
+        :param families: The store's StrongLink families to invert.
+        :return: Reverse related runs keyed by target internal type and raw id.
+        """
+        # Collect each reverse hit with its deterministic sort key
+        # (run raw id, marker/field index, edge row index) then sort per target,
+        # matching the SQL route.
+        keyed: dict[tuple[str, str], list[tuple[tuple[str, int, int], RelatedEntry]]] = {}
+        for family in families:
+            for run, sid in self._iter_records(family.backing):
+                run_id = self._id_of(family.wire_type, sid, run)
+                for marker_index, (field_name, marker) in enumerate(family.markers.items()):
+                    if marker.reverse is None:
+                        continue
+                    reverse_key = wire_relationship_key(marker.reverse, family.definition_id)
+                    for edge_index, edge in enumerate(getattr(run, field_name) or ()):
+                        keyed.setdefault((str(edge.entry_type), str(edge.entry_id)), []).append(
+                            (
+                                (run_id, marker_index, edge_index),
+                                RelatedEntry(
+                                    family.wire_type,
+                                    run_id,
+                                    role=marker.role,
+                                    label=edge.label,
+                                    relationship=reverse_key,
+                                ),
+                            )
+                        )
+        return {
+            target: [entry for _key, entry in sorted(hits, key=lambda item: item[0])] for target, hits in keyed.items()
+        }
+
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
-        """Return direct relationships grouped by source id."""
+        """Return relationships grouped by source id, including provenance edges.
+
+        Related entries come from stored reference fields, child fields, exposed
+        weak links, and StrongLink provenance edges in both directions: a run's
+        own edges under their forward wire key, and the derived reverse edges
+        naming the runs pointing at each served target under their reverse wire
+        key. The reverse view is store-scoped; it is lineage-level (latest main
+        run revisions only), matching the SQL provider, under the default
+        ``only_latest=True`` (see ``_reverse_edge_index`` for the
+        ``only_latest=False`` caveat).
+
+        :param entry_type: The served entry type whose relationships are read.
+        :return: Related entries keyed by source entry id.
+        :raises KeyError: If ``entry_type`` is not served.
+        """
         self._require_entry_type(entry_type)
+        strong_families = self._strong_families()
+        strong_by_backing = {family.backing: family for family in strong_families}
+        internal_target = self._family_internal_type(entry_type)
+        reverse_index = self._reverse_edge_index(strong_families) if (strong_families and internal_target) else {}
         result: dict[str, list[RelatedEntry]] = {}
         for record_type in self._record_classes[entry_type]:
+            forward_family = strong_by_backing.get(record_type)
             for source, sid in self._iter_records(record_type):
                 entries: list[RelatedEntry] = []
                 relation_specs = self._relationship_specs(record_type)
@@ -344,8 +462,25 @@ class StoreEntryProvider(EntryProvider):
                                 label=link_spec.name,
                             )
                         )
+                if forward_family is not None:
+                    for field_name, strong_marker in forward_family.markers.items():
+                        forward_key = wire_relationship_key(strong_marker.relationship, forward_family.definition_id)
+                        for edge in getattr(source, field_name) or ():
+                            entries.append(
+                                RelatedEntry(
+                                    self._wire_type_for_internal(str(edge.entry_type)),
+                                    str(edge.entry_id),
+                                    role=strong_marker.role,
+                                    label=edge.label,
+                                    relationship=forward_key,
+                                )
+                            )
+                if reverse_index and internal_target is not None:
+                    raw_id = getattr(source, "id", None)
+                    if raw_id is not None:
+                        entries.extend(reverse_index.get((internal_target, str(raw_id)), ()))
                 if entries:
-                    result[self._id_of(entry_type, sid, source)] = entries
+                    result.setdefault(self._id_of(entry_type, sid, source), []).extend(entries)
 
         return {key: tuple(dict.fromkeys(values)) for key, values in result.items()}
 

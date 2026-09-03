@@ -21,7 +21,7 @@ import datetime
 from collections.abc import Iterable, Mapping
 from dataclasses import fields
 from functools import cache
-from typing import Any
+from typing import Any, get_type_hints
 
 from httk.core import (
     Calculation,
@@ -34,6 +34,7 @@ from httk.core import (
     Reference,
     RelatedEntry,
     Run,
+    apply_definition_prefix,
     load_entry_type_definition,
     load_property_definition,
     standard_entry_type,
@@ -45,6 +46,7 @@ from httk.core.storage import (
     QueryExpression,
     QueryLiteralError,
     StoredPropertyProjection,
+    StrongLink,
 )
 
 from httk.store.query import ID_FIELD
@@ -258,6 +260,43 @@ def _wire_entry_type() -> Mapping[str, str]:
     return mapping
 
 
+def wire_relationship_key(internal_name: str, definition_id: str | None) -> str:
+    """Return the wire (prefixed) relationship key for an internal marker name.
+
+    The single serving-edge transform from an internal
+    :class:`~httk.core.storage.StrongLink` marker name to its served OPTIMADE
+    relationship key. It applies the declaring family's definition prefix — the
+    exact registry source ``EntryTypeDefinition.served_form`` uses
+    — so an internal name such as ``has_input`` becomes ``_httk_has_input``. A
+    ``definition_id`` of ``None`` (or one under no registered prefix) leaves the
+    name bare, and an already-prefixed name is never re-prefixed.
+
+    :param internal_name: The internal (unprefixed) marker relationship name.
+    :param definition_id: The declaring family's definition IRI, whose registered prefix is applied, or ``None``.
+    :return: The served (wire) relationship key.
+    """
+    return apply_definition_prefix(internal_name, definition_id)
+
+
+def strong_link_markers(record_type: type[Any]) -> dict[str, StrongLink]:
+    """Return a record class's :class:`~httk.core.storage.StrongLink` markers by field.
+
+    :param record_type: The storable record class to inspect.
+    :return: The strong-link markers keyed by field name, in dataclass field order.
+    """
+    hints = get_type_hints(record_type, include_extras=True)
+    markers: dict[str, StrongLink] = {}
+    for field in fields(record_type):
+        annotation = hints.get(field.name)
+        for marker in getattr(annotation, "__metadata__", ()):
+            if isinstance(marker, StrongLink):
+                markers[field.name] = marker
+    return markers
+
+
+_RUN_STRONG_LINKS: Mapping[str, StrongLink] = strong_link_markers(Run)
+
+
 class RunEntryProvider(EntryProvider):
     """Serve core :class:`~httk.core.Run` records and their provenance edges.
 
@@ -321,13 +360,15 @@ class RunEntryProvider(EntryProvider):
             }
 
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
-        """Return run provenance edges with role and edge-label metadata.
+        """Return run provenance edges as forward semantic relationships.
 
-        Run edges carry internal entry-type names; this serving edge translates
-        each target type to its served (wire) name (via
-        ``EntryTypeDefinition.served_form()``), so a target such as
-        ``records`` is served as ``_httk_records`` while standard type names
-        pass through unchanged.
+        Each edge is grouped under its owning field's ``StrongLink`` forward
+        relationship key in wire form (e.g. ``_httk_has_input``, read from the
+        markers on :class:`~httk.core.Run`, not hardcoded). Run edges carry
+        internal entry-type names; this serving edge translates each target type
+        to its served (wire) name (via ``EntryTypeDefinition.served_form()``), so
+        a target such as ``records`` is served as ``_httk_records`` while
+        standard type names pass through unchanged.
 
         :param entry_type: The entry type to inspect.
         :return: Relationships grouped by run identifier.
@@ -337,11 +378,61 @@ class RunEntryProvider(EntryProvider):
         wire = _wire_entry_type()
         return {
             entry_id: tuple(
-                RelatedEntry(wire.get(edge.entry_type, edge.entry_type), edge.entry_id, role=role, label=edge.label)
-                for role, edges in (("input", run.inputs), ("artifact", run.artifacts), ("output", run.outputs))
-                for edge in edges
+                RelatedEntry(
+                    wire.get(edge.entry_type, edge.entry_type),
+                    edge.entry_id,
+                    role=marker.role,
+                    label=edge.label,
+                    relationship=wire_relationship_key(marker.relationship, RUNS_DEFINITION_ID),
+                )
+                for field_name, marker in _RUN_STRONG_LINKS.items()
+                for edge in getattr(run, field_name)
             )
             for entry_id, run in self._entries.items()
+        }
+
+    def reverse_relationships(self) -> Mapping[str, Mapping[str, tuple[RelatedEntry, ...]]]:
+        """Return the derived reverse view of the runs' provenance edges.
+
+        Each run edge ``(entry_type, entry_id)`` yields a reverse related entry
+        attached to the targeted entry: keyed by the target's served (wire) entry
+        type and its raw id, the related entry names this run under the edge
+        field's ``StrongLink`` reverse relationship key in wire form (e.g.
+        ``_httk_is_input``). Fields whose marker declares no ``reverse`` key
+        contribute nothing.
+
+        :return: Related runs keyed by target entry type and then target entry id.
+        """
+        wire = _wire_entry_type()
+        # Collect each reverse hit with its deterministic sort key
+        # (run id, marker/field index, edge row index) then sort per target,
+        # matching the stored SQL/Mongo routes.
+        result: dict[str, dict[str, list[tuple[tuple[str, int, int], RelatedEntry]]]] = {}
+        for entry_id, run in self._entries.items():
+            for marker_index, (field_name, marker) in enumerate(_RUN_STRONG_LINKS.items()):
+                if marker.reverse is None:
+                    continue
+                reverse_key = wire_relationship_key(marker.reverse, RUNS_DEFINITION_ID)
+                for edge_index, edge in enumerate(getattr(run, field_name)):
+                    target_type = wire.get(edge.entry_type, edge.entry_type)
+                    result.setdefault(target_type, {}).setdefault(edge.entry_id, []).append(
+                        (
+                            (entry_id, marker_index, edge_index),
+                            RelatedEntry(
+                                self._entry_type,
+                                entry_id,
+                                role=marker.role,
+                                label=edge.label,
+                                relationship=reverse_key,
+                            ),
+                        )
+                    )
+        return {
+            target_type: {
+                target_id: tuple(entry for _key, entry in sorted(hits, key=lambda item: item[0]))
+                for target_id, hits in ids.items()
+            }
+            for target_type, ids in result.items()
         }
 
 
@@ -484,7 +575,15 @@ def product_relationships(links: Iterable[ProductLink]) -> dict[str, dict[str, t
             raise ValueError(
                 f"duplicate product label for source {link.source_type!r}/{link.source_id!r}: {link.label!r}"
             )
-        source.append(RelatedEntry(link.target_type, link.target_id, role="product", label=link.label))
+        source.append(
+            RelatedEntry(
+                link.target_type,
+                link.target_id,
+                role="product",
+                label=link.label,
+                relationship=wire_relationship_key("has_product", RUNS_DEFINITION_ID),
+            )
+        )
     return {
         source_type: {source_id: tuple(entries) for source_id, entries in sources.items()}
         for source_type, sources in result.items()

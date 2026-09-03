@@ -81,11 +81,28 @@ def test_run_provider_serves_rows_and_relationships() -> None:
     assert definition.properties["_httk_source_id"].requirements["query-support"] == "all mandatory"
     assert definition.properties["_httk_source_id"].requirements["sortable"] is True
     assert provider.relationships("_httk_runs")["run-key"] == (
-        RelatedEntry("_httk_records", "record-1", role="input", label="in-1"),
-        RelatedEntry("structures", "structure-1", role="input", label="in-2"),
-        RelatedEntry("files", "file-1", role="artifact", label="artifact"),
-        RelatedEntry("_httk_records", "record-2", role="output", label="out"),
+        RelatedEntry("_httk_records", "record-1", role="input", label="in-1", relationship="_httk_has_input"),
+        RelatedEntry("structures", "structure-1", role="input", label="in-2", relationship="_httk_has_input"),
+        RelatedEntry("files", "file-1", role="artifact", label="artifact", relationship="_httk_has_artifact"),
+        RelatedEntry("_httk_records", "record-2", role="output", label="out", relationship="_httk_has_output"),
     )
+    # The reverse view is target-keyed (wire target type -> raw id -> runs) and
+    # names this run under each field's wire reverse key.
+    reverse = provider.reverse_relationships()
+    assert reverse["_httk_records"]["record-1"] == (
+        RelatedEntry("_httk_runs", "run-key", role="input", label="in-1", relationship="_httk_is_input"),
+    )
+    assert reverse["structures"]["structure-1"] == (
+        RelatedEntry("_httk_runs", "run-key", role="input", label="in-2", relationship="_httk_is_input"),
+    )
+    assert reverse["files"]["file-1"] == (
+        RelatedEntry("_httk_runs", "run-key", role="artifact", label="artifact", relationship="_httk_is_artifact"),
+    )
+    assert reverse["_httk_records"]["record-2"] == (
+        RelatedEntry("_httk_runs", "run-key", role="output", label="out", relationship="_httk_is_output"),
+    )
+    # The empty-run entry contributes no reverse identifiers anywhere.
+    assert all("run-map" not in {entry.id for entries in ids.values() for entry in entries} for ids in reverse.values())
 
 
 def test_run_provider_rows_validate() -> None:
@@ -173,7 +190,11 @@ def test_data_record_provider_serves_product_relationships() -> None:
         relationships=links["_httk_records"],
     )
     assert provider.relationships("_httk_records") == {
-        "record-1": (RelatedEntry("_httk_records", "record-2", role="product", label="derived"),)
+        "record-1": (
+            RelatedEntry(
+                "_httk_records", "record-2", role="product", label="derived", relationship="_httk_has_product"
+            ),
+        )
     }
 
 
@@ -245,9 +266,7 @@ def test_run_stored_property_plan_serves_prefixed_properties() -> None:
         assert [record.source_id for record in filtered] == ["ws:a"]
 
         # (c) a sort over _httk_source_id orders correctly.
-        ordered = _plan_records(
-            plan.filter_searchers('type = "_httk_runs"', sort=(("_httk_source_id", False),))
-        )
+        ordered = _plan_records(plan.filter_searchers('type = "_httk_runs"', sort=(("_httk_source_id", False),)))
         assert [record.source_id for record in ordered] == ["ws:a", "ws:b"]
 
         # (d) planning this prefixed family WITHOUT served= fails loudly: the
@@ -295,8 +314,10 @@ def test_run_provider_serves_through_optimade() -> None:
     assert filtered_run_response.status_code == 200
     assert [item["id"] for item in filtered_run_response.json()["data"]] == ["run-1"]
     assert filtered_run_response.json()["data"][0]["attributes"]["_httk_source_id"] == "ws:job"
-    run_relation = run_response.json()["data"][0]["relationships"]["_httk_records"]["data"][0]
+    run_relation = run_response.json()["data"][0]["relationships"]["_httk_has_input"]["data"][0]
+    assert run_relation["type"] == "_httk_records"
     assert run_relation["meta"]["_httk_label"] == "labeled-input"
     record = next(item for item in records_response.json()["data"] if item["id"] == "record-1")
-    product_relation = record["relationships"]["_httk_records"]["data"][0]
+    product_relation = record["relationships"]["_httk_has_product"]["data"][0]
+    assert product_relation["type"] == "_httk_records"
     assert product_relation["meta"] == {"role": "product", "_httk_label": "derived"}

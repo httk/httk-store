@@ -22,7 +22,9 @@ plain mapping coerced into one) — onto the neutral contract. A provider answer
 three questions: which entry types it serves (each described by a first-class
 `httk.core.EntryTypeDefinition`), which record key holds each served property
 (`property_keys()`), and what the records are (`records()`, plain JSON-able
-mappings).
+mappings). Two optional hooks add relationships: `relationships()` maps an entry
+id to related entries, and `reverse_relationships()` declares the derived reverse
+of edges another type owns.
 
 ```python
 from httk.core import Reference
@@ -148,4 +150,5 @@ The entry providers above are in-memory. To store records in a database and
 serve them the same way, see {doc}`db`: `httk.store.backend.sql.SqlStore` stores plain
 frozen dataclasses in SQLite, DuckDB, or PostgreSQL, and `StoreEntryProvider`
 (registered as `store-db-store`) serves them through the identical provider
-contract.
+contract — including the provenance relationships a run's `StrongLink` edges
+emit in both directions.

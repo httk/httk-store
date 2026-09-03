@@ -326,7 +326,10 @@ optimization.
 concrete backing records through the neutral `httk.core.EntryProvider`
 contract. Family entries use the Mongo stored-property plan, and relationship
 links can be declared with the same provider-facing concepts as the SQL
-surface. Stored-federation membership uses the Mongo entry-store protocol and
+surface — the provider path serves the `StrongLink` provenance relationships in
+both directions, like SQL. Mongo *federation*, however, serves no relationships
+at all (see [Differences](#differences-from-the-sql-backend) below).
+Stored-federation membership uses the Mongo entry-store protocol and
 content identities; it does not require converting a Mongo store into a SQL
 store.
 
@@ -386,6 +389,12 @@ are operational behavior, not guarantees to be inferred from SQL parity.
 
 11. **Sharded clusters.** Sharded clusters are untested and unsupported for
     now.
+
+12. **Relationships and relationship filtering.** The Mongo `StoreEntryProvider`
+    path serves the `StrongLink` provenance relationships in both directions,
+    matching SQL. Mongo *federation* serves no relationships (its per-row
+    relationships channel is empty), and there is no `_httk_relationships`
+    relationship filtering on a Mongo-federated route.
 
 ## Testing profiles
 

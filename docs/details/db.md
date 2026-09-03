@@ -34,7 +34,7 @@ installed raises an `ImportError` naming it.
 Storability is non-intrusive: any frozen dataclass whose fields resolve is
 storable — there is no base class. The stdlib-only marker vocabulary lives in
 *httk-core* (`Indexed`, `Unique`, `Skip`, `Shape`, `StorageInfo`, `WeakLink`,
-`stored_property`), so domain modules can declare storable classes without
+`StrongLink`, `stored_property`), so domain modules can declare storable classes without
 depending on httk-store:
 
 ```python
@@ -569,7 +569,12 @@ raises `UnsupportedQueryError`; a stored-object RHS works.
 is also served appear as OPTIMADE relationships, carrying `role`/`description`;
 a retracted link disappears from them. The served id is lineage-level, so
 revising a target keeps the same relationship id. `'<type>.id'` filters (HAS,
-HAS ALL, HAS ONLY) work over exposed weak links. If a reference or child field
+HAS ALL, HAS ANY, HAS ONLY) work over exposed weak links. This is route-aware:
+in the library `optimade_filter_searcher` API these id-filters have always
+worked; on the *served* OPTIMADE stored/federation route, `<type>.id`
+relationship filtering only landed this series (before it, a bare
+`references.id` there matched nothing). On the served route the same filter is
+also reachable through the `_httk_relationships.<type>.id` alias. If a reference or child field
 *and* an exposed weak link both target the same served class, id-filter binding
 is ambiguous and raises `ValueError`. `StoredEntryFederation` collects these weak-link relationships for SQL-backed sources only; a Mongo-backed federation source does not yet serve link relationships (its per-row relationships channel is empty). Relationships always reflect the live link state regardless of a page's `as_of`: like the lineage-level in-store path, a retraction applies retroactively, so a historic page pairs its rows with the current link state. An unmapped target family falls back to its own served (wire) type name, never the internal one.
 
@@ -577,6 +582,44 @@ is ambiguous and raises `ValueError`. `StoredEntryFederation` collects these wea
 declaration (name, target identity, `exposed_relationship`, role, description),
 so any link change is non-additive: `upgrade=True` refuses it and the store must
 be rebuilt (pre-release policy).
+
+The `StrongLink` marker (see [Strong links](#strong-links-provenance-edges)) is
+the opposite case for the marker itself: it is a code-only declaration, excluded
+from both the schema fingerprint and the content identity, so declaring or
+retyping an edge is invisible to storage. The one layout change it carries *is*
+fingerprinted — `RunEdge` gained a composite `(entry_type, entry_id)` index — so,
+exactly like the `_httk_source_id` change above, an existing run-bearing store
+opens against the new code as an incompatible layout and must be rebuilt (this
+change is non-additive).
+
+## Strong links (provenance edges)
+
+`StrongLink(relationship, reverse=, role=, description=)` marks a run's
+provenance edge fields (its inputs, artifacts, and outputs). Where a `WeakLink`
+is mutable curation *outside* record identity (lineage-live), a `StrongLink` is
+record content *inside* identity (revision-pinned): the edges are exactly the
+ones a run's own revision declares. Unlike weak links the marker is code-only —
+never persisted, excluded from the schema fingerprint and from content identity
+(see [Fingerprint](#weak-links) above for the one indexed layout change).
+
+**Serving.** The run family serves its edges as semantic OPTIMADE relationships
+in both directions: forward keys (`_httk_has_input`/`_httk_has_artifact`/
+`_httk_has_output`) on the run resource, and derived reverse keys
+(`_httk_is_input`/...) on each targeted entry, with identical label/role payload.
+Reverse blocks derive only from runs in the *same* source store, from the
+latest-main revision per lineage; they are suppressed on a target's `~alts` and
+carried lineage-level on `~revs`.
+
+**Filtering.** The served relationships are filterable through the
+`_httk_relationships.<key>.id HAS ...` extension (the semantic keys plus typed
+aliases), part of the served-route relationship filtering that landed this
+series.
+
+**Accepted limitations.** The cross-store reverse gap (reverse derives only
+within one source store); the F9 raw-id caveat (non-empty `public_id_prefix`
+untested by design, both directions); a backend with a custom `id_of` mapping
+gets empty reverse blocks; `product_relationships()` emits a forward-only
+`_httk_has_product` with no reverse.
 
 ## Store timestamps
 
@@ -1185,7 +1228,10 @@ contract: it auto-generates an OPTIMADE entry-type definition per served class
 from its schema (every schema-derived property named with a registered
 database-specific prefix, `_httk_` by default), yields JSON-able records, and
 declares relationships for reference fields — and for exposed weak links (see
-[Weak links](#weak-links)) — whose target class is also served:
+[Weak links](#weak-links)) — whose target class is also served. It also serves
+the run family's `StrongLink` provenance edges (see
+[Strong links](#strong-links-provenance-edges)): the forward keys on the run
+records, and the derived reverse keys on every served target family:
 
 ```python
 from httk.store.backend.sql import StoreEntryProvider

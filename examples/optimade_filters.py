@@ -59,9 +59,16 @@ knowing:
 - A related filter matching nothing yields an empty result, not an error.
 
 Relationship *ids* are filterable as `refs.id HAS "refs-<sid>"`, using the same
-`"<entry type>-<sid>"` ids `StoreEntryProvider` mints by default. Nesting
-deeper than one level (`refs.other._httk_custom_x`) raises `FilterTranslationError`
-with category `"not-implemented"`.
+`"<entry type>-<sid>"` ids `StoreEntryProvider` mints by default. `refs.id HAS
+ALL "a" "b"` now requires *every* listed id (a collapse-to-`HAS ANY` bug in this
+reference/child id handler was fixed this series). Nesting deeper than one level
+(`refs.other._httk_custom_x`) raises `FilterTranslationError` with category
+`"not-implemented"`.
+
+The `_httk_relationships.<key>.id` filter root — which also reaches the semantic
+provenance keys — is *not* part of this library `optimade_filter_searcher` API;
+it exists only on the served stored route and the in-memory serving adapter (see
+the *serve as OPTIMADE* example and httk-serve's *how it works* guide).
 """
 
 from dataclasses import dataclass

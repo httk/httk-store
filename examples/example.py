@@ -28,7 +28,12 @@ in order:
 3. `records(entry_type)` — JSON-able mappings, read *through* that map.
 
 `relationships(entry_type)` is the optional fourth step, mapping an entry id to
-a flat tuple of `RelatedEntry` values.
+a flat tuple of `RelatedEntry` values (each optionally carrying a `label`, served
+as `meta._httk_label`, and a wire-form `relationship` semantic key that the
+serving layer groups by). `reverse_relationships()` (which takes no argument) is an optional fifth step:
+it returns a nested mapping — target entry type → target id → `RelatedEntry`
+tuple — declaring the derived reverse of edges this provider owns, for entries
+that other types serve.
 
 ## Validation
 

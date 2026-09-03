@@ -23,7 +23,10 @@ storage schema it derives:
 - relationships, for reference fields and `list[Storable]` fields **whose
   target class is also served**. A `Related` marker on the field adds the
   OPTIMADE `role`/`description` metadata; `StorageInfo(links=...)` lets a
-  separate join class contribute relationships without being served itself.
+  separate join class contribute relationships without being served itself. A
+  `StrongLink` marker on a run's provenance edge fields is served as a semantic
+  relationship in both directions (forward on the run, derived reverse on each
+  targeted served class).
 
 Fields with no OPTIMADE value representation — `bytes`, custom codecs — are
 simply not served, and a reference field whose target class is not served
@@ -48,7 +51,9 @@ fields — which is what an API actually returns.
 
 By default an entry is identified as `"<entry type>-<sid>"`, using the row's
 integer sid: `books-1`, `writers-3`. An `id_of` callback replaces that scheme
-everywhere at once, including inside relationships.
+everywhere at once, including inside reference, child, and weak-link
+relationships. `StrongLink` run edges are the exception: they are matched by
+raw id, so a custom `id_of` provider gets empty reverse relationship blocks.
 """
 
 import datetime

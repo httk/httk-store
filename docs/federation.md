@@ -123,3 +123,15 @@ plain group entry id, and the new intrinsic `_httk_kind` renders the kind — bo
 filterable and sortable. `fetch_alternative(entry_id, kind)` addresses one
 alternative by its group id and kind, mirroring `fetch_revision`; a malformed or
 absent kind returns `None`. `audit_duplicate_ids()` stays main-only.
+
+The durable federation also serves relationships per row. Exposed weak links
+(`exposed_relationship=True`) render as OPTIMADE relationships, and a run's
+`StrongLink` provenance edges render as semantic relationships in both
+directions — forward keys on the run rows, derived reverse keys on the targeted
+entries. Reverse blocks are suppressed on `~alts` alternative rows and carried
+lineage-level on `~revs`. SQL-backed sources contribute these; Mongo-backed
+federation sources contribute none (their per-row relationships channel is
+empty). These served relationships are filterable through the
+`_httk_relationships.<key>.id HAS ...` extension — the same route on which
+`<type>.id` relationship filtering first landed (before it, a bare `references.id`
+here matched nothing, a conformance gap now fixed).

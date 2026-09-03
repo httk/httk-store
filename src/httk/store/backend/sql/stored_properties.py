@@ -27,10 +27,12 @@ from httk.core import (
     EntryTypeDefinition,
     FracVector,
     PropertyDefinition,
+    apply_definition_prefix,
     known_definition_prefixes,
     load_entry_type_definition,
 )
 from httk.core.optimade import FilterAst, parse_optimade_filter
+from httk.core.provenance import RUNS_DEFINITION_ID
 from httk.core.storage import (
     QueryLiteralError,
     StoredPropertyProjection,
@@ -48,9 +50,19 @@ from httk.store.backend.sql.mapping import (
     SID_COLUMN,
     STORE_TIMESTAMP_COLUMN,
 )
+from httk.store.backend.sql.optimade import (
+    _related_id_has_handlers,
+    _weak_link_id_has_handlers,
+)
+from httk.store.backend.sql.provenance_edges import (
+    StrongLinkFamily,
+    latest_main_condition,
+    strong_link_families,
+)
 from httk.store.backend.sql.rows import RowHydrator
 from httk.store.backend.sql.searcher import SqlColumn, SqlExpression, SqlSearcher, SqlVariable, _bool_clause
-from httk.store.backend.sql.store import SqlStore
+from httk.store.backend.sql.store import SqlStore, _served_definition
+from httk.store.entry_providers import wire_relationship_key
 from httk.store.query.optimade_filters import (
     FilterTranslationError,
     HandlerTable,
@@ -67,6 +79,9 @@ __all__ = [
     "stored_property_sql_plan",
 ]
 
+
+_REL_ROOT: Final[str] = apply_definition_prefix("relationships", RUNS_DEFINITION_ID)
+"""The ``_httk_relationships`` filter-extension root (derived, never a literal)."""
 
 _CORE_PROPERTIES: Final[frozenset[str]] = frozenset(("id", "type"))
 _INTRINSIC_PROPERTIES: Final[frozenset[str]] = frozenset(("id", "type", "immutable_id", "_httk_id", "_httk_kind"))
@@ -861,7 +876,7 @@ class StoredPropertySqlPlan:
         if ast is None:
             searcher.add(cast(SqlExpression, context.always_true()))
         else:
-            handlers = self._handlers(backing, context, public_id_prefix, revisions, alternatives)
+            handlers, relationship_targets = self._handlers(backing, context, public_id_prefix, revisions, alternatives)
             try:
                 predicate = translate_filter_ast(
                     ast,
@@ -869,6 +884,8 @@ class StoredPropertySqlPlan:
                     _property_fulltypes(self.definition, revisions=revisions, alternatives=alternatives),
                     handlers,
                     known_definition_prefixes(),
+                    relationship_targets=relationship_targets,
+                    related_property_resolver=_empty_related_resolver,
                 )
             except QueryLiteralError as error:
                 raise FilterTranslationError(str(error), "type-mismatch") from error
@@ -915,7 +932,7 @@ class StoredPropertySqlPlan:
         public_id_prefix: str,
         revisions: bool,
         alternatives: bool,
-    ) -> HandlerTable:
+    ) -> tuple[HandlerTable, tuple[str, ...]]:
         handlers: dict[str, Mapping[str, Callable[..., Any]]] = {
             "id": _id_handlers(context, public_id_prefix, revisions=revisions, alternatives=alternatives),
             "type": _type_handlers(self.entry_type),
@@ -943,7 +960,83 @@ class StoredPropertySqlPlan:
                 handlers[name] = _null_handlers(context)
             elif projection.query is not None:
                 handlers[name] = _projection_handlers(projection, context)
-        return handlers
+        relationship_handlers, relationship_targets = self._relationship_handlers(backing.backing, alternatives)
+        handlers.update(relationship_handlers)
+        return handlers, relationship_targets
+
+    def _relationship_handlers(
+        self, backing: type, alternatives: bool
+    ) -> tuple[dict[str, Mapping[str, Callable[..., Any]]], tuple[str, ...]]:
+        """Build the backing's relationship-filter handlers and 2-segment targets.
+
+        Registers each typed reference/child-of-storable field and exposed weak
+        link under BOTH its bare ``<type>.id`` spelling (added to
+        ``relationship_targets`` so the 2-segment dispatch reaches it) and the
+        ``_httk_relationships.<type>.id`` alias, and each StrongLink forward /
+        reverse semantic key under ``_httk_relationships.<wire key>.id`` only.
+        Reverse keys become constant-false on an alternatives stream (an
+        alternative cell must not claim a reverse relationship; its raw id column
+        carries the group id the reverse join would otherwise match).
+
+        :param backing: The concrete backing class whose relationships are derived.
+        :param alternatives: Whether this is an alternatives (``~alts``) stream.
+        :return: The relationship handler table and the bare relationship targets.
+        """
+        store = self.store
+        schema = resolve_schema(backing)
+        handlers: dict[str, Mapping[str, Callable[..., Any]]] = {}
+        targets: list[str] = []
+
+        def register_typed(rtype: str, handler: Mapping[str, Callable[..., Any]]) -> None:
+            handlers.setdefault(f"{rtype}.id", handler)
+            handlers.setdefault(f"{_REL_ROOT}.{rtype}.id", handler)
+            if rtype not in targets:
+                targets.append(rtype)
+
+        for spec in schema.fields:
+            if spec.role in ("reference", "child") and spec.target is not None:
+                rtype = _served_type_for_target(store, spec.target)
+                if rtype is not None:
+                    register_typed(rtype, _related_id_has_handlers(store, spec.target, spec.field))
+        for link in schema.links:
+            if link.exposed_relationship and link.target is not None:
+                rtype = _served_type_for_target(store, link.target)
+                if rtype is not None:
+                    register_typed(rtype, _weak_link_id_has_handlers(store, link.target, link.name))
+
+        strong = strong_link_families(store)
+        forward = next((family for family in strong if family.backing is backing), None)
+        if forward is not None:
+            # Group by forward wire key so several fields sharing a marker
+            # relationship name compose into ONE handler (OR of per-field EXISTS)
+            # rather than first-wins.
+            forward_by_key: dict[str, list[tuple[StrongLinkFamily, str]]] = {}
+            for field_name, marker in forward.markers.items():
+                wire_key = wire_relationship_key(marker.relationship, forward.definition_id)
+                forward_by_key.setdefault(wire_key, []).append((forward, field_name))
+            for wire_key, families_fields in forward_by_key.items():
+                handlers.setdefault(f"{_REL_ROOT}.{wire_key}.id", _forward_edge_has_handlers(store, families_fields))
+
+        internal_target = getattr(self.family, "type", None)
+        if strong and isinstance(internal_target, str):
+            # Group by reverse wire key ACROSS every StrongLink family and backing
+            # (`strong_link_families` yields one entry per backing): serving ORs a
+            # target's reverse edges over all backings, so filtering must too.
+            reverse_by_key: dict[str, list[tuple[StrongLinkFamily, str]]] = {}
+            for family in strong:
+                for field_name, marker in family.markers.items():
+                    if marker.reverse is None:
+                        continue
+                    wire_key = wire_relationship_key(marker.reverse, family.definition_id)
+                    reverse_by_key.setdefault(wire_key, []).append((family, field_name))
+            for wire_key, families_fields in reverse_by_key.items():
+                handlers.setdefault(
+                    f"{_REL_ROOT}.{wire_key}.id",
+                    _constant_false_has_handlers()
+                    if alternatives
+                    else _reverse_edge_has_handlers(store, families_fields, internal_target),
+                )
+        return handlers, tuple(targets)
 
     def _sort_value(
         self,
@@ -1213,6 +1306,189 @@ def _type_handlers(entry_type: str) -> Mapping[str, Callable[..., Any]]:
             variable.always_false() if operator == "IS_UNKNOWN" else variable.always_true()
         ),
     }
+
+
+def _served_type_for_target(store: SqlStore, target: type) -> str | None:
+    """Return the served (wire) relationship-type name for a related backing class.
+
+    Mirrors the reverse-serving derivation: an unmapped target falls back to its
+    family's served (wire) name, then its internal type. Returns ``None`` when
+    the target is not a configured entry family (so the relationship cannot be
+    named and is not registered).
+
+    :param store: The SQL store whose configured families supply the mapping.
+    :param target: The related backing class to name.
+    :return: The served relationship-type name, or ``None`` when unconfigured.
+    """
+    internal = store._entry_record_types.get(target)
+    if internal is None:
+        return None
+    family_layout = store._family_for_backing(target)
+    served = _served_definition(family_layout.family) if family_layout is not None else None
+    return served.name if served is not None else internal[0]
+
+
+def _edge_source(store: SqlStore, family: StrongLinkFamily, field_name: str) -> tuple[Any, Any, Any, str, str]:
+    """Resolve one StrongLink edge field to its ``(run, child, edge)`` tables and fk names."""
+    spec = family.schema.field(field_name)
+    assert spec.child is not None and spec.target is not None
+    return (
+        store._table(family.schema.table_name),
+        store._table(spec.child.table_name),
+        store._table(resolve_schema(spec.target).table_name),
+        f"{family.schema.table_name}_sid",
+        spec.child.element_columns[0].name,
+    )
+
+
+def _column_equals(column: str, value: Any) -> Callable[[Any], Any]:
+    """A single-value equality predicate over a row alias's ``column`` (one HAS ALL conjunct)."""
+    return lambda row: row.c[column] == value
+
+
+def _forward_edge_has_handlers(
+    store: SqlStore, families_fields: list[tuple[StrongLinkFamily, str]]
+) -> Mapping[str, Callable[..., Any]]:
+    """A forward StrongLink ``.id`` HAS handler over the filtered run's own edges.
+
+    A run matches when one of its ``field_name`` edges names a listed target
+    (``edge.entry_id``), evaluated through a correlated ``EXISTS`` on the run
+    row being filtered — so per-revision on ``~revs``. Fields sharing one
+    forward wire key OR their per-field ``EXISTS``. ``HAS ALL`` ANDs one such
+    (OR-of-fields) ``EXISTS`` per value, ``HAS ANY`` matches any value, and
+    ``HAS ONLY`` is the ``NOT EXISTS`` complement (an edge-less run matches
+    vacuously).
+
+    :param store: The SQL store backing the run family.
+    :param families_fields: The ``(family, field)`` pairs sharing one forward wire key.
+    :return: A handler mapping containing the ``HAS`` operation.
+    """
+    sources = [_edge_source(store, family, field_name) for family, field_name in families_fields]
+
+    def one_exists(source: tuple[Any, Any, Any, str, str], outer_sid: Any, edge_predicate: Callable[[Any], Any]) -> Any:
+        _run_table, child_table, edge_table, parent_fk, edge_fk = source
+        child_alias = child_table.alias()
+        edge_alias = edge_table.alias()
+        statement = (
+            sqlalchemy.select(sqlalchemy.literal(1))
+            .select_from(child_alias.join(edge_alias, child_alias.c[edge_fk] == edge_alias.c[SID_COLUMN]))
+            .where(child_alias.c[parent_fk] == outer_sid, edge_predicate(edge_alias))
+        )
+        return sqlalchemy.exists(statement)
+
+    def has_handler(entry: str, ops: Any, values: Any, search_variable: SqlVariable, has_type: str) -> _SqlPredicate:
+        outer_sid = search_variable._alias.c[SID_COLUMN]
+
+        def any_source(edge_predicate: Callable[[Any], Any]) -> Any:
+            return sqlalchemy.or_(*(one_exists(source, outer_sid, edge_predicate) for source in sources))
+
+        clause = _has_family_clause(has_type, values, any_source, "entry_id")
+        return _SqlPredicate(_bool_clause(clause), correlation_depth=1)
+
+    return {"HAS": has_handler}
+
+
+def _reverse_edge_has_handlers(
+    store: SqlStore, families_fields: list[tuple[StrongLinkFamily, str]], internal_target: str
+) -> Mapping[str, Callable[..., Any]]:
+    """A reverse StrongLink ``.id`` HAS handler naming the runs that point at each row.
+
+    The filtered row (a data entry) matches when a run's edge names it
+    (``entry_type``/``entry_id`` on the raw stored id, F9 raw-id caveat) and
+    that run is a lineage's latest main revision (the same constraint the
+    reverse serving applies). The reverse edges of ALL run families/backings
+    sharing one reverse wire key OR their per-source ``EXISTS`` — serving merges
+    a target's reverse edges over every backing, so filtering must too. ``HAS
+    ALL`` ANDs one (OR-of-sources) ``EXISTS`` per run id, ``HAS ANY`` matches
+    any listed run, and ``HAS ONLY`` is the ``NOT EXISTS`` complement (an
+    unreferenced row matches vacuously).
+
+    :param store: The SQL store backing the run families.
+    :param families_fields: The ``(family, field)`` pairs sharing one reverse wire key.
+    :param internal_target: The filtered family's internal (unprefixed) type name.
+    :return: A handler mapping containing the ``HAS`` operation.
+    """
+    sources = [_edge_source(store, family, field_name) for family, field_name in families_fields]
+
+    def one_exists(
+        source: tuple[Any, Any, Any, str, str], outer_id: Any, run_id_predicate: Callable[[Any], Any]
+    ) -> Any:
+        run_table, child_table, edge_table, parent_fk, edge_fk = source
+        run_alias = run_table.alias()
+        child_alias = child_table.alias()
+        edge_alias = edge_table.alias()
+        statement = (
+            sqlalchemy.select(sqlalchemy.literal(1))
+            .select_from(
+                run_alias.join(child_alias, child_alias.c[parent_fk] == run_alias.c[SID_COLUMN]).join(
+                    edge_alias, child_alias.c[edge_fk] == edge_alias.c[SID_COLUMN]
+                )
+            )
+            .where(
+                edge_alias.c["entry_type"] == internal_target,
+                edge_alias.c["entry_id"] == outer_id,
+                latest_main_condition(run_table, run_alias),
+                run_id_predicate(run_alias),
+            )
+        )
+        return sqlalchemy.exists(statement)
+
+    def has_handler(entry: str, ops: Any, values: Any, search_variable: SqlVariable, has_type: str) -> _SqlPredicate:
+        outer_id = search_variable._alias.c["id"]
+
+        def any_source(run_id_predicate: Callable[[Any], Any]) -> Any:
+            return sqlalchemy.or_(*(one_exists(source, outer_id, run_id_predicate) for source in sources))
+
+        clause = _has_family_clause(has_type, values, any_source, "id")
+        return _SqlPredicate(_bool_clause(clause), correlation_depth=1)
+
+    return {"HAS": has_handler}
+
+
+def _has_family_clause(
+    has_type: str, values: Any, any_source: Callable[[Callable[[Any], Any]], Any], column: str
+) -> Any:
+    """Compose one HAS-family clause from a per-value EXISTS-over-sources builder.
+
+    ``any_source(predicate)`` yields the OR (across edge sources) of the
+    correlated ``EXISTS`` constrained by ``predicate`` on a matched row alias.
+
+    :param has_type: The ``HAS_ALL``/``HAS_ANY``/``HAS_ONLY`` operator.
+    :param values: The filter id values.
+    :param any_source: The OR-of-sources EXISTS builder for one row predicate.
+    :param column: The matched row-alias column (``entry_id`` forward, ``id`` reverse).
+    :return: The composed SQL boolean clause.
+    :raises FilterTranslationError: If ``has_type`` is not a supported set operator.
+    """
+    if has_type == "HAS_ANY":
+        return any_source(lambda row: row.c[column].in_(values))
+    if has_type == "HAS_ALL":
+        return sqlalchemy.and_(*(any_source(_column_equals(column, value)) for value in values))
+    if has_type == "HAS_ONLY":
+        return sqlalchemy.not_(any_source(lambda row: row.c[column].notin_(values)))
+    raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
+
+
+def _constant_false_has_handlers() -> Mapping[str, Callable[..., Any]]:
+    """A HAS handler matching no row (reverse keys suppressed on an alternatives stream)."""
+    return {"HAS": lambda entry, ops, values, variable, has_type: _SqlPredicate(_bool_clause(sqlalchemy.false()))}
+
+
+def _empty_related_resolver(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:
+    """Resolve depth-1 related-property filters to no ids on the stored route.
+
+    Depth-1 related-property filtering (e.g. ``references.doi CONTAINS ...``) is
+    deliberately deferred on the stored route; returning no ids preserves the
+    pre-existing matches-nothing behavior rather than raising not-implemented,
+    while ``<type>.id HAS ...`` is served directly by its registered handler.
+
+    :param related_type: The related entry type named by the dotted filter.
+    :param sub_ast: The sub-filter with the ``<related_type>.`` prefix stripped.
+    :return: An empty tuple (no matching related ids).
+    """
+    # ponytail: depth-1 stored related-property filtering deferred; wire a nested
+    # stored searcher over the target family here if it is later wanted.
+    return ()
 
 
 def _response_json_value(value: object) -> Any:

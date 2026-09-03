@@ -32,6 +32,7 @@ from httk.store.entry_providers import strong_link_markers
 __all__ = [
     "StrongLinkFamily",
     "forward_run_edges",
+    "latest_main_condition",
     "latest_main_run_sids",
     "reverse_run_edges",
     "strong_link_families",
@@ -168,6 +169,36 @@ def latest_main_run_sids(connection: Any, run_table: sqlalchemy.Table) -> dict[i
         )
         if max_sid is not None
     }
+
+
+def latest_main_condition(
+    run_table: sqlalchemy.Table, run_alias: sqlalchemy.FromClause
+) -> sqlalchemy.ColumnElement[bool]:
+    """Return the correlated predicate selecting a run lineage's latest main row.
+
+    The SQL-predicate counterpart of :func:`latest_main_run_sids` for use inside
+    a correlated ``EXISTS`` (e.g. reverse-relationship filtering): ``run_alias``
+    is a main row (``alt_kind IS NULL``) and no newer main row of the same
+    lineage exists. The same constraint the reverse serving path applies through
+    a Python-side max-sid-per-lineage scan.
+
+    :param run_table: The run family's parent table (used to alias the newer-row probe).
+    :param run_alias: The run parent alias being constrained inside the outer query.
+    :return: The ``alt_kind IS NULL`` and latest-of-lineage boolean predicate.
+    """
+    newer = run_table.alias()
+    return sqlalchemy.and_(
+        run_alias.c[ALT_KIND_COLUMN].is_(None),
+        sqlalchemy.not_(
+            sqlalchemy.exists(
+                sqlalchemy.select(sqlalchemy.literal(1)).where(
+                    newer.c[LOGICAL_ID_COLUMN] == run_alias.c[LOGICAL_ID_COLUMN],
+                    newer.c[ALT_KIND_COLUMN].is_(None),
+                    newer.c[SID_COLUMN] > run_alias.c[SID_COLUMN],
+                )
+            )
+        ),
+    )
 
 
 def reverse_run_edges(

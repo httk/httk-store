@@ -34,27 +34,58 @@ from httk.store.query.optimade_filters import (
     FilterTranslationError,
     filter_searcher,
     known_unknown_handler,
-    set_handler,
     simple_property_handlers,
 )
 from httk.store.served_specs import definition_fulltype, served_specs
 
 __all__ = [
+    "field_id_has_handlers",
     "optimade_filter_searcher",
 ]
 
 
-def _related_id_has_handlers(store: SqlStore, related_cls: type, field: str) -> Mapping[str, Callable[..., Any]]:
-    """The ``'<related_type>.id'`` HAS handler over a reference or child-of-storable field."""
+def field_id_has_handlers(field: str, sids_for: Callable[[Any], Any]) -> Mapping[str, Callable[..., Any]]:
+    """A ``'<related_type>.id'`` HAS handler matching a reference/child field against related sids.
+
+    ``sids_for(values)`` returns the sub-select of related-row sids the field's
+    foreign key must match for those values; the returned handler composes the
+    HAS family over ``field`` with the correct set semantics. ``HAS ALL`` ANDs
+    one fresh ``has_any`` per value (each over an independently joined child
+    row, so a row must carry a child matching *every* value), ``HAS ANY`` is a
+    single ``has_any`` over all values, and ``HAS ONLY`` uses ``has_only`` (a
+    row with no such children matches vacuously).
+
+    :param field: The backend reference or child-of-storable field name.
+    :param sids_for: A callable mapping filter values to a related-sid sub-select.
+    :return: A handler mapping containing the ``HAS`` operation.
+    :raises ~httk.store.query.optimade_filters.FilterTranslationError: If an unexpected set operator is supplied.
+    """
 
     def has_handler(
         entry: str, ops: Any, values: Any, search_variable: SearchVariable, has_type: str
     ) -> SearchExpression:
-        table = store._table(resolve_schema(related_cls).table_name)
-        sids = (sqlalchemy.select(table.c[SID_COLUMN]).where(table.c["id"].in_(values)),)
-        return set_handler(field, ops, sids, has_type, search_variable)
+        if has_type == 'HAS_ALL':
+            # A fresh child alias per conjunct (each ``getattr`` access joins a
+            # fresh alias) so the ANDed predicates constrain independent rows.
+            search = getattr(search_variable, field).has_any(sids_for(values[:1]))
+            for value in values[1:]:
+                search = search & getattr(search_variable, field).has_any(sids_for([value]))
+            return search
+        if has_type == 'HAS_ANY':
+            return getattr(search_variable, field).has_any(sids_for(values))
+        if has_type == 'HAS_ONLY':
+            return getattr(search_variable, field).has_only(sids_for(values))
+        raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
     return {'HAS': has_handler}
+
+
+def _related_id_has_handlers(store: SqlStore, related_cls: type, field: str) -> Mapping[str, Callable[..., Any]]:
+    """The ``'<related_type>.id'`` HAS handler over a reference or child-of-storable field."""
+    table = store._table(resolve_schema(related_cls).table_name)
+    return field_id_has_handlers(
+        field, lambda values: sqlalchemy.select(table.c[SID_COLUMN]).where(table.c["id"].in_(values))
+    )
 
 
 def _weak_link_id_has_handlers(store: SqlStore, related_cls: type, name: str) -> Mapping[str, Callable[..., Any]]:
@@ -63,7 +94,7 @@ def _weak_link_id_has_handlers(store: SqlStore, related_cls: type, name: str) ->
     Each served id resolves to the target lineage id through a subquery over the
     target table's physical ``id`` column, matched against the link's live
     latest target lineages. ``HAS ALL`` composes as ANDed per-value ``has_any``
-    over fresh link aliases (mirroring :func:`set_handler`); ``HAS ONLY`` uses
+    over fresh link aliases (mirroring :func:`field_id_has_handlers`); ``HAS ONLY`` uses
     the set machinery's ``has_only`` (a no-links source matches vacuously), which
     expresses the multi-valued semantics faithfully via the subquery passthrough.
     """

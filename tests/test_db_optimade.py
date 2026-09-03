@@ -161,6 +161,22 @@ def test_child_of_storable_target(store):
     assert results(searcher) == [assembly_1, assembly_2]
 
 
+def test_related_id_has_all_needs_every_value(store):
+    """HAS ALL over related ids requires each value on an independent child row (S4 fix)."""
+    part_a = Part("bolt", 1, "part-a", "part-a~1")
+    part_b = Part("nut", 5, "part-b", "part-b~1")
+    assembly_1 = Assembly("frame", [part_a, part_b], "assembly-1", "assembly-1~1")
+    assembly_2 = Assembly("hinge", [part_a], "assembly-2", "assembly-2~1")
+    store.save(assembly_1)
+    store.save(assembly_2)
+    # Only assembly_1 carries BOTH parts; a HAS ALL that collapsed to HAS ANY
+    # would wrongly also return assembly_2 (which has only part_a).
+    searcher = optimade_filter_searcher(
+        store, Assembly, f'parts.id HAS ALL "{part_a.id}","{part_b.id}"', related_classes={"parts": Part}
+    )
+    assert results(searcher) == [assembly_1]
+
+
 def test_nested_dotted_path_not_implemented(store):
     with pytest.raises(FilterTranslationError) as excinfo:
         optimade_filter_searcher(

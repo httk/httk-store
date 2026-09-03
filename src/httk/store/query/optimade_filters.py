@@ -658,6 +658,29 @@ def translate_filter_ast(
         right = node[3]
         assert left[0] == 'Identifier'
         has_handler: Callable[..., Any] | None
+        if len(left) >= 4:
+            # A dotted identifier with three or more segments (e.g. the
+            # ``_httk_relationships.<key>.id`` filter-grammar extension): try the
+            # full dotted name as a handler key before the standard branches. On
+            # a miss, fall through to the ordinary unknown-root logic — an
+            # own-prefix name errors (naming the FULL dotted path), a foreign
+            # prefix keeps its null semantics — never the relationship
+            # not-implemented path.
+            dotted = '.'.join(left[1:])
+            dotted_handler = handlers.get(dotted, {}).get('HAS')
+            if dotted_handler is not None:
+                values = format_value('list of string', right)
+                if ops != tuple(['='] * len(values)):
+                    raise FilterTranslationError(
+                        "HAS queries with non-equal operators not implemented yet.", "not-implemented"
+                    )
+                search_expr = dotted_handler(dotted, ops, values, search_variable, node[0])
+                assert search_expr is not None
+                return search_expr
+            if left[1].startswith(recognized_prefixes):
+                raise FilterTranslationError(
+                    "Filter invokes unrecognized property name: " + dotted, "unrecognized-property"
+                )
         if len(left) > 2 and left[1] in relationship_targets:
             # Filtering on a relationship, e.g. `references.id HAS "ref-1"`.
             if len(left) == 3 and left[2] == 'id':

@@ -486,6 +486,32 @@ def test_relationship_id_has_without_handler_not_implemented():
     assert excinfo.value.category == "not-implemented"
 
 
+def test_three_segment_dotted_identifier_dispatches_on_full_key():
+    """A >=3-segment dotted identifier resolves through its full dotted handler key."""
+    handlers = make_handlers()
+    handlers["_httk_relationships.references.id"] = relationship_id_handler("relkey_input")
+    expr = translate(
+        '_httk_relationships.references.id HAS "references-1"',
+        relationship_targets=("references",),
+        handlers=handlers,
+    )
+    assert expr.tree == ("has_any", ("field", "relkey_input"), ("references-1",))
+
+
+def test_three_segment_own_prefix_unknown_raises_naming_full_dotted_path():
+    """An own-prefix >=3-segment miss errors, and the message names the FULL dotted path."""
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate('_httk_relationships.bogus.id HAS "x"', relationship_targets=("references",))
+    assert excinfo.value.category == "unrecognized-property"
+    assert "_httk_relationships.bogus.id" in str(excinfo.value)
+
+
+def test_three_segment_foreign_prefix_keeps_null_semantics():
+    """A foreign-prefixed >=3-segment identifier matches nothing (never an error)."""
+    expr = translate('_otherdb_relationships.foo.id HAS "x"', relationship_targets=("references",))
+    assert expr.tree == FALSE_TREE
+
+
 def test_relationship_id_handler_directly():
     table = relationship_id_handler("refs")
     variable = FakeVariable("t")

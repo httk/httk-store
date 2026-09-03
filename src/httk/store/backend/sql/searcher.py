@@ -92,6 +92,7 @@ from httk.store.store_timestamp import ns_operand_to_store_units
 
 if TYPE_CHECKING:
     from httk.store.backend.sql.store import SqlStore
+    from httk.store.query.slicer import Slicer
 
 __all__ = [
     "SqlColumn",
@@ -1208,6 +1209,25 @@ class SqlSearcher:
         from httk.store.backend.sql.results import SqlResultSet
 
         return SqlResultSet(self, outputs or None)
+
+    def slicer(self, target: type) -> "Slicer":
+        """A pandas-style ``[]`` indexing view over ``target`` records.
+
+        Each terminal indexing operation runs against a fresh searcher minted
+        with this searcher's ``as_of``/``only_latest``/``only_main_alt`` scope,
+        so slicer operations never share filter state.
+
+        :param target: The stored record class to index.
+        :return: A slicer over ``target``.
+        """
+        from httk.store.query.slicer import Slicer
+
+        def _make() -> "SqlSearcher":
+            return self._store.searcher(
+                as_of=self._as_of, only_latest=self._only_latest, only_main_alt=self._only_main_alt
+            )
+
+        return Slicer(_make, target)
 
     # ------------------------------------------------------------------ execution
 

@@ -21,6 +21,7 @@ from .query import (
     SearchField,
     SearchResult,
     SearchVariable,
+    Slicer,
     Store,
     UnsupportedQueryError,
 )
@@ -1014,3 +1015,20 @@ class FederatedSearcher:
         """
 
         return FederatedResultSet(self._store, self._plan(outputs or None))
+
+    def slicer(self, target: object) -> Slicer:
+        """A pandas-style ``[]`` indexing view over ``target`` records.
+
+        Each terminal indexing operation runs against a fresh federated searcher
+        minted with this searcher's ``as_of``/``only_latest`` scope, so slicer
+        operations never share filter state. Slicer masks never sort, so the
+        federation's rejection of sorting does not apply.
+
+        :param target: The stored record class to index.
+        :return: A slicer over ``target``.
+        """
+
+        def _make() -> "FederatedSearcher":
+            return self._store.searcher(as_of=self._as_of, only_latest=self._only_latest)
+
+        return Slicer(_make, target)

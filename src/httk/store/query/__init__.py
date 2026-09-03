@@ -8,5 +8,13 @@ from . import portable as _portable
 from . import protocols as _protocols
 from .portable import *
 from .protocols import *
+from .slicer import Slicer, SlicerColumn, SlicerMask, SlicerSelection
 
-__all__ = [*_protocols.__all__, *_portable.__all__]  # noqa: PLE0604  # pyright: ignore[reportUnsupportedDunderAll]
+__all__ = [  # noqa: PLE0604  # pyright: ignore[reportUnsupportedDunderAll]
+    *_protocols.__all__,
+    *_portable.__all__,
+    "Slicer",
+    "SlicerColumn",
+    "SlicerMask",
+    "SlicerSelection",
+]

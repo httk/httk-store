@@ -1055,6 +1055,34 @@ as_vector = energies.to_fracvector()
 non-rational projections. Variable-length CHILD-role projections are rejected
 when `results()` is declared; reference-path projections are supported.
 
+### Pandas-style slicer indexing
+
+`search.slicer(cls)` wraps this same DSL in a `[]` indexing surface that reads
+like pandas. It is pure sugar — it compiles bracket indexing into the
+`variable`/`add`/`output`/`results` calls above and adds no query capability of
+its own:
+
+```python
+note = store.searcher().slicer(StructureRecord)
+list(note["formula"])                        # one field's decoded values
+list(note[note["energy"] < 0])               # records a boolean mask selects
+len(note[note["spacegroup"] == 225])         # count of a selection
+```
+
+A field-name string gives a **column** (iterate for values); comparisons and
+the helpers `isin`, `isna`, `notna`, `between`, and the literal
+`.str.contains`/`startswith`/`endswith` build a boolean **mask**; indexing with
+a mask gives a **selection** (iterate for reconstructed records, or take its
+`len()`). Masks combine with `&`, `|`, `^`, `~`, where both operands must be
+masks of the same slicer. Every operation runs against a *fresh* searcher, so a
+filtered selection never leaks its condition into the next operation, and
+iterating the slicer itself yields every record.
+
+The slicer never sorts (some conforming stores reject ordering) and offers no
+`.loc`/`.iloc`, integer/slice indexing, or multi-column selection — use the
+plain searcher for those. The same `slicer(cls)` method is available on the
+Mongo and federated searchers.
+
 ### Continuation pages
 
 `SqlResultSet.page()` is an optional capability (described neutrally by

@@ -161,6 +161,12 @@ nitpick_ignore = [
     # edge marker); the committed release inventory cannot name it until core is
     # released, so its cross-reference is ignored exactly as the sibling markers.
     ("py:class", "httk.core.storage.StrongLink"),
+    # The slicer's public SlicerMask/SlicerSelection constructors and the
+    # SlicerColumn.str accessor carry the module-private op-tree union (_Node) and
+    # accessor (_SlicerStr) in their signatures; both are deliberately undocumented,
+    # so their annotation xrefs cannot resolve (same precedent as _Context above).
+    ("py:class", "_Node"),
+    ("py:class", "_SlicerStr"),
     # AutoAPI renders ResultSetLike.one as a bare method reference in the
     # protocol and implementing result-set summaries.  There is no module-level
     # ``one`` method for Sphinx to resolve; the qualified class members remain
@@ -184,6 +190,13 @@ suppress_warnings = ["myst.xref_missing", "autoapi.python_import_resolution"]
 def skip_member(app, what, name, obj, skip, options):
     # Skip private members (those starting with _)
     if name.startswith('_'):
+        return True
+    # SlicerColumn.str is the pandas-style literal-matching accessor. A documented
+    # member named ``str`` shadows the builtin ``str`` for every bare type-annotation
+    # cross-reference across the package, so it is left out of the API reference; the
+    # accessor is documented in prose in the SlicerColumn docstring instead. AutoAPI
+    # passes properties by their fully-qualified name, so match the leaf component.
+    if name.rsplit(".", 1)[-1] == "str":
         return True
     return skip
 

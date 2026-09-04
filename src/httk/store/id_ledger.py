@@ -1,28 +1,39 @@
-"""A sealed, append-only id ledger mapping stable source keys to entry ids.
+"""A signed, append-only id ledger mapping stable source keys to entry ids.
 
 The ledger is an *allocator*: it maps a stable, opaque **source key** to a
 recommended entry id (``httk.core.entry_ids``) and hands the same id back for
 that key forever, so a database rebuilt from the same sources keeps its ids and
 content changes become revisions rather than fresh entries.
 
-The whole ledger is one signed seal document (httk-core
-``core/project/sealing.py``): ``kind="httk-idledger"``, its ``subject`` carrying
-the format version, the explicit per-family id bases, and the id series, and its
-``records`` an ordered list carrying ``{key, family, id}`` assignments and
-``{key, alias_of}`` aliases, either optionally carrying ``supersedes`` (see
-below). It is replaced atomically and durably by ``write_seal`` and read back
-through ``read_seal``.
+The on-disk container is a single stdlib-``sqlite3`` database file (not one of
+httk-store's own store engines). Its ``meta`` table records the container format
+and the id series; its ``records`` table holds the ordered ledger records, each a
+``{key, family, id}`` assignment or a ``{key, alias_of}`` alias, either optionally
+carrying ``supersedes`` (see below), keyed by a 1-based append sequence; and its
+``segments`` table records, one row per append, the contiguous range of records
+that append added together with the canonical seal-body signature over exactly
+that segment (``httk.core.project.sealing``: ``kind="httk-idledger-segment"``,
+its ``subject`` carrying the format version, this ledger's uuid, the id series,
+the full per-family id bases at that point, and the segment's number and record
+range). The uuid binds every segment to this ledger, so a segment cannot be
+grafted from another ledger that happens to share a series and bases. Each close
+that appends signs only the segment it added, so old segments are never rewritten.
 
-``verify_seal`` checks signatures only, never content, so :meth:`IdLedger.open`
-validates the document's structure and every entry invariant itself. The seal's
+Signatures attest to the bytes, never to their meaning, so :meth:`IdLedger.open`
+validates the container's structure and every entry invariant itself. A segment
 signature is an *audit record*, not a build gate: it is logged (naming the
-signer) and inspected manually alongside git history, never demanded. The
+signers) and inspected manually alongside git history, never demanded. The
 integrity self-check is always on — an INVALID signature (content that no longer
-matches its own seal: tamper, corruption, a hand-edit) always raises. Trust
-enforcement is opt-in: with ``trusted_keys`` the signer must be one of them;
-without them a valid signature is accepted and the signer merely noted. The
-recovery for a corrupted ledger is to restore it from git; the verification
-errors say so.
+matches its own segment: tamper, corruption, a hand-edit) always raises. Trust
+enforcement is opt-in: with ``trusted_keys`` every segment's signer must be one
+of them; without them a valid signature is accepted and the signers merely noted.
+The segments partition the records exactly, so a middle-record deletion,
+renumbering, or any record/segment range mismatch is caught in-file by the
+partition check even without verification. What no in-file check can attest is
+the *tip*: removing the newest segment(s) together with exactly the records they
+cover leaves a state indistinguishable from an older valid ledger (as with any
+whole-file rollback), so that class of loss is witnessed by git history alone.
+The recovery for a corrupted ledger is to restore it from git; the errors say so.
 
 No record is ever edited or removed. An entry for a source that later disappears
 simply persists and keeps its number. A key is re-bound only by *supersession*:
@@ -40,20 +51,23 @@ import json
 import logging
 import os
 import socket
+import sqlite3
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Self, cast
 
+from httk.core._json import json_bytes
 from httk.core.entry_ids import ENTRY_ID_PATTERN, format_entry_id, is_url_safe_id, parse_entry_id
 from httk.core.project.sealing import (
     INVALID,
     VALID_TRUSTED,
+    SealError,
     build_seal_body,
-    read_seal,
-    verify_seal,
-    write_seal,
+    sign_seal_body,
+    verify_signed_body,
 )
 
 __all__ = [
@@ -64,8 +78,11 @@ __all__ = [
 
 _LOGGER = logging.getLogger(__name__)
 
-#: The seal ``kind`` every id ledger carries.
-LEDGER_KIND = "httk-idledger"
+#: The seal ``kind`` every id ledger segment carries.
+LEDGER_KIND = "httk-idledger-segment"
+
+#: The sqlite container format the meta table records.
+LEDGER_FORMAT = "httk-idledger-sqlite"
 
 #: The ledger subject format the invariants below are written against.
 LEDGER_FORMAT_VERSION = 1
@@ -79,12 +96,6 @@ class IdLedgerError(RuntimeError):
     aliased key without superseding, or aliasing a key to an id absent from the
     ledger.
     """
-
-
-def _json_bytes(value: object) -> bytes:
-    """Encode a value as canonical, sorted-key, compact UTF-8 JSON."""
-
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _live_id(record: Mapping[str, str]) -> str:
@@ -116,21 +127,24 @@ def check_ledger_key(key: str) -> str:
 
 
 class IdLedger:
-    """A sealed, append-only allocator of stable entry ids for source keys.
+    """A signed, append-only allocator of stable entry ids for source keys.
 
     Open one with :meth:`create` or :meth:`open` and use it as a context
-    manager; the enclosing ``with`` holds an exclusive lock and reseals the
-    document on exit only when something was assigned or aliased. Callers use
-    those constructors rather than the initializer, which binds an
+    manager; the enclosing ``with`` holds an exclusive lock and, on exit, appends
+    and signs one new segment only when something was assigned or aliased.
+    Callers use those constructors rather than the initializer, which binds an
     already-validated state to its file and lock.
 
-    :param path: The ledger seal document path.
+    :param path: The ledger sqlite database path.
     :param bases: The per-family id bases, keyed by family name.
     :param series: The id series every minted id carries.
-    :param keys: The signing keys used to reseal on close, each a
+    :param ledger_uuid: This ledger's identity, stamped into every segment subject.
+    :param keys: The signing keys used to sign the next segment on close, each a
         ``(role, seed)`` pair.
     :param records: The ordered ledger records, each a ``{key, ...}`` mapping.
     :param live: The newest record per key, the key's live binding.
+    :param persisted: How many records are already stored on disk.
+    :param segments: How many segments are already stored on disk.
     """
 
     def __init__(
@@ -139,17 +153,23 @@ class IdLedger:
         *,
         bases: dict[str, str],
         series: str,
+        ledger_uuid: str,
         keys: Sequence[tuple[str, bytes]],
         records: list[dict[str, str]],
         live: dict[str, dict[str, str]],
+        persisted: int,
+        segments: int,
     ) -> None:
         self._path = path
         self._lock_path = path.with_name(path.name + ".lock")
         self._bases = bases
         self._series = series
+        self._ledger_uuid = ledger_uuid
         self._keys = tuple(keys)
         self._records = records
         self._live = live
+        self._persisted = persisted
+        self._segments = segments
         self._dirty = False
         self._closed = False
 
@@ -166,7 +186,11 @@ class IdLedger:
     ) -> "IdLedger":
         """Create and sign a fresh, empty ledger, then hold it open and locked.
 
-        :param path: Where to write the ledger seal document; it must not exist.
+        The fresh database carries segment 1: an empty segment (no records) whose
+        signed subject stamps the initial bases, so the ledger is signed from
+        birth.
+
+        :param path: Where to write the ledger database; it must not exist.
         :param bases: The explicit per-family id bases, e.g.
             ``{"structures": "anyt.am.structure"}``.
         :param series: The id series token every minted id carries.
@@ -185,8 +209,29 @@ class IdLedger:
             # letting this call overwrite its ledger with an empty one.
             if location.exists():
                 raise IdLedgerError(f"id ledger already exists: {location}; open it instead of creating it")
-            ledger = cls(location, bases=checked, series=series, keys=keys, records=[], live={})
-            ledger._write()
+            ledger = cls(
+                location,
+                bases=checked,
+                series=series,
+                ledger_uuid=uuid.uuid4().hex,
+                keys=keys,
+                records=[],
+                live={},
+                persisted=0,
+                segments=0,
+            )
+            try:
+                ledger._write()  # writes the schema, meta, and the signed empty segment 1
+            except BaseException:
+                # Only our own write can leave a partial file here (the existence
+                # check above already refused a foreign ledger, which we must not
+                # delete). A failed write — e.g. schema laid down before an
+                # interrupted segment insert — must not leave a partial ledger, nor
+                # a stale hot journal beside it; a hard power loss mid-create still
+                # leaves the lock held for manual cleanup, which is accepted.
+                for suffix in ("", "-journal", "-wal", "-shm"):
+                    location.with_name(location.name + suffix).unlink(missing_ok=True)
+                raise
         except BaseException:
             location.with_name(location.name + ".lock").unlink(missing_ok=True)
             raise
@@ -203,51 +248,67 @@ class IdLedger:
         bases: Mapping[str, str] | None = None,
         series: str | None = None,
     ) -> "IdLedger":
-        """Open an existing ledger, verifying its signature and invariants.
+        """Open an existing ledger, verifying its signatures and invariants.
 
-        With *verify*, the signature is checked first: an INVALID signature
-        (content that no longer matches its own seal) always raises, while a
+        With *verify*, every segment's signature is checked: an INVALID signature
+        (content that no longer matches its own segment) always raises, while a
         valid one is treated as an audit record — *trusted_keys* demand a trusted
-        signer, and without them a valid signature is accepted and its signer
-        logged. The structure and every entry invariant are then validated
-        regardless, because the signature attests only to the bytes, not to
-        their meaning.
+        signer on every segment, and without them the valid signers are logged.
+        The structure and every entry invariant are validated regardless (segment
+        ranges must partition the records exactly, bases must grow monotonically,
+        ids must conform, supersession must be sound), because a signature
+        attests only to the bytes, not to their meaning.
 
         When *series* is given it must equal the stored series. When *bases* is
         given it is reconciled as a SUPERSET of the stored map: every stored
         family must appear in it with the same base (removing, renaming, or
         re-basing a stored family is an error), while families present only in the
-        expectation are ADDED and stamped into the subject at the next reseal (so
-        a build that assigns nothing but grows the scheme still writes on close).
-        The merged map is revalidated for id shape and base uniqueness.
+        expectation are ADDED and stamped into the next segment's subject at close
+        (so a build that assigns nothing but grows the scheme still writes on
+        close). The merged map is revalidated for id shape and base uniqueness.
 
-        :param path: The ledger seal document to open.
-        :param keys: The signing keys used to reseal on close, each ``(role, seed)``.
+        :param path: The ledger database to open.
+        :param keys: The signing keys used to sign the next segment on close.
         :param trusted_keys: Trust anchors as ``ed25519:`` keys or ``sha256:``
-            fingerprints; when given, the signer must be one of them.
-        :param verify: Whether to verify the seal signature.
+            fingerprints; when given, every segment's signer must be one of them.
+        :param verify: Whether to verify the segment signatures.
         :param bases: The per-family bases the caller expects, asserted when given.
         :param series: The id series the caller expects, asserted when given.
         :return: The open, locked ledger.
-        :raises IdLedgerError: If the lock is held, verification fails, an
-            invariant is violated, or the expected bases/series disagree.
+        :raises IdLedgerError: If the ledger is missing, the lock is held,
+            verification fails, an invariant is violated, or the expected
+            bases/series disagree.
         """
 
         location = Path(path)
         _acquire_lock(location.with_name(location.name + ".lock"))
         try:
-            if verify:
-                _verify_signature(location, trusted_keys)
-            stored_bases, stored_series, records, live = _read_and_validate(location)
+            # sqlite3.connect creates a missing file, so existence is checked here,
+            # under the lock, before any connection is opened.
+            if not location.exists():
+                raise IdLedgerError(f"id ledger does not exist: {location}. Restore it from git.")
+            stored_bases, stored_series, stored_uuid, records, live, segments = _read_and_validate(
+                location, verify=verify, trusted_keys=trusted_keys
+            )
             if series is not None and series != stored_series:
                 raise IdLedgerError(f"id ledger {location} has series {stored_series!r}, not the expected {series!r}")
             effective_bases = stored_bases
             added_families = False
             if bases is not None:
                 effective_bases, added_families = _extend_bases(stored_bases, dict(bases), stored_series, location)
-            ledger = cls(location, bases=effective_bases, series=stored_series, keys=keys, records=records, live=live)
-            # An added family is stamped into the subject at the next reseal; a build
-            # that assigns nothing but extends the base map still writes on close.
+            ledger = cls(
+                location,
+                bases=effective_bases,
+                series=stored_series,
+                ledger_uuid=stored_uuid,
+                keys=keys,
+                records=records,
+                live=live,
+                persisted=len(records),
+                segments=segments,
+            )
+            # An added family is stamped into the next segment's subject at close; a
+            # build that assigns nothing but extends the base map still writes.
             ledger._dirty = added_families
             return ledger
         except BaseException:
@@ -365,14 +426,15 @@ class IdLedger:
     # -- lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
-        """Reseal the ledger when it changed, then release the lock.
+        """Append and sign a new segment when the ledger changed, then unlock.
 
-        A ledger untouched since it was opened is left byte-identical: nothing
-        is rewritten, so an idempotent rebuild produces no git churn. A reseal
-        that finds no signing key available raises from the sealing layer; a
-        failed reseal leaves the ledger unclosed and its lock held, so a retried
-        close reattempts the write instead of silently skipping it (the manual
-        remedy for an abandoned session is to delete the lock).
+        A ledger untouched since it was opened is left byte-identical: no
+        connection is opened and nothing is written, so an idempotent rebuild
+        produces no git churn. A dirty close with no signing key available raises
+        from the sealing layer before anything is written; a failed close leaves
+        the ledger unclosed and its lock held, so a retried close reattempts the
+        write instead of silently skipping it (the manual remedy for an abandoned
+        session is to delete the lock).
         """
 
         if self._closed:
@@ -464,16 +526,114 @@ class IdLedger:
         return highest
 
     def _write(self) -> None:
-        """Sign and atomically write the whole ledger as a seal document."""
+        """Append and sign one segment covering records not yet persisted.
 
+        The segment's signed subject carries the full current base map, so a
+        base-extension-only close still writes an empty segment stamping the grown
+        scheme. On the first write (creation) the schema and meta rows are laid
+        down before segment 1. The signing key is required before any connection
+        is opened, so a keyless dirty close leaves the file untouched.
+        """
+
+        if not self._keys:
+            raise SealError("no signing key is available to sign the id ledger segment")
+        new_records = self._records[self._persisted :]
+        first_seq = self._persisted + 1
+        segment = self._segments + 1
         subject: dict[str, object] = {
             "ledger_format_version": LEDGER_FORMAT_VERSION,
-            "bases": dict(self._bases),
+            "ledger": self._ledger_uuid,
             "series": self._series,
+            "bases": dict(self._bases),
+            "segment": segment,
+            "first_record": first_seq,
+            "record_count": len(new_records),
         }
-        records = cast("list[dict[str, object]]", [dict(record) for record in self._records])
-        body = build_seal_body(LEDGER_KIND, subject, records)
-        write_seal(self._path, body, self._keys)
+        signed_records = cast("list[dict[str, object]]", [dict(record) for record in new_records])
+        body = build_seal_body(LEDGER_KIND, subject, signed_records)
+        body_sha256, signatures = sign_seal_body(body, self._keys)
+        connection = sqlite3.connect(self._path, isolation_level=None)
+        try:
+            if self._segments == 0:
+                _initialize_schema(connection, self._series, self._ledger_uuid)
+            connection.execute("BEGIN IMMEDIATE")
+            for offset, record in enumerate(new_records):
+                connection.execute(
+                    "INSERT INTO records(seq, key, family, id, alias_of, supersedes) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        first_seq + offset,
+                        record["key"],
+                        record.get("family"),
+                        record.get("id"),
+                        record.get("alias_of"),
+                        record.get("supersedes"),
+                    ),
+                )
+            connection.execute(
+                "INSERT INTO segments"
+                "(segment, first_seq, record_count, created_at, subject, body_sha256, signatures) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    segment,
+                    first_seq,
+                    len(new_records),
+                    str(body["created_at"]),
+                    json_bytes(body["subject"]).decode("utf-8"),
+                    body_sha256,
+                    json_bytes(signatures).decode("utf-8"),
+                ),
+            )
+            connection.execute("COMMIT")
+            # Advance bookkeeping the instant the data is durable: an interrupt
+            # after COMMIT but before this leaves committed records that a
+            # close-retry would re-insert (a raw records-PK IntegrityError with the
+            # lock held forever), so it lives inside the try, right after COMMIT.
+            self._persisted += len(new_records)
+            self._segments = segment
+            self._dirty = False
+        finally:
+            connection.close()
+
+
+# -- schema ------------------------------------------------------------------
+
+_SCHEMA = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE records (
+  seq INTEGER PRIMARY KEY,
+  key TEXT NOT NULL,
+  family TEXT,
+  id TEXT,
+  alias_of TEXT,
+  supersedes TEXT,
+  CHECK ((family IS NOT NULL AND id IS NOT NULL AND alias_of IS NULL)
+      OR (family IS NULL AND id IS NULL AND alias_of IS NOT NULL))
+);
+CREATE TABLE segments (
+  segment INTEGER PRIMARY KEY,
+  first_seq INTEGER NOT NULL,
+  record_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body_sha256 TEXT NOT NULL,
+  signatures TEXT NOT NULL
+);
+"""
+
+
+def _initialize_schema(connection: sqlite3.Connection, series: str, ledger_uuid: str) -> None:
+    """Lay down the ledger schema and its meta rows on a fresh database."""
+
+    connection.executescript(_SCHEMA)
+    connection.executemany(
+        "INSERT INTO meta(key, value) VALUES (?, ?)",
+        [
+            ("format", LEDGER_FORMAT),
+            ("ledger_format_version", str(LEDGER_FORMAT_VERSION)),
+            ("ledger", ledger_uuid),
+            ("series", series),
+        ],
+    )
 
 
 # -- validation helpers ------------------------------------------------------
@@ -507,7 +667,7 @@ def _extend_bases(
     """Reconcile a stored base map against a caller's expectation (superset-open).
 
     Families the caller expects that are absent from the stored map are ADDED
-    (stamped at the next reseal); every stored family must appear in the
+    (stamped at the next segment); every stored family must appear in the
     expectation with the SAME base (a stored family is never removed, renamed, or
     re-based). The merged map is revalidated (id-shape + no duplicate base across
     families) before it is accepted.
@@ -565,7 +725,7 @@ def _acquire_lock(lock_path: Path) -> None:
     :raises IdLedgerError: If the lock already exists (no auto-reclaim).
     """
 
-    body = _json_bytes({"created": _utc_now(), "hostname": socket.gethostname(), "pid": os.getpid()}) + b"\n"
+    body = json_bytes({"created": _utc_now(), "hostname": socket.gethostname(), "pid": os.getpid()}) + b"\n"
     try:
         descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError:
@@ -598,79 +758,330 @@ def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _verify_signature(location: Path, trusted_keys: Sequence[str]) -> None:
-    """Verify the ledger's seal signature and classify its signer.
-
-    :param location: The ledger seal document to verify.
-    :param trusted_keys: Trust anchors; when given, the signer must be trusted.
-    :raises IdLedgerError: If no signature verifies, or a trusted one was required.
-    """
-
-    verification = verify_seal(location, trusted_keys=tuple(trusted_keys))
-    if verification.verdict == INVALID:
-        raise IdLedgerError(
-            f"id ledger signature does not verify ({verification.reason}): {location}. "
-            "The ledger may be corrupted or tampered; restore it from git."
-        )
-    if trusted_keys:
-        if verification.verdict != VALID_TRUSTED:
-            raise IdLedgerError(
-                f"id ledger is signed by an untrusted key ({verification.reason}): {location}. "
-                "Pin the correct signer, or restore the ledger from git."
-            )
-    else:
-        _LOGGER.info(
-            "id ledger %s signed by %s (no trust anchor configured; signature is an audit record).",
-            location,
-            ", ".join(verification.signers) or "an unrecorded key",
-            extra={"context": "store"},
-        )
-
-
 def _read_and_validate(
-    location: Path,
-) -> tuple[dict[str, str], str, list[dict[str, str]], dict[str, dict[str, str]]]:
-    """Read a ledger seal and validate its structure and every entry invariant.
+    location: Path, *, verify: bool, trusted_keys: Sequence[str]
+) -> tuple[dict[str, str], str, str, list[dict[str, str]], dict[str, dict[str, str]], int]:
+    """Read a ledger database and validate its structure and every entry invariant.
 
-    :param location: The ledger seal document to read.
-    :return: The bases, series, ordered records, and live binding per key.
-    :raises IdLedgerError: If the kind, subject, or any record is malformed, an id
-        does not parse under its declared base and series, or a supersession chain
-        is forged or leaves a key with duplicate live bindings.
+    :param location: The ledger database to read.
+    :param verify: Whether to verify each segment's signature.
+    :param trusted_keys: Trust anchors; when given, every segment must be trusted.
+    :return: The bases, series, ledger uuid, ordered records, live binding per key,
+        and the number of segments.
+    :raises IdLedgerError: If the file is not an httk-idledger container, the meta,
+        segment partition, base chain, or any record is malformed, an id does not
+        parse under its declared base and series, a supersession chain is forged,
+        or a signature does not verify (or is untrusted when trust is required).
     """
 
     try:
-        seal = read_seal(location)
-    except (OSError, ValueError) as exc:
+        connection = sqlite3.connect(location, isolation_level=None)
+        try:
+            _require_ledger_tables(connection, location)
+            meta = _read_meta(connection)
+            segment_rows = connection.execute(
+                "SELECT segment, first_seq, record_count, created_at, subject, body_sha256, signatures "
+                "FROM segments ORDER BY segment"
+            ).fetchall()
+            record_rows = connection.execute(
+                "SELECT seq, key, family, id, alias_of, supersedes FROM records ORDER BY seq"
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
         raise IdLedgerError(
-            f"id ledger is not a readable seal document: {location} ({exc}). Restore it from git."
+            f"id ledger is not a readable sqlite database: {location} ({exc}). Restore it from git."
         ) from exc
-    if seal.kind != LEDGER_KIND:
-        raise IdLedgerError(f"seal at {location} is kind {seal.kind!r}, not {LEDGER_KIND!r}")
-    bases, series = _validate_subject(seal.subject, location)
-    records, live = _validate_entries(seal.records, bases, series, location)
-    return bases, series, records, live
+
+    series, ledger_uuid = _validate_meta(meta, location)
+    bases = _validate_segments(
+        segment_rows, record_rows, series, ledger_uuid, location, verify=verify, trusted_keys=trusted_keys
+    )
+    records = [_row_to_record(row) for row in record_rows]
+    validated_records, live = _validate_entries(records, bases, series, location)
+    return bases, series, ledger_uuid, validated_records, live, len(segment_rows)
 
 
-def _validate_subject(subject: Mapping[str, object], location: Path) -> tuple[dict[str, str], str]:
-    """Validate a ledger subject and return its bases and series."""
+def _require_ledger_tables(connection: sqlite3.Connection, location: Path) -> None:
+    """Reject a readable sqlite file that is not an httk-idledger container.
 
-    version = subject.get("ledger_format_version")
-    if version != LEDGER_FORMAT_VERSION:
-        raise IdLedgerError(f"id ledger {location} has unsupported format version {version!r}")
-    raw_bases = subject.get("bases")
-    series = subject.get("series")
-    if not isinstance(raw_bases, dict) or not raw_bases or not isinstance(series, str):
-        raise IdLedgerError(f"id ledger {location} has a malformed subject")
+    This distinguishes "someone pointed this at a store database" from a genuinely
+    corrupt file: the tables are missing rather than the bytes unreadable, so no
+    restore-from-git advice is given.
+
+    :param connection: An open connection to the file.
+    :param location: The ledger path, for the error message.
+    :raises IdLedgerError: If any of the ledger's tables is absent.
+    """
+
+    present = {
+        str(name) for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if not {"meta", "records", "segments"} <= present:
+        raise IdLedgerError(f"{location} is a sqlite file but not an httk-idledger container")
+
+
+def _read_meta(connection: sqlite3.Connection) -> dict[str, str]:
+    """Read the meta table into a plain dict."""
+
+    return {str(key): str(value) for key, value in connection.execute("SELECT key, value FROM meta").fetchall()}
+
+
+def _validate_meta(meta: Mapping[str, str], location: Path) -> tuple[str, str]:
+    """Validate the container meta and return the stored id series and uuid.
+
+    :param meta: The meta table rows.
+    :param location: The ledger path, for error messages.
+    :return: The stored id series and ledger uuid.
+    :raises IdLedgerError: If the format, version, series, or uuid is missing or unsupported.
+    """
+
+    if meta.get("format") != LEDGER_FORMAT:
+        raise IdLedgerError(f"{location} is not an {LEDGER_FORMAT} container (format {meta.get('format')!r})")
+    if meta.get("ledger_format_version") != str(LEDGER_FORMAT_VERSION):
+        raise IdLedgerError(
+            f"id ledger {location} has unsupported format version {meta.get('ledger_format_version')!r}"
+        )
+    series = meta.get("series")
+    if not isinstance(series, str) or not series:
+        raise IdLedgerError(f"id ledger {location} has a malformed meta series")
+    ledger_uuid = meta.get("ledger")
+    if not isinstance(ledger_uuid, str) or not ledger_uuid:
+        raise IdLedgerError(f"id ledger {location} has a malformed meta ledger uuid")
+    return series, ledger_uuid
+
+
+def _validate_segments(
+    segment_rows: Sequence[tuple[object, ...]],
+    record_rows: Sequence[tuple[object, ...]],
+    series: str,
+    ledger_uuid: str,
+    location: Path,
+    *,
+    verify: bool,
+    trusted_keys: Sequence[str],
+) -> dict[str, str]:
+    """Validate the segment partition and base chain, optionally verifying signatures.
+
+    Segments must be numbered 1..M and their ranges must partition the records
+    1..N in order (empty segments allowed); every segment subject must match its
+    row and carry the meta series and format version; bases must grow
+    monotonically (a later segment never removes, renames, or re-bases a family);
+    and the last segment's bases are the live base map. With *verify*, each
+    segment's signed body is rebuilt and checked, an INVALID verdict raising and,
+    when *trusted_keys* is given, every segment being required to be trusted.
+
+    :param segment_rows: The segment table rows, ordered by segment.
+    :param record_rows: The record table rows, ordered by seq.
+    :param series: The stored id series.
+    :param ledger_uuid: The stored ledger uuid every segment subject must carry.
+    :param location: The ledger path, for error messages.
+    :param verify: Whether to verify each segment's signature.
+    :param trusted_keys: Trust anchors; when given, every segment must be trusted.
+    :return: The live per-family base map (the last segment's bases).
+    :raises IdLedgerError: If the partition, chain, subjects, or signatures are unsound.
+    """
+
+    if not segment_rows:
+        raise IdLedgerError(f"id ledger {location} has no segments. Restore it from git.")
+    prev_bases: dict[str, str] | None = None
+    expected_next = 1
+    signers: list[str] = []
+    for index, row in enumerate(segment_rows, start=1):
+        raw_segment, raw_first, raw_count, created_at, subject_json, body_sha256, signatures_json = row
+        if not isinstance(raw_segment, int) or not isinstance(raw_first, int) or not isinstance(raw_count, int):
+            raise IdLedgerError(f"id ledger {location} has a malformed segment row. Restore it from git.")
+        segment, first_seq, record_count = raw_segment, raw_first, raw_count
+        if segment != index:
+            raise IdLedgerError(
+                f"id ledger {location} segment numbering is broken at {segment!r}. Restore it from git."
+            )
+        if first_seq != expected_next:
+            raise IdLedgerError(
+                f"id ledger {location} segment {segment} starts at record {first_seq!r}, not the expected "
+                f"{expected_next}; segments must partition the records. Restore it from git."
+            )
+        subject = _parse_segment_subject(subject_json, segment, first_seq, record_count, series, ledger_uuid, location)
+        seg_bases = _segment_bases(subject, segment, location)
+        if prev_bases is not None:
+            for family, base in prev_bases.items():
+                if seg_bases.get(family) != base:
+                    raise IdLedgerError(
+                        f"id ledger {location} segment {segment} removes or re-bases family {family!r}; "
+                        "a stored family is never removed, renamed, or re-based. Restore it from git."
+                    )
+        prev_bases = seg_bases
+        if first_seq - 1 + record_count > len(record_rows):
+            raise IdLedgerError(
+                f"id ledger {location} segment {segment} covers records past the end; a record was deleted "
+                "or truncated. Restore it from git."
+            )
+        if verify:
+            segment_records = [_row_to_record(record_rows[first_seq - 1 + offset]) for offset in range(record_count)]
+            signers.extend(
+                _verify_segment(
+                    subject, created_at, segment_records, body_sha256, signatures_json, segment, location, trusted_keys
+                )
+            )
+        expected_next += record_count
+
+    record_seqs = [row[0] for row in record_rows]
+    if record_seqs != list(range(1, expected_next)):
+        raise IdLedgerError(
+            f"id ledger {location} records do not match the segment partition; a record was deleted, "
+            "renumbered, or truncated. Restore it from git."
+        )
+
+    assert prev_bases is not None  # guarded by the empty-segments check above
+    live_bases = _stored_bases(prev_bases, location)
+    if verify and not trusted_keys:
+        _LOGGER.info(
+            "id ledger %s signed by %s (no trust anchor configured; signatures are an audit record).",
+            location,
+            ", ".join(dict.fromkeys(signers)) or "an unrecorded key",
+            extra={"context": "store"},
+        )
+    return live_bases
+
+
+def _parse_segment_subject(
+    subject_json: object,
+    segment: int,
+    first_seq: int,
+    record_count: int,
+    series: str,
+    ledger_uuid: str,
+    location: Path,
+) -> dict[str, object]:
+    """Parse a segment subject and check it matches its row, ledger, series, and version."""
+
+    if not isinstance(subject_json, str):
+        raise IdLedgerError(f"id ledger {location} segment {segment} has a malformed subject. Restore it from git.")
+    try:
+        subject = json.loads(subject_json)
+    except ValueError as exc:
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} subject is not valid JSON ({exc}). Restore it from git."
+        ) from exc
+    if not isinstance(subject, dict):
+        raise IdLedgerError(f"id ledger {location} segment {segment} subject is not an object. Restore it from git.")
+    if subject.get("ledger_format_version") != LEDGER_FORMAT_VERSION:
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} has unsupported format version "
+            f"{subject.get('ledger_format_version')!r}"
+        )
+    if subject.get("ledger") != ledger_uuid:
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} subject is stamped for a different ledger "
+            f"({subject.get('ledger')!r}, not {ledger_uuid!r}); a segment was grafted from another ledger. "
+            "Restore it from git."
+        )
+    if subject.get("series") != series:
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} subject series {subject.get('series')!r} disagrees with "
+            f"the meta series {series!r}. Restore it from git."
+        )
+    if (
+        subject.get("segment") != segment
+        or subject.get("first_record") != first_seq
+        or subject.get("record_count") != record_count
+    ):
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} subject range disagrees with its row. Restore it from git."
+        )
+    return subject
+
+
+def _segment_bases(subject: Mapping[str, object], segment: int, location: Path) -> dict[str, str]:
+    """Extract and type-check a segment subject's base map."""
+
+    raw = subject.get("bases")
+    if not isinstance(raw, dict) or not raw:
+        raise IdLedgerError(f"id ledger {location} segment {segment} has a malformed base map. Restore it from git.")
     bases: dict[str, str] = {}
-    for family, base in raw_bases.items():
+    for family, base in raw.items():
         if not isinstance(family, str) or not isinstance(base, str):
-            raise IdLedgerError(f"id ledger {location} has a malformed base map")
+            raise IdLedgerError(
+                f"id ledger {location} segment {segment} has a malformed base map. Restore it from git."
+            )
         bases[family] = base
+    return bases
+
+
+def _stored_bases(bases: Mapping[str, str], location: Path) -> dict[str, str]:
+    """Validate the live base map for base uniqueness across families."""
+
     duplicate = _duplicate_base(bases)
     if duplicate is not None:
         raise IdLedgerError(f"id ledger {location} shares id base {duplicate!r} across families")
-    return bases, series
+    return dict(bases)
+
+
+def _verify_segment(
+    subject: Mapping[str, object],
+    created_at: object,
+    segment_records: Sequence[dict[str, str]],
+    body_sha256: object,
+    signatures_json: object,
+    segment: int,
+    location: Path,
+    trusted_keys: Sequence[str],
+) -> tuple[str, ...]:
+    """Rebuild one segment's signed body and verify its signature.
+
+    :param subject: The parsed segment subject.
+    :param created_at: The segment's recorded ``created_at`` stamp.
+    :param segment_records: The reconstructed records the segment covers.
+    :param body_sha256: The segment's recorded body digest.
+    :param signatures_json: The segment's recorded signatures, as JSON text.
+    :param segment: The segment number, for error messages.
+    :param location: The ledger path, for error messages.
+    :param trusted_keys: Trust anchors; when given, the segment must be trusted.
+    :return: The verifying signers' fingerprints.
+    :raises IdLedgerError: If the signature is INVALID or untrusted when required.
+    """
+
+    if not isinstance(signatures_json, str) or not isinstance(body_sha256, str):
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} has malformed signature data. Restore it from git."
+        )
+    try:
+        signatures = json.loads(signatures_json)
+    except ValueError as exc:
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} signatures are not valid JSON ({exc}). Restore it from git."
+        ) from exc
+    if not isinstance(signatures, list):
+        raise IdLedgerError(
+            f"id ledger {location} segment {segment} has malformed signature data. Restore it from git."
+        )
+    body = build_seal_body(LEDGER_KIND, subject, cast("list[dict[str, object]]", [dict(r) for r in segment_records]))
+    body["created_at"] = str(created_at)
+    verification = verify_signed_body(json_bytes(body), body_sha256, signatures, trusted_keys=tuple(trusted_keys))
+    if verification.verdict == INVALID:
+        raise IdLedgerError(
+            f"id ledger segment {segment} signature does not verify ({verification.reason}): {location}. "
+            "The ledger may be corrupted or tampered; restore it from git."
+        )
+    if trusted_keys and verification.verdict != VALID_TRUSTED:
+        raise IdLedgerError(
+            f"id ledger segment {segment} is signed by an untrusted key ({verification.reason}): {location}. "
+            "Pin the correct signer, or restore the ledger from git."
+        )
+    return verification.signers
+
+
+def _row_to_record(row: tuple[object, ...]) -> dict[str, str]:
+    """Reconstruct one record dict from a ``records`` table row."""
+
+    _seq, key, family, entry_id, alias_of, supersedes = row
+    if alias_of is not None:
+        record: dict[str, str] = {"key": str(key), "alias_of": str(alias_of)}
+    else:
+        record = {"key": str(key), "family": str(family), "id": str(entry_id)}
+    if supersedes is not None:
+        record["supersedes"] = str(supersedes)
+    return record
 
 
 def _validate_entries(

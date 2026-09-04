@@ -59,6 +59,7 @@ from .federated_store import (
     FederatedStoreError,
     FederatedTarget,
 )
+from .id_ledger import IdLedger, IdLedgerError, check_ledger_key
 from .query import (
     ContinuationToken,
     CountUnavailableError,
@@ -112,6 +113,8 @@ __all__ = [
     "FileEntryProvider",
     "FilterTranslationCategory",
     "FilterTranslationError",
+    "IdLedger",
+    "IdLedgerError",
     "MongoStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "MultipleResultsError",
     "NoResultError",
@@ -134,6 +137,7 @@ __all__ = [
     "SqlStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "Store",
     "UnsupportedQueryError",
+    "check_ledger_key",
     "export_dataset",
     "filter_searcher",
     "portable_query_capabilities",

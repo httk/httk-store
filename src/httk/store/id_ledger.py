@@ -213,9 +213,13 @@ class IdLedger:
         regardless, because the signature attests only to the bytes, not to
         their meaning.
 
-        When *bases* or *series* is given, it is asserted against the stored
-        subject and any mismatch is an error: a build's configured id scheme must
-        match the ledger it reopens, never silently diverge from it.
+        When *series* is given it must equal the stored series. When *bases* is
+        given it is reconciled as a SUPERSET of the stored map: every stored
+        family must appear in it with the same base (removing, renaming, or
+        re-basing a stored family is an error), while families present only in the
+        expectation are ADDED and stamped into the subject at the next reseal (so
+        a build that assigns nothing but grows the scheme still writes on close).
+        The merged map is revalidated for id shape and base uniqueness.
 
         :param path: The ledger seal document to open.
         :param keys: The signing keys used to reseal on close, each ``(role, seed)``.
@@ -235,11 +239,17 @@ class IdLedger:
             if verify:
                 _verify_signature(location, trusted_keys)
             stored_bases, stored_series, records, live = _read_and_validate(location)
-            if bases is not None and dict(bases) != stored_bases:
-                raise IdLedgerError(f"id ledger {location} has base map {stored_bases}, not the expected {dict(bases)}")
             if series is not None and series != stored_series:
                 raise IdLedgerError(f"id ledger {location} has series {stored_series!r}, not the expected {series!r}")
-            return cls(location, bases=stored_bases, series=stored_series, keys=keys, records=records, live=live)
+            effective_bases = stored_bases
+            added_families = False
+            if bases is not None:
+                effective_bases, added_families = _extend_bases(stored_bases, dict(bases), stored_series, location)
+            ledger = cls(location, bases=effective_bases, series=stored_series, keys=keys, records=records, live=live)
+            # An added family is stamped into the subject at the next reseal; a build
+            # that assigns nothing but extends the base map still writes on close.
+            ledger._dirty = added_families
+            return ledger
         except BaseException:
             location.with_name(location.name + ".lock").unlink(missing_ok=True)
             raise
@@ -489,6 +499,45 @@ def _validate_bases(bases: Mapping[str, str], series: str) -> dict[str, str]:
     if duplicate is not None:
         raise ValueError(f"id base {duplicate!r} is shared by more than one family; bases must be unique per family")
     return checked
+
+
+def _extend_bases(
+    stored: Mapping[str, str], expected: Mapping[str, str], series: str, location: Path
+) -> tuple[dict[str, str], bool]:
+    """Reconcile a stored base map against a caller's expectation (superset-open).
+
+    Families the caller expects that are absent from the stored map are ADDED
+    (stamped at the next reseal); every stored family must appear in the
+    expectation with the SAME base (a stored family is never removed, renamed, or
+    re-based). The merged map is revalidated (id-shape + no duplicate base across
+    families) before it is accepted.
+
+    :param stored: The base map read from the ledger.
+    :param expected: The base map the caller passed to :meth:`IdLedger.open`.
+    :param series: The stored series, used to revalidate added bases' id shape.
+    :param location: The ledger path, for error messages.
+    :return: The merged base map and whether any family was added.
+    :raises IdLedgerError: If a stored family is missing from or re-based by the
+        expectation.
+    :raises ValueError: If the merged map is malformed or shares a base.
+    """
+
+    for family, base in stored.items():
+        if family not in expected:
+            raise IdLedgerError(
+                f"id ledger {location} has stored family {family!r} absent from the expected base map "
+                f"{dict(expected)}, not the expected: a stored family is never removed or renamed"
+            )
+        if expected[family] != base:
+            raise IdLedgerError(
+                f"id ledger {location} has base {base!r} for family {family!r}, not the expected {expected[family]!r}"
+            )
+    added = {family: base for family, base in expected.items() if family not in stored}
+    if not added:
+        return dict(stored), False
+    merged = {**stored, **added}
+    _validate_bases(merged, series)
+    return merged, True
 
 
 def _duplicate_base(bases: Mapping[str, str]) -> str | None:

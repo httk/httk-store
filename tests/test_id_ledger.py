@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from httk.core.crypto import ed25519_public_key
-from httk.core.entry_ids import parse_entry_id
+from httk.core.entry_ids import format_entry_id, parse_entry_id
 from httk.core.project import format_public_key, key_fingerprint
 from httk.core.project.sealing import SealKey, build_seal_body, write_seal
 
@@ -457,6 +457,82 @@ def test_open_accepts_matching_bases_and_series(tmp_path: Path) -> None:
         pass
     with IdLedger.open(path, keys=[key], bases=BASES, series=SERIES) as ledger:
         assert ledger.assign("k1", "structures")
+
+
+# -- superset-open base-map extension ----------------------------------------
+
+
+def test_open_adds_missing_family_and_stamps_on_reseal(tmp_path: Path) -> None:
+    path = tmp_path / "ids.json"
+    key = _key()
+    with _create(path, key):
+        pass
+    extended = {**BASES, "records": "anyt.am.rec"}
+    with IdLedger.open(path, keys=[key], bases=extended) as ledger:
+        assert ledger.assign("r1", "records") == format_entry_id("anyt.am.rec", SERIES, 1)
+    # The added family is now stored: reopening with only the original bases is a
+    # removal and errors, and reopening with the extended map keeps minting.
+    with pytest.raises(IdLedgerError, match="removed or renamed"):
+        IdLedger.open(path, keys=[key], bases=BASES)
+    with IdLedger.open(path, keys=[key], bases=extended) as ledger:
+        assert ledger.lookup("r1") == format_entry_id("anyt.am.rec", SERIES, 1)
+        assert ledger.assign("r2", "records") == format_entry_id("anyt.am.rec", SERIES, 2)
+
+
+def test_open_add_family_stamps_even_without_assign(tmp_path: Path) -> None:
+    path = tmp_path / "ids.json"
+    key = _key()
+    with _create(path, key):
+        pass
+    before = path.read_bytes()
+    extended = {**BASES, "records": "anyt.am.rec"}
+    # No assign, but a family was added: close must reseal (subject stamping).
+    with IdLedger.open(path, keys=[key], bases=extended):
+        pass
+    assert path.read_bytes() != before
+    with pytest.raises(IdLedgerError, match="removed or renamed"):
+        IdLedger.open(path, keys=[key], bases=BASES)
+
+
+def test_open_matching_bases_noop_close_is_byte_identical(tmp_path: Path) -> None:
+    path = tmp_path / "ids.json"
+    key = _key()
+    with _create(path, key):
+        pass
+    before = path.read_bytes()
+    # Superset-open with an exactly-matching map adds nothing, so a no-op close
+    # must not rewrite the file.
+    with IdLedger.open(path, keys=[key], bases=BASES):
+        pass
+    assert path.read_bytes() == before
+
+
+def test_open_rejects_removed_family(tmp_path: Path) -> None:
+    path = tmp_path / "ids.json"
+    key = _key()
+    with _create(path, key):
+        pass
+    with pytest.raises(IdLedgerError, match="removed or renamed"):
+        IdLedger.open(path, keys=[key], bases={"structures": "anyt.am.structure"})
+
+
+def test_open_add_family_rejects_duplicate_base(tmp_path: Path) -> None:
+    path = tmp_path / "ids.json"
+    key = _key()
+    with _create(path, key):
+        pass
+    # A new family reusing an existing family's base is a duplicate over the merged map.
+    with pytest.raises(ValueError, match="shared by more than one family"):
+        IdLedger.open(path, keys=[key], bases={**BASES, "clone": "anyt.am.structure"})
+
+
+def test_open_add_family_rejects_malformed_base(tmp_path: Path) -> None:
+    path = tmp_path / "ids.json"
+    key = _key()
+    with _create(path, key):
+        pass
+    with pytest.raises(ValueError):
+        IdLedger.open(path, keys=[key], bases={**BASES, "bad": "not a base!"})
 
 
 def test_alias_supersede_of_aliased_key_errors(tmp_path: Path) -> None:

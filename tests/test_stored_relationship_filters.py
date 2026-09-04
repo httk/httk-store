@@ -17,11 +17,19 @@ from httk.core import Run, RunEdge, RunEntry
 from httk.core.data_records import RECORDS_DEFINITION_ID
 from httk.core.provenance import RUNS_DEFINITION_ID
 from httk.core.register import register_entry_family, register_entry_record
-from httk.core.storage import IdentitySkip, Indexed, StorageInfo, StrongLink, Unique, WeakLink
+from httk.core.storage import (
+    IdentitySkip,
+    Indexed,
+    StorageInfo,
+    StoredPropertyProjection,
+    StrongLink,
+    Unique,
+    WeakLink,
+)
 
 from httk.store import EntryIdScheme, FilterTranslationError
-from httk.store.backend.sql import Backend, SqlStore, StoredEntrySource
-from httk.store.backend.sql.stored_federation import StoredEntryFederation
+from httk.store.backend.sql import Backend, SqlStore, StoredEntrySource, stored_property_sql_plan
+from httk.store.backend.sql.stored_federation import StoredEntryFederation, related_property_resolver_factory
 
 _STRUCTURES = "https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures"
 _REFERENCES = "https://schemas.optimade.org/defs/v1.2/entrytypes/optimade/references"
@@ -40,13 +48,27 @@ class RecordRow:
 
 @dataclass(frozen=True)
 class ReferenceRow:
-    """A minimal ``references`` backing (the target of a typed reference field)."""
+    """A minimal ``references`` backing (the target of a typed reference field).
+
+    ``doi`` is projected as a queryable/served property so the depth-1
+    related-property resolver has a real reference-side field to filter on.
+    """
 
     __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="rel_filter_reference")
 
     doi: str
     id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
     immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+    __httk_stored_properties__: ClassVar = {
+        "doi": StoredPropertyProjection(
+            response=lambda record: record.doi,
+            query=lambda context, operator, literal: context.compare(
+                context.field("doi"), operator, context.constant(literal)
+            ),
+            sort=lambda context: context.field("doi"),
+        )
+    }
 
 
 @dataclass(frozen=True)
@@ -131,6 +153,13 @@ def _ids(page: object) -> list[str]:
 
 def _query(store: SqlStore, family: type, filter_string: str, **kwargs: object) -> object:
     federation = StoredEntryFederation((StoredEntrySource(store, family, "src"),))
+    return federation.query(filter_string, **kwargs)
+
+
+def _resolved_query(store: SqlStore, family: type, filter_string: str, **kwargs: object) -> object:
+    """Query with a real depth-1 related-property resolver over the reference target."""
+    factory = related_property_resolver_factory([stored_property_sql_plan(store, ReferenceFamily)])
+    federation = StoredEntryFederation((StoredEntrySource(store, family, "src"),), related_resolver_factory=factory)
     return federation.query(filter_string, **kwargs)
 
 
@@ -403,3 +432,92 @@ def test_reverse_key_ors_across_run_backings() -> None:
         assert _ids(federation.query(f'_httk_relationships._httk_is_input.id HAS ANY "{run_a}","{run_b}"')) == [target]
         assert _ids(federation.query(f'_httk_relationships._httk_is_input.id HAS "{run_a}"')) == [target]
         assert _ids(federation.query(f'_httk_relationships._httk_is_input.id HAS "{run_b}"')) == [target]
+
+
+# ---------------------------------------------------------------------- depth-1 related-property resolver
+
+
+def test_depth1_reference_property_stringmatching_and_comparison() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        ref_a = store.fetch(ReferenceRow, store.save(ReferenceRow("10.1/a")), eager=True)
+        ref_b = store.fetch(ReferenceRow, store.save(ReferenceRow("10.2/b")), eager=True)
+        cite_a = _save(store, CitingRow("cites-a", cite=ref_a))
+        cite_b = _save(store, CitingRow("cites-b", cite=ref_b))
+        _save(store, CitingRow("cites-none"))
+
+        # The dotted related-property filter now really resolves (was matches-nothing).
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi CONTAINS "10.1"')) == [cite_a]
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi = "10.2/b"')) == [cite_b]
+        # Non-HAS comparison on <type>.id routes through the same semi-join.
+        assert _ids(_resolved_query(store, CitingFamily, f'references.id = "{ref_a.id}"')) == [cite_a]
+
+
+def test_depth1_empty_match_and_not_composition() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        ref_a = store.fetch(ReferenceRow, store.save(ReferenceRow("10.1/a")), eager=True)
+        ref_b = store.fetch(ReferenceRow, store.save(ReferenceRow("10.2/b")), eager=True)
+        _save(store, CitingRow("cites-a", cite=ref_a))
+        cite_b = _save(store, CitingRow("cites-b", cite=ref_b))
+        cite_none = _save(store, CitingRow("cites-none"))
+
+        # An empty resolver result is a constant-false expression (matches nothing).
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi CONTAINS "nomatch"')) == []
+        # NOT strips into the semi-join (identical to the in-memory route): every
+        # citing row whose reference does NOT match, INCLUDING the reference-less row.
+        assert _ids(_resolved_query(store, CitingFamily, 'NOT (references.doi CONTAINS "10.1")')) == sorted(
+            [cite_b, cite_none]
+        )
+
+
+def test_depth1_excludes_stale_revision_value() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        ref = store.fetch(ReferenceRow, store.save(ReferenceRow("10.1/old")), eager=True)
+        cite = _save(store, CitingRow("cites", cite=ref))
+        # Supersede the referenced lineage with a new doi. The reference FK still
+        # points at the old revision, but resolution runs only_latest over mains.
+        store.replace(ref, ReferenceRow("10.2/new"))
+
+        # The stale value no longer satisfies the filter ...
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi CONTAINS "10.1"')) == []
+        # ... while the current (latest main) value does.
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi CONTAINS "10.2"')) == [cite]
+
+
+def test_depth1_excludes_alternative_value() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        ref = store.fetch(ReferenceRow, store.save(ReferenceRow("10.1/main")), eager=True)
+        # A named alternative of the reference lineage carrying a distinctive doi.
+        store.save(ReferenceRow("99.9/alt"), alternative_of=ref.id, alternative_kind="conventional")
+        cite = _save(store, CitingRow("cites", cite=ref))
+
+        # The alternative's doi must never satisfy the filter (mains-only resolution).
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi CONTAINS "99.9"')) == []
+        # The main's doi does.
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi CONTAINS "10.1"')) == [cite]
+
+
+def test_depth2_related_property_not_implemented() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        ref = store.fetch(ReferenceRow, store.save(ReferenceRow("10.1/a")), eager=True)
+        _save(store, CitingRow("cites", cite=ref))
+        # Positive same-route depth-1 control.
+        assert _ids(_resolved_query(store, CitingFamily, 'references.doi CONTAINS "10.1"')) != []
+        # A depth>=2 dotted path stays not-implemented (never reaches the resolver).
+        with pytest.raises(FilterTranslationError) as excinfo:
+            _resolved_query(store, CitingFamily, 'references.doi.deep CONTAINS "x"')
+        assert excinfo.value.category == "not-implemented"
+
+
+def test_depth1_without_resolver_matches_nothing() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        ref = store.fetch(ReferenceRow, store.save(ReferenceRow("10.1/a")), eager=True)
+        _save(store, CitingRow("cites", cite=ref))
+        # A federation without a resolver factory keeps the matches-nothing fallback
+        # for dotted related-property filters (only <type>.id HAS is served directly).
+        assert _ids(_query(store, CitingFamily, 'references.doi CONTAINS "10.1"')) == []

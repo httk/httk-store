@@ -66,6 +66,7 @@ from httk.store.entry_providers import wire_relationship_key
 from httk.store.query.optimade_filters import (
     FilterTranslationError,
     HandlerTable,
+    RelatedPropertyResolver,
     constant_comparison_handler,
     constant_stringmatching_handler,
     translate_filter_ast,
@@ -648,6 +649,7 @@ class StoredPropertySqlPlan:
         only_latest: bool = False,
         revisions: bool = False,
         alternatives: bool = False,
+        related_property_resolver: RelatedPropertyResolver | None = None,
     ) -> tuple[SqlSearcher, ...]:
         """Return one concrete-backing SQL searcher for an OPTIMADE filter and sort list.
 
@@ -658,11 +660,22 @@ class StoredPropertySqlPlan:
         :param only_latest: Whether root variables are restricted to the latest row of each lineage.
         :param revisions: Whether ids render immutable revisions instead of mains (mains-only lineage stream).
         :param alternatives: Whether the stream serves named alternatives with composite ``<id>~<kind>`` ids.
+        :param related_property_resolver: Optional depth-1 related-property resolver; the default matches nothing.
         :return: One searcher for each configured backing.
         """
         ast = parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string
         return tuple(
-            self._filter_searcher(backing, ast, sort, public_id_prefix, as_of, only_latest, revisions, alternatives)
+            self._filter_searcher(
+                backing,
+                ast,
+                sort,
+                public_id_prefix,
+                as_of,
+                only_latest,
+                revisions,
+                alternatives,
+                related_property_resolver,
+            )
             for backing in self._backings
         )
 
@@ -676,6 +689,7 @@ class StoredPropertySqlPlan:
         only_latest: bool = False,
         revisions: bool = False,
         alternatives: bool = False,
+        related_property_resolver: RelatedPropertyResolver | None = None,
     ) -> tuple[StoredPropertySqlCandidateStream, ...]:
         """Return ID-only concrete streams for a bounded federated page.
 
@@ -693,13 +707,22 @@ class StoredPropertySqlPlan:
         :param only_latest: Whether root variables are restricted to the latest row of each lineage.
         :param revisions: Whether ids render immutable revisions instead of mains (mains-only lineage stream).
         :param alternatives: Whether the stream serves named alternatives with composite ``<id>~<kind>`` ids.
+        :param related_property_resolver: Optional depth-1 related-property resolver; the default matches nothing.
         :return: One candidate stream for each configured backing.
         """
         ast = parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string
         streams: list[StoredPropertySqlCandidateStream] = []
         for backing, backing_name in zip(self._backings, self.layout.record_names, strict=True):
             searcher, variable, sort_values = self._candidate_searcher(
-                backing, ast, sort, public_id_prefix, as_of, only_latest, revisions, alternatives
+                backing,
+                ast,
+                sort,
+                public_id_prefix,
+                as_of,
+                only_latest,
+                revisions,
+                alternatives,
+                related_property_resolver,
             )
             searcher.output(SqlColumn(searcher, variable._alias.c[SID_COLUMN]), "sid")
             searcher.output(SqlColumn(searcher, variable._alias.c["id"]), "id")
@@ -840,9 +863,10 @@ class StoredPropertySqlPlan:
         only_latest: bool = False,
         revisions: bool = False,
         alternatives: bool = False,
+        related_property_resolver: RelatedPropertyResolver | None = None,
     ) -> SqlSearcher:
         searcher, variable, _sort_values = self._candidate_searcher(
-            backing, ast, sort, public_id_prefix, as_of, only_latest, revisions, alternatives
+            backing, ast, sort, public_id_prefix, as_of, only_latest, revisions, alternatives, related_property_resolver
         )
         searcher.output(variable, "record")
         return searcher
@@ -857,6 +881,7 @@ class StoredPropertySqlPlan:
         only_latest: bool = False,
         revisions: bool = False,
         alternatives: bool = False,
+        related_property_resolver: RelatedPropertyResolver | None = None,
     ) -> tuple[SqlSearcher, SqlVariable, tuple[_SqlValue, ...]]:
         # Alternatives are each their own lineage, so every listed alternative
         # is its latest revision (only_latest); ``only_main_alt=False`` lets
@@ -885,7 +910,7 @@ class StoredPropertySqlPlan:
                     handlers,
                     known_definition_prefixes(),
                     relationship_targets=relationship_targets,
-                    related_property_resolver=_empty_related_resolver,
+                    related_property_resolver=related_property_resolver or _empty_related_resolver,
                 )
             except QueryLiteralError as error:
                 raise FilterTranslationError(str(error), "type-mismatch") from error
@@ -1475,19 +1500,20 @@ def _constant_false_has_handlers() -> Mapping[str, Callable[..., Any]]:
 
 
 def _empty_related_resolver(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:
-    """Resolve depth-1 related-property filters to no ids on the stored route.
+    """The stored route's fallback depth-1 related-property resolver (matches nothing).
 
-    Depth-1 related-property filtering (e.g. ``references.doi CONTAINS ...``) is
-    deliberately deferred on the stored route; returning no ids preserves the
-    pre-existing matches-nothing behavior rather than raising not-implemented,
-    while ``<type>.id HAS ...`` is served directly by its registered handler.
+    Used when no real resolver is supplied (id-only fetch/probe/audit paths, and
+    directly constructed federations). Returning no ids yields the matches-nothing
+    behavior rather than raising not-implemented, while ``<type>.id HAS ...`` is
+    still served directly by its registered handler. A real depth-1 resolver
+    (built by :func:`~httk.store.backend.sql.stored_federation.related_property_resolver_factory`
+    and threaded through :meth:`StoredPropertySqlPlan.candidate_searchers`) collects the
+    sibling family's own matching ids and replaces this fallback.
 
     :param related_type: The related entry type named by the dotted filter.
     :param sub_ast: The sub-filter with the ``<related_type>.`` prefix stripped.
     :return: An empty tuple (no matching related ids).
     """
-    # ponytail: depth-1 stored related-property filtering deferred; wire a nested
-    # stored searcher over the target family here if it is later wanted.
     return ()
 
 

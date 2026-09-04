@@ -9,7 +9,7 @@ and bounds into SQL, and delay record hydration until a global page is known.
 import heapq
 import json
 import warnings
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, cast
@@ -38,21 +38,70 @@ from httk.store.backend.sql.store import SqlStore, _served_definition
 from httk.store.backend.sql.stored_properties import (
     StoredPropertySqlCandidateStream,
     StoredPropertySqlPlan,
+    _served_type_for_target,
 )
 from httk.store.entry_providers import wire_relationship_key
+from httk.store.query.optimade_filters import RelatedPropertyResolver
 from httk.store.store_common import EntryStore
 
 # The relationship channel keyed by (wire-translated) related entry type.
 _RelatedMap = Mapping[str, tuple[RelatedEntry, ...]]
 _EMPTY_RELATIONSHIPS: Final[_RelatedMap] = MappingProxyType({})
 
+# A per-store depth-1 related-property resolver source: called with the store
+# whose row is being filtered, it returns the resolver restricted to that store's
+# sibling plans (same-store scope), or None when nothing is available for it.
+RelatedResolverFactory = Callable[[EntryStore], RelatedPropertyResolver | None]
+
 __all__ = [
     "DuplicateEntryIdError",
+    "RelatedResolverFactory",
     "StoredEntryFederation",
     "StoredEntryOrigin",
     "StoredEntryPage",
     "StoredEntrySource",
+    "related_property_resolver_factory",
 ]
+
+
+def related_property_resolver_factory(
+    plans: Sequence[StoredPropertySqlPlan],
+) -> RelatedResolverFactory:
+    """Build a same-store depth-1 related-property resolver factory over sibling plans.
+
+    ``plans`` are the family plans available to a serving edge (one per source).
+    The returned factory, given the store whose row is being filtered, yields a
+    :data:`~httk.store.query.optimade_filters.RelatedPropertyResolver` that resolves a
+    dotted ``<related_type>.<prop>`` filter to the matching related-entry ids by
+    running the stripped sub-filter through the sibling plan for ``related_type``
+    **in that same store** (same-store scope, mirroring reverse serving). Only
+    the sibling's own properties are consulted; the sub-search runs
+    ``only_latest=True`` over mains, so stale revisions and named alternatives can
+    never satisfy the filter. The collected ids are the sibling rows' raw stored
+    ``id`` column — exactly what the ``<related_type>.id HAS ...`` handler the
+    semi-join rewrites to matches against.
+
+    :param plans: The family plans (one per source) available to the serving edge.
+    :return: A per-store resolver factory (a miss returns an empty tuple, i.e. matches nothing).
+    """
+    plans_by_type: dict[str, list[StoredPropertySqlPlan]] = {}
+    for plan in plans:
+        plans_by_type.setdefault(plan.entry_type, []).append(plan)
+
+    def factory(store: EntryStore) -> RelatedPropertyResolver | None:
+        def resolve(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:
+            matched: dict[str, None] = {}
+            for plan in plans_by_type.get(related_type, ()):
+                if plan.store is not store:
+                    continue
+                for stream in plan.candidate_searchers(sub_ast, only_latest=True):
+                    for values, _names in stream.searcher:
+                        matched.setdefault(str(values[1]))
+            return tuple(matched)
+
+        return resolve
+
+    return factory
 
 
 _AUDIT_BATCH_SIZE: Final = 1_000
@@ -241,6 +290,10 @@ class StoredEntryFederation:
     :param served_type_names: An optional internal-to-wire map applied to the
         entry-type names emitted on served relationships; unmapped names pass
         through unchanged.
+    :param related_resolver_factory: An optional per-store factory (see
+        :func:`related_property_resolver_factory`) enabling depth-1
+        related-property filtering (``references.doi CONTAINS ...``); without it
+        such dotted filters match nothing, while ``<type>.id HAS ...`` still works.
     """
 
     def __init__(
@@ -248,10 +301,14 @@ class StoredEntryFederation:
         sources: Sequence[StoredEntrySource],
         *,
         served_type_names: Mapping[str, str] | None = None,
+        related_resolver_factory: RelatedResolverFactory | None = None,
     ) -> None:
         if served_type_names is not None and not isinstance(served_type_names, Mapping):
             raise TypeError("StoredEntryFederation.served_type_names must be a mapping or None")
+        if related_resolver_factory is not None and not callable(related_resolver_factory):
+            raise TypeError("StoredEntryFederation.related_resolver_factory must be callable or None")
         self._served_type_names: Mapping[str, str] = dict(served_type_names or {})
+        self._related_resolver_factory = related_resolver_factory
         if isinstance(sources, (str, bytes)):
             raise TypeError("StoredEntryFederation.sources must be a sequence of StoredEntrySource values")
         values = tuple(sources)
@@ -570,6 +627,13 @@ class StoredEntryFederation:
         streams: list[_Stream] = []
         for source in self._sources:
             source_as_of = as_of if getattr(source.source.store, "store_timestamps", False) else None
+            # A depth-1 related-property resolver is bound to THIS source's store
+            # (same-store scope). It is only passed when a factory is configured,
+            # so a directly constructed (or non-SQL) federation keeps the plain
+            # matches-nothing behavior and its plan signature untouched.
+            resolver_kwargs: dict[str, Any] = {}
+            if self._related_resolver_factory is not None:
+                resolver_kwargs["related_property_resolver"] = self._related_resolver_factory(source.source.store)
             candidates = source.plan.candidate_searchers(
                 filter_string,
                 sort=sort,
@@ -578,6 +642,7 @@ class StoredEntryFederation:
                 only_latest=not revisions,
                 revisions=revisions,
                 alternatives=alternatives,
+                **resolver_kwargs,
             )
             for backing_index, candidate in enumerate(candidates):
                 if stream_keys is not None and (source.source_index, backing_index) not in stream_keys:
@@ -793,7 +858,7 @@ class StoredEntryFederation:
 
         Candidates are grouped per ``(source, backing)`` by ``_Stream`` identity
         exactly like :meth:`_render_page`, so each backing's link and edge tables
-        are scanned once per group.  Three independent collections run per group,
+        are scanned once per group.  Four independent collections run per group,
         each issuing no query when it does not apply:
 
         - **Weak links**: exposed ``WeakLink`` specs on the backing, mirroring the
@@ -807,6 +872,14 @@ class StoredEntryFederation:
           lineage's latest main revision contributes). Reverse edges are
           suppressed on an alternatives page: an alternative cell must not claim a
           reverse relationship.
+        - **Related reference/child fields**: the backing's own reference and
+          child-of-storable fields whose target is a served family (mirroring
+          the in-memory provider's ``_relationship_specs``, honoring
+          ``Related(serve=False)``). These are record content: the row's own FK
+          values, so they are revision-pinned (each ``~revs`` row carries its own)
+          and — like forward StrongLink edges — appear on ``~alts`` rows too. Each
+          entry carries ``relationship=None`` so it groups under the target's
+          served wire type.
 
         Non-SQL sources are skipped (their relationship serving is a separate
         backend concern).  Relationships reflect the LIVE link/edge state
@@ -829,6 +902,18 @@ class StoredEntryFederation:
             link_specs = [spec for spec in resolve_schema(backing).links if spec.exposed_relationship]
             if link_specs:
                 self._collect_group_relationships(store, backing, link_specs, group, collected)
+            relation_specs = [
+                (spec, related_type)
+                for spec in resolve_schema(backing).fields
+                if spec.role in ("reference", "child")
+                and spec.target is not None
+                and (spec.related is None or spec.related.serve)
+                and (related_type := _served_type_for_target(store, spec.target)) is not None
+            ]
+            if relation_specs and not store._missing_tables_for_read((backing,)):
+                with store._read_connection() as connection:
+                    for spec, related_type in relation_specs:
+                        self._collect_related_field(connection, store, backing, spec, related_type, group, collected)
             strong = strong_link_families(store)
             forward_family = next((family for family in strong if family.backing is backing), None)
             if forward_family is not None:
@@ -958,6 +1043,94 @@ class StoredEntryFederation:
                                     relationship=key,
                                 )
                             )
+
+    def _collect_related_field(
+        self,
+        connection: Any,
+        store: SqlStore,
+        backing: type,
+        spec: Any,
+        related_type: str,
+        group: Sequence[_Candidate],
+        collected: dict[int, dict[str, list[RelatedEntry]]],
+    ) -> None:
+        """Attach one reference or child field's targets to the group's candidates.
+
+        A reference field contributes at most one target per row (its FK); a
+        child-of-storable field contributes an ordered list (its element sids).
+        Both are the candidate row's own content — the FK value of the exact
+        revision/alternative row — so no lineage/latest resolution is applied to
+        the OWNING row; only the TARGET sid is resolved to its raw stored ``id``.
+        ``role``/``description`` are carried from the ``Related`` marker (absent
+        when the field is unmarked); ``relationship`` is left ``None`` so the
+        entry groups under ``related_type``.
+
+        :param connection: The open read connection to ``store``.
+        :param store: The SQL store backing this group.
+        :param backing: The concrete backing class of the group.
+        :param spec: The reference or child :class:`~httk.store.backend.schema.FieldSpec`.
+        :param related_type: The target's served (wire) relationship type.
+        :param group: The candidates sharing this ``(source, backing)`` stream.
+        :param collected: The mutable relationship accumulator keyed by candidate id.
+        :return: None.
+        """
+        assert spec.target is not None
+        schema = resolve_schema(backing)
+        table = store._table(schema.table_name)
+        sids = [candidate.sid for candidate in group]
+        marker = spec.related
+        description = marker.description if marker is not None else None
+        role = marker.role if marker is not None else None
+        # ponytail: one query per (backing, field) per group, plus one id lookup;
+        # batch across fields sharing a target table if these show up in profiles.
+        target_sids_by_sid: dict[int, list[int]] = {}
+        if spec.role == "reference":
+            fk_column = table.c[spec.columns[0].name]
+            for row_sid, value in connection.execute(
+                sqlalchemy.select(table.c[SID_COLUMN], fk_column).where(table.c[SID_COLUMN].in_(sids))
+            ):
+                if value is not None:
+                    target_sids_by_sid.setdefault(int(row_sid), []).append(int(value))
+        else:
+            assert spec.child is not None
+            child_table = store._table(spec.child.table_name)
+            parent_column = child_table.c[f"{schema.table_name}_sid"]
+            element_column = child_table.c[spec.child.element_columns[0].name]
+            statement = (
+                sqlalchemy.select(parent_column, element_column)
+                .where(parent_column.in_(sids))
+                .order_by(parent_column, child_table.c[f"{spec.field}_index"])
+            )
+            for parent_sid, element_sid in connection.execute(statement):
+                target_sids_by_sid.setdefault(int(parent_sid), []).append(int(element_sid))
+        if not target_sids_by_sid:
+            return
+        id_by_sid = self._raw_ids_for_sids(
+            connection, store, spec.target, {sid for sids_ in target_sids_by_sid.values() for sid in sids_}
+        )
+        for candidate in group:
+            for target_sid in target_sids_by_sid.get(int(candidate.sid), ()):
+                target_id = id_by_sid.get(target_sid)
+                if target_id is None:
+                    continue
+                collected.setdefault(id(candidate), {}).setdefault(related_type, []).append(
+                    RelatedEntry(related_type, target_id, description=description, role=role)
+                )
+
+    @staticmethod
+    def _raw_ids_for_sids(connection: Any, store: SqlStore, target: type, sids: Collection[int]) -> dict[int, str]:
+        """Resolve target row sids to their raw stored ``id`` column (revision-pinned)."""
+        if not sids:
+            return {}
+        target_table = store._table(resolve_schema(target).table_name)
+        return {
+            int(sid): str(value)
+            for sid, value in connection.execute(
+                sqlalchemy.select(target_table.c[SID_COLUMN], target_table.c["id"]).where(
+                    target_table.c[SID_COLUMN].in_(sorted(sids))
+                )
+            )
+        }
 
     def _collect_link(
         self,

@@ -75,6 +75,7 @@ __all__ = [
     "StoredEntrySource",  # pyright: ignore[reportUnsupportedDunderAll]
     "StoredPropertySqlConfigurationError",  # pyright: ignore[reportUnsupportedDunderAll]
     "optimade_filter_searcher",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
+    "related_property_resolver_factory",  # pyright: ignore[reportUnsupportedDunderAll]
     "stored_property_sql_plan",  # pyright: ignore[reportUnsupportedDunderAll]
 ]
 
@@ -98,6 +99,7 @@ _SQL_EXPORTS = {
     "StorageLayoutUpgradeRequiredError": ".layout",
     "StoreUnderConstructionError": ".layout",
     "optimade_filter_searcher": ".optimade",
+    "related_property_resolver_factory": ".stored_federation",
     "stored_property_sql_plan": ".stored_properties",
     "StaleResultError": ".rows",
     "ExpiredLazyRecordError": ".rows",

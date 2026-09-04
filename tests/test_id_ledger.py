@@ -165,14 +165,18 @@ def test_open_rejects_seal_swap_when_trusted_key_pinned(tmp_path: Path) -> None:
         IdLedger.open(path, trusted_keys=[pinned])
 
 
-def test_open_seal_swap_without_trusted_keys_warns(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_open_without_trusted_keys_logs_the_signer_as_an_audit_record(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_path / "ids.json"
+    new_key = _key()
     with _create(path, _key()):
         pass
-    _resign(path, _key())
-    with caplog.at_level(logging.WARNING, logger="httk.store.id_ledger"):
+    _resign(path, new_key)  # a valid signature by an unpinned key: opens, logging the signer
+    with caplog.at_level(logging.INFO, logger="httk.store.id_ledger"):
         IdLedger.open(path).close()
-    assert any("no trust anchor" in record.message for record in caplog.records)
+    message = next(record.getMessage() for record in caplog.records if "audit record" in record.getMessage())
+    assert _fingerprint(new_key) in message
 
 
 def test_open_rejects_base_map_and_series_mismatch(tmp_path: Path) -> None:

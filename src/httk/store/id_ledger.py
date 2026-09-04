@@ -14,11 +14,15 @@ below). It is replaced atomically and durably by ``write_seal`` and read back
 through ``read_seal``.
 
 ``verify_seal`` checks signatures only, never content, so :meth:`IdLedger.open`
-validates the document's structure and every entry invariant itself. The trust
-anchor lives outside the file: with ``trusted_keys`` the signer must be trusted;
-without them a merely valid signature is accepted with a loud warning, git
-history standing as the second witness. The recovery for a corrupted or
-untrusted ledger is to restore it from git; the verification errors say so.
+validates the document's structure and every entry invariant itself. The seal's
+signature is an *audit record*, not a build gate: it is logged (naming the
+signer) and inspected manually alongside git history, never demanded. The
+integrity self-check is always on — an INVALID signature (content that no longer
+matches its own seal: tamper, corruption, a hand-edit) always raises. Trust
+enforcement is opt-in: with ``trusted_keys`` the signer must be one of them;
+without them a valid signature is accepted and the signer merely noted. The
+recovery for a corrupted ledger is to restore it from git; the verification
+errors say so.
 
 No record is ever edited or removed. An entry for a source that later disappears
 simply persists and keeps its number. A key is re-bound only by *supersession*:
@@ -201,11 +205,13 @@ class IdLedger:
     ) -> "IdLedger":
         """Open an existing ledger, verifying its signature and invariants.
 
-        With *verify*, the signature is checked first: *trusted_keys* demand a
-        trusted signer, and without them a merely valid signature is accepted
-        with a loud warning. The structure and every entry invariant are then
-        validated regardless, because the signature attests only to the bytes,
-        not to their meaning.
+        With *verify*, the signature is checked first: an INVALID signature
+        (content that no longer matches its own seal) always raises, while a
+        valid one is treated as an audit record — *trusted_keys* demand a trusted
+        signer, and without them a valid signature is accepted and its signer
+        logged. The structure and every entry invariant are then validated
+        regardless, because the signature attests only to the bytes, not to
+        their meaning.
 
         When *bases* or *series* is given, it is asserted against the stored
         subject and any mismatch is an error: a build's configured id scheme must
@@ -564,11 +570,10 @@ def _verify_signature(location: Path, trusted_keys: Sequence[str]) -> None:
                 "Pin the correct signer, or restore the ledger from git."
             )
     else:
-        _LOGGER.warning(
-            "Id ledger %s is signed but no trust anchor was supplied (%s); "
-            "trusting git history as the witness. Pin the signer via trusted_keys to enforce trust.",
+        _LOGGER.info(
+            "id ledger %s signed by %s (no trust anchor configured; signature is an audit record).",
             location,
-            verification.reason,
+            ", ".join(verification.signers) or "an unrecorded key",
             extra={"context": "store"},
         )
 

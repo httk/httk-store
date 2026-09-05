@@ -15,7 +15,7 @@ from httk.core.project import format_public_key, key_fingerprint
 from httk.core.project.sealing import SealKey, build_seal_body, sign_seal_body
 
 from httk.store import IdLedger, IdLedgerError, check_ledger_key
-from httk.store.id_ledger import LEDGER_KIND, _initialize_schema
+from httk.store.id_ledger import LEDGER_KIND, LedgerBinding, _initialize_schema
 
 BASES = {"structures": "anyt.am.structure", "refs": "anyt.am.ref"}
 SERIES = "a"
@@ -833,3 +833,178 @@ def test_segment_with_foreign_ledger_uuid_is_rejected(tmp_path: Path) -> None:
         connection.close()
     with pytest.raises(IdLedgerError, match="different ledger|grafted"):
         IdLedger.open(path, keys=[key])
+
+
+# -- bindings (enumeration) ---------------------------------------------------
+
+
+def test_bindings_includes_assignment_and_alias_to_same_id(tmp_path: Path) -> None:
+    with _create(tmp_path / "ids.sqlite", _key()) as ledger:
+        target = ledger.assign("owner", "structures")
+        ledger.alias("dup", target)
+        bindings = ledger.bindings()
+    assert bindings["owner"] == LedgerBinding(id=target, family="structures", is_alias=False)
+    assert bindings["dup"] == LedgerBinding(id=target, family="structures", is_alias=True)
+    assert set(bindings) == {"owner", "dup"}
+
+
+def test_bindings_split_transition_excludes_superseded_alias(tmp_path: Path) -> None:
+    # Mirrors test_split_transition_alias_supersede_assign: "shared" starts as an
+    # alias, then splits off into its own fresh assignment.
+    with _create(tmp_path / "ids.sqlite", _key()) as ledger:
+        owner_id = ledger.assign("owner", "structures")
+        ledger.alias("shared", owner_id)
+        fresh = ledger.assign("shared", "structures", supersede=True)
+        bindings = ledger.bindings()
+    assert bindings["owner"] == LedgerBinding(id=owner_id, family="structures", is_alias=False)
+    # The now-live binding for "shared" is its fresh assignment, not the old alias.
+    assert bindings["shared"] == LedgerBinding(id=fresh, family="structures", is_alias=False)
+    assert set(bindings) == {"owner", "shared"}
+
+
+def test_bindings_merge_transition_excludes_superseded_assignment(tmp_path: Path) -> None:
+    # Mirrors test_merge_transition_assign_supersede_alias: "moved" starts as its
+    # own assignment, then merges into an alias of "owner"'s id.
+    with _create(tmp_path / "ids.sqlite", _key()) as ledger:
+        owner_id = ledger.assign("owner", "structures")
+        old_id = ledger.assign("moved", "structures")
+        ledger.alias("moved", owner_id, supersede=True)
+        bindings = ledger.bindings()
+    assert bindings["owner"] == LedgerBinding(id=owner_id, family="structures", is_alias=False)
+    assert bindings["moved"] == LedgerBinding(id=owner_id, family="structures", is_alias=True)
+    # The superseded (now-orphan) old id is reachable through no live key.
+    assert old_id not in {binding.id for binding in bindings.values()}
+    assert set(bindings) == {"owner", "moved"}
+
+
+def test_bindings_are_sorted_by_key(tmp_path: Path) -> None:
+    with _create(tmp_path / "ids.sqlite", _key()) as ledger:
+        ledger.assign("zeta", "structures")
+        ledger.assign("alpha", "structures")
+        ledger.assign("mid", "structures")
+        bindings = ledger.bindings()
+    assert list(bindings) == ["alpha", "mid", "zeta"]
+
+
+def test_bindings_snapshot_is_immutable(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    with _create(path, _key()) as ledger:
+        first_id = ledger.assign("k1", "structures")
+        snapshot = ledger.bindings()
+        with pytest.raises(TypeError):
+            snapshot["k1"] = LedgerBinding(id="other", family="structures", is_alias=False)  # type: ignore[index]
+        # A later mutation on the live ledger must not retroactively change, or
+        # appear in, the earlier snapshot.
+        ledger.assign("k2", "structures")
+        assert set(snapshot) == {"k1"}
+        assert snapshot["k1"].id == first_id
+
+
+# -- read-only open ------------------------------------------------------------
+
+
+def test_read_only_open_succeeds_while_write_lock_held(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    lock = tmp_path / "ids.sqlite.lock"
+    key = _key()
+    with _create(path, key) as ledger:
+        first = ledger.assign("k1", "structures")
+    # A second write-mode session holds the lock while a read-only open runs
+    # concurrently against it; the read-only open sees the already-committed state.
+    with IdLedger.open(path, keys=[key]):
+        assert lock.exists()
+        with IdLedger.open(path, read_only=True) as reader:
+            assert reader.lookup("k1") == first
+        assert lock.exists()  # the read-only session touched neither the lock...
+    assert not lock.exists()  # ...which the writer's own close releases as usual
+
+
+def test_read_only_open_creates_no_lock_file(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    lock = tmp_path / "ids.sqlite.lock"
+    with _create(path, _key()):
+        pass
+    with IdLedger.open(path, read_only=True):
+        assert not lock.exists()
+    assert not lock.exists()
+
+
+def test_read_only_close_leaves_file_byte_identical(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    with _create(path, _key()) as ledger:
+        ledger.assign("k1", "structures")
+    before = path.read_bytes()
+    with IdLedger.open(path, read_only=True) as ledger:
+        assert ledger.lookup("k1") is not None
+    assert path.read_bytes() == before
+
+
+def test_read_only_close_requires_no_signing_key(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    with _create(path, _key()):
+        pass
+    with IdLedger.open(path, read_only=True) as ledger:  # no keys= given
+        assert ledger.bindings() == {}
+
+
+def test_read_only_assign_raises(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    with _create(path, _key()):
+        pass
+    with IdLedger.open(path, read_only=True) as ledger, pytest.raises(IdLedgerError, match="read-only"):
+        ledger.assign("k1", "structures")
+
+
+def test_read_only_alias_raises(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    key = _key()
+    with _create(path, key) as ledger:
+        target = ledger.assign("owner", "structures")
+    with IdLedger.open(path, read_only=True) as ledger, pytest.raises(IdLedgerError, match="read-only"):
+        ledger.alias("dup", target)
+
+
+def test_read_only_open_rejects_tampered_content(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    with _create(path, _key()) as ledger:
+        ledger.assign("k1", "structures")
+    connection = sqlite3.connect(path, isolation_level=None)
+    try:
+        connection.execute("UPDATE records SET id = 'anyt.am.structure-a-2' WHERE seq = 1")  # edit, no re-sign
+    finally:
+        connection.close()
+    with pytest.raises(IdLedgerError, match="does not verify|restore|Restore"):
+        IdLedger.open(path, read_only=True)
+    assert not (tmp_path / "ids.sqlite.lock").exists()  # a refused read-only open leaves no lock behind
+
+
+def test_read_only_open_rejects_seal_swap_when_trusted_key_pinned(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    original = _key()
+    pinned = _fingerprint(original)
+    with _create(path, original):
+        pass
+    _resign(path, _key())  # valid signature, but not from the pinned trust anchor
+    with pytest.raises(IdLedgerError, match="untrusted"):
+        IdLedger.open(path, trusted_keys=[pinned], read_only=True)
+
+
+def test_read_only_open_accepts_matching_bases(tmp_path: Path) -> None:
+    path = tmp_path / "ids.sqlite"
+    with _create(path, _key()):
+        pass
+    with IdLedger.open(path, bases=BASES, read_only=True) as ledger:
+        assert ledger.lookup("nonexistent") is None
+
+
+def test_read_only_open_rejects_bases_that_require_growth(tmp_path: Path) -> None:
+    # The stored bases are a SUBSET of this expectation: opening read-only cannot
+    # stamp that growth (no write happens), so it must refuse rather than silently
+    # behave as though the family had been added.
+    path = tmp_path / "ids.sqlite"
+    with _create(path, _key()):
+        pass
+    extended = {**BASES, "records": "anyt.am.rec"}
+    with pytest.raises(IdLedgerError, match="read-only cannot stamp"):
+        IdLedger.open(path, bases=extended, read_only=True)
+    assert not (tmp_path / "ids.sqlite.lock").exists()

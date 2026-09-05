@@ -56,8 +56,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from types import TracebackType
-from typing import Self, cast
+from types import MappingProxyType, TracebackType
+from typing import NamedTuple, Self, cast
 
 from httk.core._json import json_bytes
 from httk.core.entry_ids import ENTRY_ID_PATTERN, format_entry_id, is_url_safe_id, parse_entry_id
@@ -73,6 +73,7 @@ from httk.core.project.sealing import (
 __all__ = [
     "IdLedger",
     "IdLedgerError",
+    "LedgerBinding",
     "check_ledger_key",
 ]
 
@@ -102,6 +103,24 @@ def _live_id(record: Mapping[str, str]) -> str:
     """Return the id a record binds its key to: an assignment's id or an alias target."""
 
     return record["id"] if "id" in record else record["alias_of"]
+
+
+class LedgerBinding(NamedTuple):
+    """One key's current live binding, as returned by :meth:`IdLedger.bindings`.
+
+    A plain, immutable tuple: enough to group by family and to tell an intrinsic
+    assignment from a binding alias, without exposing the underlying record shape.
+
+    :param id: The id this key currently resolves to (an alias's target, exactly
+        as :meth:`IdLedger.lookup` would return).
+    :param family: The id family the resolved id belongs to.
+    :param is_alias: Whether this key is an alias of another key's id, as opposed
+        to the assignment that established the id.
+    """
+
+    id: str
+    family: str
+    is_alias: bool
 
 
 def check_ledger_key(key: str) -> str:
@@ -145,6 +164,8 @@ class IdLedger:
     :param live: The newest record per key, the key's live binding.
     :param persisted: How many records are already stored on disk.
     :param segments: How many segments are already stored on disk.
+    :param read_only: Whether this ledger was opened read-only: mutators raise
+        and :meth:`close` is a no-op that never writes and takes no lock.
     """
 
     def __init__(
@@ -159,6 +180,7 @@ class IdLedger:
         live: dict[str, dict[str, str]],
         persisted: int,
         segments: int,
+        read_only: bool = False,
     ) -> None:
         self._path = path
         self._lock_path = path.with_name(path.name + ".lock")
@@ -170,6 +192,7 @@ class IdLedger:
         self._live = live
         self._persisted = persisted
         self._segments = segments
+        self._read_only = read_only
         self._dirty = False
         self._closed = False
 
@@ -247,6 +270,7 @@ class IdLedger:
         verify: bool = True,
         bases: Mapping[str, str] | None = None,
         series: str | None = None,
+        read_only: bool = False,
     ) -> "IdLedger":
         """Open an existing ledger, verifying its signatures and invariants.
 
@@ -257,7 +281,8 @@ class IdLedger:
         The structure and every entry invariant are validated regardless (segment
         ranges must partition the records exactly, bases must grow monotonically,
         ids must conform, supersession must be sound), because a signature
-        attests only to the bytes, not to their meaning.
+        attests only to the bytes, not to their meaning. None of this is weakened
+        by *read_only*.
 
         When *series* is given it must equal the stored series. When *bases* is
         given it is reconciled as a SUPERSET of the stored map: every stored
@@ -266,6 +291,17 @@ class IdLedger:
         expectation are ADDED and stamped into the next segment's subject at close
         (so a build that assigns nothing but grows the scheme still writes on
         close). The merged map is revalidated for id shape and base uniqueness.
+        With *read_only*, stamping that growth is impossible (there is no write),
+        so an expectation that would add a family is refused outright rather than
+        silently appearing to have taken effect; a stored map that is a subset of
+        the expectation with no addition needed (i.e. an exact match) still opens.
+
+        With *read_only*, no lock is taken or required — this succeeds even while
+        another process holds the write lock, so the caller may observe a snapshot
+        that a concurrent writer is about to extend — and the returned ledger
+        permits no mutation: :meth:`assign`, :meth:`alias`, and any other mutator
+        raise, and :meth:`close` is a no-op that neither writes nor requires a
+        signing key.
 
         :param path: The ledger database to open.
         :param keys: The signing keys used to sign the next segment on close.
@@ -274,14 +310,19 @@ class IdLedger:
         :param verify: Whether to verify the segment signatures.
         :param bases: The per-family bases the caller expects, asserted when given.
         :param series: The id series the caller expects, asserted when given.
-        :return: The open, locked ledger.
-        :raises IdLedgerError: If the ledger is missing, the lock is held,
-            verification fails, an invariant is violated, or the expected
-            bases/series disagree.
+        :param read_only: Whether to open without a lock and without permitting
+            mutation, for a concurrent-safe read path.
+        :return: The open ledger, locked unless *read_only*.
+        :raises IdLedgerError: If the ledger is missing, the lock is held (and
+            *read_only* is false), verification fails, an invariant is violated,
+            the expected bases/series disagree, or *read_only* is true and the
+            expected bases would require growing the stored map.
         """
 
         location = Path(path)
-        _acquire_lock(location.with_name(location.name + ".lock"))
+        lock_path = location.with_name(location.name + ".lock")
+        if not read_only:
+            _acquire_lock(lock_path)
         try:
             # sqlite3.connect creates a missing file, so existence is checked here,
             # under the lock, before any connection is opened.
@@ -296,6 +337,12 @@ class IdLedger:
             added_families = False
             if bases is not None:
                 effective_bases, added_families = _extend_bases(stored_bases, dict(bases), stored_series, location)
+                if added_families and read_only:
+                    missing = sorted(set(bases) - set(stored_bases))
+                    raise IdLedgerError(
+                        f"id ledger {location} is missing families {missing} from the expected base map; opening "
+                        "read-only cannot stamp that growth. Open for write instead, or drop them from bases="
+                    )
             ledger = cls(
                 location,
                 bases=effective_bases,
@@ -306,13 +353,16 @@ class IdLedger:
                 live=live,
                 persisted=len(records),
                 segments=segments,
+                read_only=read_only,
             )
             # An added family is stamped into the next segment's subject at close; a
             # build that assigns nothing but extends the base map still writes.
+            # (added_families is always false here when read_only, per the raise above.)
             ledger._dirty = added_families
             return ledger
         except BaseException:
-            location.with_name(location.name + ".lock").unlink(missing_ok=True)
+            if not read_only:
+                lock_path.unlink(missing_ok=True)
             raise
 
     # -- allocation ----------------------------------------------------------
@@ -334,9 +384,10 @@ class IdLedger:
         :param family: The id family the key belongs to.
         :param supersede: Whether to re-bind an aliased key to a fresh assignment.
         :return: The assigned entry id.
-        :raises IdLedgerError: If the key is aliased and *supersede* is false, its
-            family disagrees, the family has no base, or *supersede* is passed
-            outside its one transition (a new key, or an already-assigned key).
+        :raises IdLedgerError: If the ledger is read-only, the key is aliased and
+            *supersede* is false, its family disagrees, the family has no base, or
+            *supersede* is passed outside its one transition (a new key, or an
+            already-assigned key).
         """
 
         self._require_open()
@@ -379,8 +430,9 @@ class IdLedger:
         :param key: The stable source key to record.
         :param existing_id: An id already assigned in the ledger.
         :param supersede: Whether to re-bind an assigned key to an alias.
-        :raises IdLedgerError: On a conflict, an unknown target, an assigned key
-            when *supersede* is false, or *supersede* passed for a new key.
+        :raises IdLedgerError: If the ledger is read-only, on a conflict, an
+            unknown target, an assigned key when *supersede* is false, or
+            *supersede* passed for a new key.
         """
 
         self._require_open()
@@ -423,6 +475,40 @@ class IdLedger:
         live = self._live.get(key)
         return None if live is None else _live_id(live)
 
+    def bindings(self) -> Mapping[str, LedgerBinding]:
+        """Return every key's current live binding, aliases resolved to their target id.
+
+        Only live bindings appear here: a superseded record is as invisible to
+        this as it is to :meth:`lookup` for the key that moved on from it. Each
+        binding names the family its id belongs to (an alias's family is that of
+        the id it resolves to, since a bare alias record carries no family of its
+        own) and whether the key is an alias or the assignment that established
+        the id — enough for a caller to group by family and separate intrinsic
+        identity from binding, without exposing the record shape itself.
+
+        The result is a snapshot, independent of the ledger's internals: it is a
+        fresh mapping of immutable values, so neither mutating it nor a later
+        :meth:`assign`/:meth:`alias` on this ledger can affect it, in either
+        direction. Works the same whether the ledger was opened for write or
+        *read_only*.
+
+        :return: The live bindings, keyed by source key, in ascending key order
+            (a fixed, deterministic order independent of append order).
+        """
+
+        id_families: dict[str, str] = {}
+        for record in self._records:
+            if "id" in record:
+                id_families[record["id"]] = record["family"]
+        out: dict[str, LedgerBinding] = {}
+        for key in sorted(self._live):
+            record = self._live[key]
+            resolved = _live_id(record)
+            is_alias = "alias_of" in record
+            family = id_families[resolved] if is_alias else record["family"]
+            out[key] = LedgerBinding(id=resolved, family=family, is_alias=is_alias)
+        return MappingProxyType(out)
+
     # -- lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
@@ -435,9 +521,17 @@ class IdLedger:
         the ledger unclosed and its lock held, so a retried close reattempts the
         write instead of silently skipping it (the manual remedy for an abandoned
         session is to delete the lock).
+
+        A read-only ledger never took the lock, so this is purely a no-op: it
+        neither writes nor touches any lock file (removing one here could delete
+        a concurrent writer's *own* lock, since a read-only open may coexist with
+        one).
         """
 
         if self._closed:
+            return
+        if self._read_only:
+            self._closed = True
             return
         if self._dirty:
             self._write()  # a raise here keeps _closed False and the lock held for a retry
@@ -470,10 +564,12 @@ class IdLedger:
     # -- internals -----------------------------------------------------------
 
     def _require_open(self) -> None:
-        """Guard against mutating a closed ledger."""
+        """Guard against mutating a closed or read-only ledger."""
 
         if self._closed:
             raise IdLedgerError(f"id ledger is closed: {self._path}")
+        if self._read_only:
+            raise IdLedgerError(f"id ledger is open read-only: {self._path}; assign/alias need a write-mode open")
 
     def _require_target(self, existing_id: str, key: str) -> None:
         """Guard that an alias target is an id the ledger has assigned."""

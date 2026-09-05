@@ -899,16 +899,18 @@ class SqlStore:
                 if not selects:
                     continue
                 rows = sqlalchemy.union_all(*selects).subquery()
+                missing = connection.execute(
+                    sqlalchemy.select(rows.c.backing, rows.c.owner).where(rows.c.value.is_(None)).limit(1)
+                ).first()
+                if missing is not None:
+                    raise RuntimeError(
+                        f"entry family {family.name!r} backing {missing[0]!r} owner {missing[1]} is missing {field!r}"
+                    )
                 for columns in ((rows.c.value,), (rows.c.backing, rows.c.owner)):
                     conflict = connection.execute(
                         sqlalchemy.select(sqlalchemy.func.min(rows.c.value))
                         .group_by(*columns)
-                        .having(
-                            sqlalchemy.or_(
-                                sqlalchemy.func.count() > 1,
-                                sqlalchemy.func.count(rows.c.value) == 0,
-                            )
-                        )
+                        .having(sqlalchemy.func.count() > 1)
                         .limit(1)
                     ).first()
                     if conflict is not None:

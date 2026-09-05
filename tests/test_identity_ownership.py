@@ -141,11 +141,22 @@ def test_revision_alternative_rollback_and_retry(dialect):
 @pytest.mark.parametrize("dialect", ("sqlite", "duckdb"))
 @pytest.mark.parametrize("finalize", ("parity", "deferred"))
 @pytest.mark.parametrize("workers", (1, 2))
-def test_bulk_claims_protect_later_writers(dialect, finalize, workers):
+def test_bulk_claims_protect_later_writers(dialect, finalize, workers, monkeypatch):
     with getattr(Backend, dialect)() as database:
         store = opened(database)
+        sync_calls = 0
+        sync = store._sync_identity_ownership
+
+        def counted_sync(connection, layout):
+            nonlocal sync_calls
+            sync_calls += 1
+            return sync(connection, layout)
+
+        monkeypatch.setattr(store, "_sync_identity_ownership", counted_sync)
         with store.bulk_ingest(finalize=finalize, workers=workers) as bulk:
             bulk.save(First(1, "test-1-10", "test-1-10~1"))
+        if workers == 2:
+            assert sync_calls == 1
         assert claim_counts(database) == (1, 1)
         store._entry_family_tables = lambda record_type: ()
         with pytest.raises(EntryIdConflictError):
@@ -196,6 +207,18 @@ def test_conflicting_legacy_upgrade_does_not_rewrite_records():
                 ).first()
                 is None
             )
+
+
+@pytest.mark.parametrize("field", ("id", "immutable_id"))
+def test_missing_stored_identity_is_reported_as_corruption(field):
+    with Backend.sqlite() as database:
+        store = opened(database)
+        store.save(First(1))
+        legacy(database)
+        with database.engine.begin() as connection:
+            connection.execute(sqlalchemy.text(f"UPDATE ownership_first SET {field}=NULL"))
+        with pytest.raises(RuntimeError, match=rf"missing '{field}'"):
+            opened(database, upgrade=True)
 
 
 @pytest.mark.parametrize("point", ("identity-claim:ownership_first", "parent-row-write:ownership_first"))
@@ -354,5 +377,48 @@ def test_mongo_degraded_orphan_claims_are_reconciled(mongo_test_database, monkey
             store.save(First(1, "test-1-10"))
     owners = database.database["_httk_identity_owners"]
     assert owners.count_documents({}) == 2
+    with pytest.raises(EntryIdConflictError):
+        store.save(Second(2, "test-1-10"))
+    store.fsck()
     store.save(Second(2, "test-1-10"))
     assert owners.count_documents({}) == 2
+
+
+def test_mongo_degraded_clean_save_uses_writer_lease_without_scanning(mongo_test_database, monkeypatch):
+    from httk.store.backend.mongo import MongoDatabase, MongoStore
+
+    database = MongoDatabase(mongo_test_database.client, mongo_test_database.database.name, transactions="never")
+    store = MongoStore(database, entry_families=(DECLARATION,), entry_ids=EntryIdScheme("test", "1"))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("clean standalone save must not take the fsck path")
+
+    monkeypatch.setattr("httk.store.backend.mongo.store.acquire_fsck", unexpected)
+    monkeypatch.setattr(store, "_sync_identity_ownership", unexpected)
+    store.save(First(1, "test-1-10"))
+    store._entry_family_collections = lambda record_type: ()
+    with pytest.raises(EntryIdConflictError):
+        store.save(Second(2, "test-1-10", "test-1-10~2"))
+
+
+@pytest.mark.parametrize("field", ("id", "immutable_id"))
+def test_mongo_missing_stored_identity_is_reported_as_corruption(mongo_test_database, field):
+    from httk.store.backend.mongo import MongoStore
+
+    store = MongoStore(
+        mongo_test_database,
+        entry_families=(DECLARATION,),
+        entry_ids=EntryIdScheme("test", "1"),
+    )
+    sid = store.save(First(1))
+    mongo_test_database.database["ownership_first"].update_one({"_id": sid}, {"$unset": {f"f.{field}": ""}})
+    metadata = mongo_test_database.database["_httk_store_metadata"]
+    metadata.update_one({"_id": "layout"}, {"$unset": {"identity_ownership": ""}})
+    with pytest.raises(RuntimeError, match=rf"missing '{field}'"):
+        MongoStore(
+            mongo_test_database,
+            entry_families=(DECLARATION,),
+            entry_ids=EntryIdScheme("test", "1"),
+            upgrade=True,
+        )
+    assert "identity_ownership" not in metadata.find_one({"_id": "layout"})

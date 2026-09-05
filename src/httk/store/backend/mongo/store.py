@@ -630,6 +630,11 @@ class MongoStore:
         )
 
     def _claim_entry_identity(self, record_type: type, document: Mapping[str, Any]) -> None:
+        """Reserve identities before publishing the parent document.
+
+        Non-transactional failures deliberately retain reservations. Only fsck,
+        after excluding writers, may reclaim claims whose owners do not exist.
+        """
         family = self._family_for_backing(record_type)
         if family is None or family.definition_id is None:
             return
@@ -640,7 +645,9 @@ class MongoStore:
         ):
             value = document["f"].get(kind)
             if value is None:
-                raise EntryIdConflictError(family.name, str(value), None, int(owner))
+                raise RuntimeError(
+                    f"entry family {family.name!r} backing {backing!r} owner {owner} is missing {kind!r}"
+                )
             claim = {
                 "family": family.name,
                 "kind": kind,
@@ -660,8 +667,6 @@ class MongoStore:
 
     def _sync_identity_ownership(self, lease: Any, *, reconcile: bool = False) -> None:
         """Validate/backfill claims under the existing exclusive fsck fence."""
-        # ponytail: degraded writes scan family claims under the existing exclusive
-        # fence; add targeted dirty-family tracking if standalone throughput matters.
         owners = self._database.database[_IDENTITY_OWNERS]
         for family in self.layout.families:
             if family.definition_id is None:
@@ -1184,17 +1189,11 @@ class MongoStore:
             )
             return sid
         with self._write_lock:
-            lease = (
-                acquire_writer(self._database.database)
-                if self._database.supports_transactions
-                else acquire_fsck(self._database.database)
-            )
+            lease = acquire_writer(self._database.database)
             previous_lease = getattr(self._local, "writer_lease", None)
             self._local.writer_lease = lease
             try:
-                self._observe_generation(self._layout_generation())
-                if not self._database.supports_transactions:
-                    self._sync_identity_ownership(lease, reconcile=True)
+                self._observe_generation(lease.generation)
                 self._ensure_graph_collections(record_type)
                 self._ensure_counter_collection()
                 captured = self._capture_store_timestamp()

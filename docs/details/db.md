@@ -387,9 +387,12 @@ Existing stores without the ownership capability remain readable, but writes
 require reopening with `upgrade=True`. This validates and backfills ownership
 without changing IDs, revision numbers, or content IDs; conflicts abort without
 rewriting records. Keep a backup before any upgrade. Mongo uses unique ownership
-indexes and its existing transaction sessions; standalone writes serialize
-through its exclusive maintenance lease, conservatively reconciling orphaned
-claims before writing.
+indexes and its existing transaction sessions. Standalone writes reserve IDs
+before publishing records, using ordinary writer leases rather than an exclusive
+maintenance lease or a full-store rescan. A failed write can leave an orphan
+reservation that blocks reuse of its ID; explicit `store.fsck()` reclaims it
+under the maintenance fence. After a killed process, use `force=True` only after
+verifying that the stale lease's writer is no longer running.
 
 An explicit URL-safe id which does not match that recommended form is accepted
 with a warning; unsafe ids are rejected. Backing records of every family with

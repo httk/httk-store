@@ -62,6 +62,14 @@ sid, but a record-family dispatch write can be left for a later repair. The
 mode; use a replica set and `transactions="require"` when explicit
 transactions are needed.
 
+Entry IDs are reserved through unique ownership indexes before the parent
+document is written. Normal saves take ordinary writer leases and do not rescan
+the store. A failed non-transactional write may leave an orphan reservation;
+attempts to reuse that ID fail closed until `store.fsck()` reclaims it. A handled
+failure releases its writer lease, so ordinary fsck suffices. After a process is
+killed, `store.fsck(force=True)` may clear its stale lease only after you have
+verified that the writer is no longer running. Never force past a live writer.
+
 `MongoDatabase.connect()` configures PyMongo with `w="majority"`,
 `journal=True`, and `readConcernLevel="majority"`. Explicit store
 transactions also use majority read and write concern with journaling. These

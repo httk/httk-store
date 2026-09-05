@@ -306,6 +306,20 @@ def test_bare_reference_id_filters_and_equals_alias() -> None:
         assert _ids(alias) == [cite_a]
 
 
+def test_reference_has_only_vacuous_for_unmatched_id() -> None:
+    """HAS ONLY ids matching no target row still keeps the referent-less rows (vacuous truth)."""
+    with Backend.sqlite() as database:
+        store = _store(database)
+        ref_a = store.fetch(ReferenceRow, store.save(ReferenceRow("10.1/a")), eager=True)
+        cite_a = _save(store, CitingRow("cites-a", cite=ref_a))
+        cite_none = _save(store, CitingRow("cites-none"))
+
+        assert _ids(_query(store, CitingFamily, f'references.id HAS ONLY "{ref_a.id}"')) == sorted([cite_a, cite_none])
+        # An id no reference row carries: the empty allowed set must not turn the
+        # referent-less row into an outsider (``NULL NOT IN ()`` is SQL TRUE).
+        assert _ids(_query(store, CitingFamily, 'references.id HAS ONLY "nonesuch"')) == [cite_none]
+
+
 # ---------------------------------------------------------------------- weak link both spellings + HAS ALL
 
 
@@ -432,6 +446,172 @@ def test_reverse_key_ors_across_run_backings() -> None:
         assert _ids(federation.query(f'_httk_relationships._httk_is_input.id HAS ANY "{run_a}","{run_b}"')) == [target]
         assert _ids(federation.query(f'_httk_relationships._httk_is_input.id HAS "{run_a}"')) == [target]
         assert _ids(federation.query(f'_httk_relationships._httk_is_input.id HAS "{run_b}"')) == [target]
+
+
+# ------------------------------------------------- two typed reference fields to one served family
+
+
+_DOI_PROJECTION = {
+    "doi": StoredPropertyProjection(
+        response=lambda record: record.doi,
+        query=lambda context, operator, literal: context.compare(
+            context.field("doi"), operator, context.constant(literal)
+        ),
+        sort=lambda context: context.field("doi"),
+    )
+}
+
+
+@dataclass(frozen=True)
+class RefBackA:
+    """One backing of a two-backing ``references`` family."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="rel_filter_ref_a")
+
+    doi: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+    __httk_stored_properties__: ClassVar = _DOI_PROJECTION
+
+
+@dataclass(frozen=True)
+class RefBackB:
+    """The second backing of the same ``references`` family (a separate table)."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="rel_filter_ref_b")
+
+    doi: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+    __httk_stored_properties__: ClassVar = _DOI_PROJECTION
+
+
+@dataclass(frozen=True)
+class DoubleCitingRow:
+    """A ``records`` backing referencing BOTH backings of the two-backing family."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="rel_filter_double")
+
+    name: str
+    cite_a: RefBackA | None = None
+    cite_b: RefBackB | None = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class SwappedCitingRow:
+    """The same two reference fields declared in the opposite order (order-insensitivity)."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="rel_filter_swapped")
+
+    name: str
+    cite_b: RefBackB | None = None
+    cite_a: RefBackA | None = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+class TwoBackRefFamily:
+    type = "references"
+    definition_id = _REFERENCES
+
+
+class DoubleCitingFamily:
+    type = "records"
+    definition_id = RECORDS_DEFINITION_ID
+
+
+class SwappedCitingFamily:
+    type = "records"
+    definition_id = RECORDS_DEFINITION_ID
+
+
+register_entry_family(name="rel-filter-two-ref", family=f"{__name__}:TwoBackRefFamily", definition_id=_REFERENCES)
+register_entry_record(name="rel-filter-two-ref-a", family="rel-filter-two-ref", record=f"{__name__}:RefBackA")
+register_entry_record(name="rel-filter-two-ref-b", family="rel-filter-two-ref", record=f"{__name__}:RefBackB")
+register_entry_family(
+    name="rel-filter-double", family=f"{__name__}:DoubleCitingFamily", definition_id=RECORDS_DEFINITION_ID
+)
+register_entry_record(name="rel-filter-double-rec", family="rel-filter-double", record=f"{__name__}:DoubleCitingRow")
+register_entry_family(
+    name="rel-filter-swapped", family=f"{__name__}:SwappedCitingFamily", definition_id=RECORDS_DEFINITION_ID
+)
+register_entry_record(name="rel-filter-swapped-rec", family="rel-filter-swapped", record=f"{__name__}:SwappedCitingRow")
+
+_DOUBLE_CASES = [(DoubleCitingRow, DoubleCitingFamily), (SwappedCitingRow, SwappedCitingFamily)]
+
+
+def _double_store(database: Backend, row_cls: type, family: type) -> SqlStore:
+    return SqlStore(
+        database,
+        entry_records={family: row_cls, TwoBackRefFamily: (RefBackA, RefBackB)},
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+
+
+@pytest.mark.parametrize("row_cls,family", _DOUBLE_CASES)
+def test_two_reference_fields_union_id_has_family(row_cls: type, family: type) -> None:
+    """Two reference fields serving under ONE wire type filter over the UNION of their targets.
+
+    Registering only the first-declared field's handler made the second field's
+    targets silently unmatchable; the results must not depend on declaration
+    order (both field orders are parameterized).
+    """
+    with Backend.sqlite() as database:
+        store = _double_store(database, row_cls, family)
+        ref_a = store.fetch(RefBackA, store.save(RefBackA("10.1/a")), eager=True)
+        ref_b = store.fetch(RefBackB, store.save(RefBackB("10.2/b")), eager=True)
+        both = _save(store, row_cls("both", cite_a=ref_a, cite_b=ref_b))
+        only_a = _save(store, row_cls("only-a", cite_a=ref_a))
+        only_b = _save(store, row_cls("only-b", cite_b=ref_b))
+        neither = _save(store, row_cls("neither"))
+
+        # HAS through the first field and through the second one alike ...
+        assert _ids(_query(store, family, f'references.id HAS "{ref_a.id}"')) == sorted([both, only_a])
+        assert _ids(_query(store, family, f'references.id HAS "{ref_b.id}"')) == sorted([both, only_b])
+        # ... under both spellings.
+        assert _ids(_query(store, family, f'_httk_relationships.references.id HAS "{ref_a.id}"')) == sorted(
+            [both, only_a]
+        )
+        assert _ids(_query(store, family, f'_httk_relationships.references.id HAS "{ref_b.id}"')) == sorted(
+            [both, only_b]
+        )
+
+        # HAS ANY spans both fields.
+        assert _ids(_query(store, family, f'references.id HAS ANY "{ref_a.id}","{ref_b.id}"')) == sorted(
+            [both, only_a, only_b]
+        )
+        # HAS ALL with one id from each field: only the row carrying both edges.
+        assert _ids(_query(store, family, f'references.id HAS ALL "{ref_a.id}","{ref_b.id}"')) == [both]
+        # HAS ONLY the exact union holds for every row (the edge-less one vacuously) ...
+        assert _ids(_query(store, family, f'references.id HAS ONLY "{ref_a.id}","{ref_b.id}"')) == sorted(
+            [both, only_a, only_b, neither]
+        )
+        # ... a strict subset excludes every row reaching the omitted target.
+        assert _ids(_query(store, family, f'references.id HAS ONLY "{ref_a.id}"')) == sorted([only_a, neither])
+
+
+@pytest.mark.parametrize("row_cls,family", _DOUBLE_CASES)
+def test_two_reference_fields_union_depth1_property(row_cls: type, family: type) -> None:
+    """Depth-1 ``<type>.<prop>`` resolves through EITHER contributing field."""
+    with Backend.sqlite() as database:
+        store = _double_store(database, row_cls, family)
+        ref_a = store.fetch(RefBackA, store.save(RefBackA("10.1/a")), eager=True)
+        ref_b = store.fetch(RefBackB, store.save(RefBackB("10.2/b")), eager=True)
+        both = _save(store, row_cls("both", cite_a=ref_a, cite_b=ref_b))
+        only_a = _save(store, row_cls("only-a", cite_a=ref_a))
+        only_b = _save(store, row_cls("only-b", cite_b=ref_b))
+        _save(store, row_cls("neither"))
+
+        factory = related_property_resolver_factory([stored_property_sql_plan(store, TwoBackRefFamily)])
+        federation = StoredEntryFederation((StoredEntrySource(store, family, "src"),), related_resolver_factory=factory)
+
+        assert _ids(federation.query('references.doi = "10.1/a"')) == sorted([both, only_a])
+        assert _ids(federation.query('references.doi = "10.2/b"')) == sorted([both, only_b])
+        assert _ids(federation.query('references.doi CONTAINS "10."')) == sorted([both, only_a, only_b])
 
 
 # ---------------------------------------------------------------------- depth-1 related-property resolver

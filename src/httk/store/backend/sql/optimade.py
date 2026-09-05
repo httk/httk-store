@@ -74,10 +74,27 @@ def field_id_has_handlers(field: str, sids_for: Callable[[Any], Any]) -> Mapping
         if has_type == 'HAS_ANY':
             return getattr(search_variable, field).has_any(sids_for(values))
         if has_type == 'HAS_ONLY':
-            return getattr(search_variable, field).has_only(sids_for(values))
+            return getattr(search_variable, field).has_only(_never_empty(sids_for(values)))
         raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
     return {'HAS': has_handler}
+
+
+def _never_empty(selected: Any) -> Any:
+    """Pad a HAS ONLY membership sub-select so it is never the empty set.
+
+    ``has_only`` renders as "no value is outside the allowed set", i.e.
+    ``value NOT IN (<sub-select>)``, and relies on NULL propagation to keep a
+    referent-less row (or a no-child LEFT JOIN row) out of the outsider count.
+    SQL breaks that propagation for an empty set: ``NULL NOT IN ()`` is TRUE, so
+    ids matching no row of the target table would wrongly drop exactly the rows
+    that match vacuously. Padding with an impossible sid/lineage (``-1`` is never
+    minted) keeps the set non-empty without matching anything.
+
+    :param selected: The sub-select of allowed sids or target lineages.
+    :return: The same sub-select padded with one impossible member.
+    """
+    return sqlalchemy.union_all(selected, sqlalchemy.select(sqlalchemy.literal(-1)))
 
 
 def _related_id_has_handlers(store: SqlStore, related_cls: type, field: str) -> Mapping[str, Callable[..., Any]]:
@@ -117,7 +134,7 @@ def _weak_link_id_has_handlers(store: SqlStore, related_cls: type, name: str) ->
         if has_type == 'HAS_ANY':
             return getattr(search_variable.links, name).has_any(lineages(values))
         if has_type == 'HAS_ONLY':
-            return getattr(search_variable.links, name).has_only(lineages(values))
+            return getattr(search_variable.links, name).has_only(_never_empty(lineages(values)))
         raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
     return {'HAS': has_handler}

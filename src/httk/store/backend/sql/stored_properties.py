@@ -1012,22 +1012,26 @@ class StoredPropertySqlPlan:
         handlers: dict[str, Mapping[str, Callable[..., Any]]] = {}
         targets: list[str] = []
 
-        def register_typed(rtype: str, handler: Mapping[str, Callable[..., Any]]) -> None:
-            handlers.setdefault(f"{rtype}.id", handler)
-            handlers.setdefault(f"{_REL_ROOT}.{rtype}.id", handler)
-            if rtype not in targets:
-                targets.append(rtype)
-
+        # Collect per served type first: several fields (and exposed weak links)
+        # may target different backings of ONE served family, and the wire
+        # relationship then holds the UNION of their targets — registering the
+        # first-declared field's handler alone would silently drop the rest.
+        typed: dict[str, list[Mapping[str, Callable[..., Any]]]] = {}
         for spec in schema.fields:
             if spec.role in ("reference", "child") and spec.target is not None:
                 rtype = _served_type_for_target(store, spec.target)
                 if rtype is not None:
-                    register_typed(rtype, _related_id_has_handlers(store, spec.target, spec.field))
+                    typed.setdefault(rtype, []).append(_related_id_has_handlers(store, spec.target, spec.field))
         for link in schema.links:
             if link.exposed_relationship and link.target is not None:
                 rtype = _served_type_for_target(store, link.target)
                 if rtype is not None:
-                    register_typed(rtype, _weak_link_id_has_handlers(store, link.target, link.name))
+                    typed.setdefault(rtype, []).append(_weak_link_id_has_handlers(store, link.target, link.name))
+        for rtype, per_field in typed.items():
+            handler = per_field[0] if len(per_field) == 1 else _union_has_handlers(per_field)
+            handlers[f"{rtype}.id"] = handler
+            handlers[f"{_REL_ROOT}.{rtype}.id"] = handler
+            targets.append(rtype)
 
         strong = strong_link_families(store)
         forward = next((family for family in strong if family.backing is backing), None)
@@ -1492,6 +1496,49 @@ def _has_family_clause(
     if has_type == "HAS_ONLY":
         return sqlalchemy.not_(any_source(lambda row: row.c[column].notin_(values)))
     raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
+
+
+def _union_has_handlers(per_field: list[Mapping[str, Callable[..., Any]]]) -> Mapping[str, Callable[..., Any]]:
+    """A typed-relationship ``.id`` HAS handler over the UNION of several fields' targets.
+
+    Used when one backing declares several reference/child fields (or exposed
+    weak links) whose targets serve under the SAME wire entry type: the served
+    relationship lists all of their targets, so the filter must treat the id
+    list as their union rather than one field's. ``HAS ANY`` ORs the per-field
+    ``HAS ANY``; ``HAS ALL`` ANDs, per required value, the OR over fields of a
+    single-value ``HAS ANY`` (each value may be reached through any field);
+    ``HAS ONLY`` ANDs the per-field ``HAS ONLY`` (every field's targets inside
+    the allowed set — the union is a subset iff each part is, and an edgeless
+    row still matches vacuously).
+
+    :param per_field: The per-field handler mappings contributing to one wire type.
+    :return: A handler mapping containing the ``HAS`` operation.
+    :raises FilterTranslationError: If an unexpected set operator is supplied.
+    """
+
+    def has_handler(entry: str, ops: Any, values: Any, search_variable: Any, has_type: str) -> Any:
+        def combine(parts: Iterator[Any], conjunction: bool) -> Any:
+            combined = next(parts)
+            for part in parts:
+                combined = combined & part if conjunction else combined | part
+            return combined
+
+        def any_field(selected: Any) -> Any:
+            return combine(
+                (handler["HAS"](entry, ops, selected, search_variable, "HAS_ANY") for handler in per_field), False
+            )
+
+        if has_type == "HAS_ANY":
+            return any_field(values)
+        if has_type == "HAS_ALL":
+            return combine((any_field([value]) for value in values), True)
+        if has_type == "HAS_ONLY":
+            return combine(
+                (handler["HAS"](entry, ops, values, search_variable, "HAS_ONLY") for handler in per_field), True
+            )
+        raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
+
+    return {"HAS": has_handler}
 
 
 def _constant_false_has_handlers() -> Mapping[str, Callable[..., Any]]:

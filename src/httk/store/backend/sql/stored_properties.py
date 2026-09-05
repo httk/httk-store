@@ -57,6 +57,7 @@ from httk.store.backend.sql.optimade import (
 from httk.store.backend.sql.provenance_edges import (
     StrongLinkFamily,
     latest_main_condition,
+    local_edge_public_id,
     strong_link_families,
 )
 from httk.store.backend.sql.rows import RowHydrator
@@ -109,12 +110,14 @@ class RelationshipSourceMap:
     :param reverse_prefixes: Prefixes of reverse source mounts keyed by their concrete backing class.
     :param wire_types: Served relationship target names keyed by internal family type.
     :param backing_prefixes: Typed target prefixes keyed by their concrete backing class.
+    :param target_backings: Mounted loose-edge target record classes keyed by internal family type.
     """
 
     prefixes: Mapping[str, str]
     reverse_prefixes: Mapping[type, tuple[str, ...]]
     wire_types: Mapping[str, str]
     backing_prefixes: Mapping[type, str]
+    target_backings: Mapping[str, tuple[type, ...]]
 
 
 @dataclass(frozen=True)
@@ -1495,16 +1498,9 @@ def _forward_edge_has_handlers(
             return sqlalchemy.or_(*(one_exists(source, outer_sid, edge_predicate) for source in sources))
 
         def public_id(row: Any) -> Any:
-            prefixes = source_map.prefixes if source_map is not None else {}
-            cases = [
-                (
-                    row.c["entry_type"] == internal,
-                    sqlalchemy.literal(prefix) + row.c["entry_id"],
-                )
-                for internal, prefix in prefixes.items()
-                if prefix
-            ]
-            return sqlalchemy.case(*cases, else_=row.c["entry_id"]) if cases else row.c["entry_id"]
+            if source_map is None:
+                return row.c["entry_id"]
+            return local_edge_public_id(store, row, source_map.prefixes, source_map.target_backings)
 
         clause = _has_family_clause(has_type, values, any_source, public_id)
         return _SqlPredicate(_bool_clause(clause), correlation_depth=1)

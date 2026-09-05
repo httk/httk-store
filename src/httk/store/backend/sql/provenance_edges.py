@@ -120,6 +120,9 @@ def forward_run_edges(
     store: SqlStore,
     family: StrongLinkFamily,
     run_sids: Collection[int],
+    *,
+    target_prefixes: Mapping[str, str] | None = None,
+    target_backings: Mapping[str, tuple[type, ...]] | None = None,
 ) -> dict[int, list[tuple[tuple[str, str, str], StrongLink]]]:
     """Return each run's own edges keyed by run sid, in field then row order.
 
@@ -127,6 +130,8 @@ def forward_run_edges(
     :param store: The SQL store backing the run family.
     :param family: The StrongLink family whose edges are read.
     :param run_sids: The run row sids to project edges for.
+    :param target_prefixes: Mounted prefixes to apply only to locally resolved targets.
+    :param target_backings: Mounted target record classes keyed by internal entry type.
     :return: ``run sid -> [((internal_target_type, target_id, label), marker)]``.
     """
     if not run_sids:
@@ -141,7 +146,7 @@ def forward_run_edges(
             sqlalchemy.select(
                 parent_column,
                 edge_table.c["entry_type"],
-                edge_table.c["entry_id"],
+                local_edge_public_id(store, edge_table, target_prefixes or {}, target_backings or {}),
                 edge_table.c["label"],
             )
             .select_from(child_table.join(edge_table, fk_column == edge_table.c[SID_COLUMN]))
@@ -151,6 +156,50 @@ def forward_run_edges(
         for parent_sid, entry_type, entry_id, label in connection.execute(statement):
             result.setdefault(int(parent_sid), []).append(((str(entry_type), str(entry_id), str(label)), marker))
     return result
+
+
+def local_edge_public_id(
+    store: SqlStore,
+    edge: Any,
+    prefixes: Mapping[str, str],
+    backings: Mapping[str, tuple[type, ...]],
+) -> Any:
+    """Prefix a loose id only when a mounted target table contains its main lineage.
+
+    Rendering and filtering share this expression. Indexed, correlated probes
+    avoid either loading every target id or issuing a query for every edge.
+
+    :param store: The store containing the source and mounted target tables.
+    :param edge: The edge table or alias carrying ``entry_type`` and ``entry_id``.
+    :param prefixes: Selected public prefixes keyed by internal entry type.
+    :param backings: Mounted target record classes keyed by internal entry type.
+    :return: The SQL expression for the resolved public id, or the unchanged raw id.
+    """
+    cases = []
+    for internal, prefix in prefixes.items():
+        if not prefix:
+            continue
+        matches = []
+        for backing in backings.get(internal, ()):
+            if store._missing_tables_for_read((backing,)):
+                continue
+            target = store._table(resolve_schema(backing).table_name).alias()
+            matches.append(
+                sqlalchemy.exists(
+                    sqlalchemy.select(sqlalchemy.literal(1)).where(
+                        target.c["id"] == edge.c["entry_id"],
+                        target.c[ALT_KIND_COLUMN].is_(None),
+                    )
+                )
+            )
+        if matches:
+            cases.append(
+                (
+                    sqlalchemy.and_(edge.c["entry_type"] == internal, sqlalchemy.or_(*matches)),
+                    sqlalchemy.literal(prefix) + edge.c["entry_id"],
+                )
+            )
+    return sqlalchemy.case(*cases, else_=edge.c["entry_id"]) if cases else edge.c["entry_id"]
 
 
 def latest_main_run_sids(connection: Any, run_table: sqlalchemy.Table) -> dict[int, int]:

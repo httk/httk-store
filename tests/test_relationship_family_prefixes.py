@@ -106,6 +106,35 @@ def test_loose_types_require_consistent_prefixes_across_mounted_families(sibling
         assert page.relationships[0]["_httk_has_input"][0].id == "D:" + target.id
 
 
+@pytest.mark.parametrize("dialect", ("sqlite", "duckdb"))
+def test_loose_ids_only_prefix_resolved_mounted_targets(dialect: str) -> None:
+    with getattr(Backend, dialect)() as database:
+        store = _store(database)
+        store.save(RecordRow("local", id="local"))
+        store.save(CitingRow("unmounted", id="unmounted"))
+        raw_ids = ("local", "remote", "unmounted")
+        store.save(Run(id="run", inputs=tuple(RunEdge(value, "records", value) for value in raw_ids)))
+        source = StoredEntrySource(store, RunEntry, "runs", "R:")
+        federation = StoredEntryFederation(
+            (source,),
+            source_inventory=(source, StoredEntrySource(store, RecordFamily, "records", "D:")),
+        )
+        expected = ("D:local", "remote", "unmounted")
+        assert tuple(edge.id for edge in federation.query().relationships[0]["_httk_has_input"]) == expected
+        for value in expected:
+            assert [
+                row["id"] for row in federation.query(f'_httk_relationships._httk_has_input.id HAS "{value}"').rows
+            ] == ["R:run"]
+        for value in ("local", "D:remote", "D:unmounted"):
+            assert federation.query(f'_httk_relationships._httk_has_input.id HAS "{value}"').rows == ()
+        assert [
+            row["id"]
+            for row in federation.query(
+                '_httk_relationships._httk_has_input.id HAS ONLY "D:local","remote","unmounted"'
+            ).rows
+        ] == ["R:run"]
+
+
 @pytest.mark.parametrize("wire_type", ("references", "_test_references"))
 @pytest.mark.parametrize("sibling_prefix", (None, "Q:"))
 def test_related_properties_prefix_matching_family_before_combining_ids(

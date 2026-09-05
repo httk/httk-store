@@ -950,6 +950,7 @@ class StoredEntryFederation:
         """Resolve one source's forward and reverse prefixes from the same mount selections."""
         assert isinstance(source.store, SqlStore)
         prefixes: dict[str, str] = {}
+        target_backings: dict[str, tuple[type, ...]] = {}
         reverse: dict[type, tuple[str, ...]] = {}
         backing_prefixes: dict[type, str] = {}
         wire_types: dict[str, str] = {}
@@ -980,6 +981,13 @@ class StoredEntryFederation:
             if loose_edges:
                 loose_targets = self._loose_relationship_targets(source, internal)
                 prefixes[internal] = loose_targets[0].public_id_prefix if loose_targets else ""
+                target_backings[internal] = tuple(
+                    backing
+                    for target in loose_targets
+                    for target_layout in source.store.layout.families
+                    if target_layout.family is target.entry_family
+                    for backing in target_layout.records
+                )
             wire_types[internal] = self._served_type_names.get(internal, wire_type_for_internal(source.store, internal))
             if not any(backing in strong_backings for backing in layout.records):
                 continue
@@ -1003,7 +1011,7 @@ class StoredEntryFederation:
             for backing in layout.records:
                 if backing in strong_backings:
                     reverse[backing] = selected_prefixes
-        return RelationshipSourceMap(prefixes, reverse, wire_types, backing_prefixes)
+        return RelationshipSourceMap(prefixes, reverse, wire_types, backing_prefixes, target_backings)
 
     def _loose_relationship_targets(self, source: StoredEntrySource, internal: str) -> tuple[StoredEntrySource, ...]:
         """Resolve a loose edge's type only when mounted families agree on its prefix."""
@@ -1149,8 +1157,16 @@ class StoredEntryFederation:
         """
         if store._missing_tables_for_read((family.backing,)):
             return
+        source_map = self._relationship_maps[group[0].stream.source.source.name]
         with store._read_connection() as connection:
-            edges_by_sid = forward_run_edges(connection, store, family, [candidate.sid for candidate in group])
+            edges_by_sid = forward_run_edges(
+                connection,
+                store,
+                family,
+                [candidate.sid for candidate in group],
+                target_prefixes=source_map.prefixes,
+                target_backings=source_map.target_backings,
+            )
         for candidate in group:
             source_map = self._relationship_maps[candidate.stream.source.source.name]
             for (edge_type, edge_id, label), marker in edges_by_sid.get(int(candidate.sid), []):
@@ -1158,7 +1174,7 @@ class StoredEntryFederation:
                 collected.setdefault(id(candidate), {}).setdefault(key, []).append(
                     RelatedEntry(
                         source_map.wire_types.get(edge_type, edge_type),
-                        source_map.prefixes.get(edge_type, "") + edge_id,
+                        edge_id,
                         role=marker.role,
                         label=label,
                         relationship=key,

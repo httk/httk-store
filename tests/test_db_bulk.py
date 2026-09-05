@@ -365,7 +365,13 @@ def test_successful_empty_bulk_clears_under_construction_marker(store_factory):
     database = _database_of(store)
     with database.engine.connect() as connection:
         keys = set(connection.execute(sqlalchemy.text("SELECT key FROM _httk_store_metadata")).scalars())
-    assert keys == {"protocol", "entry_declaration", "entry_schemas", "store_timestamps"}
+    assert keys == {
+        "protocol",
+        "entry_declaration",
+        "entry_schemas",
+        "store_timestamps",
+        "identity_ownership",
+    }
 
 
 def test_bulk_nested_metadata_conflict_raises(store_factory):

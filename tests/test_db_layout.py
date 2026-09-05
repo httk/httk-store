@@ -243,7 +243,9 @@ def test_common_save_and_paging_imports_do_not_import_sqlalchemy() -> None:
     subprocess.run([sys.executable, "-c", code], check=True, env=dict(os.environ))
 
 
-def test_empty_database_requires_declaration_and_stamps_metadata_only(database: Backend) -> None:
+def test_empty_database_requires_declaration_and_stamps_metadata_only(
+    database: Backend,
+) -> None:
     with pytest.raises(TypeError, match="entry_records"):
         SqlStore(database)
 
@@ -251,7 +253,11 @@ def test_empty_database_requires_declaration_and_stamps_metadata_only(database: 
     assert store.entry_layout == ()
     with database.engine.connect() as connection:
         names = actual_table_names(connection)
-        assert names == {METADATA_TABLE_NAME}
+        assert names == {
+            METADATA_TABLE_NAME,
+            "_httk_entry_id_owners",
+            "_httk_immutable_id_owners",
+        }
         declaration = connection.execute(
             sqlalchemy.text("SELECT value FROM _httk_store_metadata WHERE key = 'entry_declaration'")
         ).scalar_one()
@@ -593,7 +599,9 @@ def test_failed_empty_initialization_leaves_no_partial_layout(
     assert not _tables(database)
 
 
-def test_concurrent_first_initialization_loser_does_not_drop_winner(tmp_path: Path) -> None:
+def test_concurrent_first_initialization_loser_does_not_drop_winner(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "layout-race.sqlite"
     start = threading.Barrier(2)
     outcomes: list[BaseException | None] = []
@@ -625,7 +633,11 @@ def test_concurrent_first_initialization_loser_does_not_drop_winner(tmp_path: Pa
     with Backend.sqlite(path) as reopened:
         store = SqlStore(reopened)
         assert tuple(item.family for item in store.entry_layout) == (LayoutFamily,)
-        assert _tables(reopened) == {METADATA_TABLE_NAME}
+        assert _tables(reopened) == {
+            METADATA_TABLE_NAME,
+            "_httk_entry_id_owners",
+            "_httk_immutable_id_owners",
+        }
 
 
 def test_registry_normalization_and_single_record_dispatch_free_storage(database: Backend) -> None:

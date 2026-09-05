@@ -115,6 +115,8 @@ from httk.store.backend.sql.mapping import (
     ALT_KIND_COLUMN,
     CONTENT_ID_COLUMN,
     DISPATCH_CONTENT_ID_COLUMN,
+    ENTRY_ID_OWNERS_TABLE_NAME,
+    IMMUTABLE_ID_OWNERS_TABLE_NAME,
     LOGICAL_ID_COLUMN,
     ROLE_COLUMN,
     SID_COLUMN,
@@ -795,7 +797,11 @@ class BulkIngest:
         """
         preexisting: set[str] = set()
         for name, kinds in actual_schema_objects(connection).items():
-            if "table" not in kinds or name == METADATA_TABLE_NAME:
+            if "table" not in kinds or name in {
+                METADATA_TABLE_NAME,
+                ENTRY_ID_OWNERS_TABLE_NAME,
+                IMMUTABLE_ID_OWNERS_TABLE_NAME,
+            }:
                 continue
             preexisting.add(name)
         return frozenset(preexisting)
@@ -1520,6 +1526,8 @@ class BulkIngest:
     def _finalize(self) -> None:
         if self._parallel:
             self._parallel_finalize()
+            assert self._connection is not None
+            self._store._sync_identity_ownership(self._connection, self._store.layout)
             return
         self._flush()
         self._flush_dispatch()
@@ -1528,6 +1536,8 @@ class BulkIngest:
         self._verify_rebuild_scans()
         self._resync_sequences()
         self._assert_counts()
+        assert self._connection is not None
+        self._store._sync_identity_ownership(self._connection, self._store.layout)
 
     def _parallel_finalize(self) -> None:
         """Join the workers, merge their shards set-wise, then build indexes and verify (parallel mode)."""
@@ -1582,6 +1592,7 @@ class BulkIngest:
             try:
                 try:
                     finalizer.run()
+                    self._store._sync_identity_ownership(self._connection, self._store.layout)
                 except EntryMetadataConflictError as error:
                     if not self._parallel:
                         message = self._serial_conflict_message(str(error))
@@ -1658,6 +1669,8 @@ class BulkIngest:
         assert self._connection is not None
         objects = actual_schema_objects(self._connection)
         expected = set(self._created) | {METADATA_TABLE_NAME}
+        if self._store.backend_facts.metadata_backend != "keepermap":
+            expected.update((ENTRY_ID_OWNERS_TABLE_NAME, IMMUTABLE_ID_OWNERS_TABLE_NAME))
         actual_tables = {name for name, kinds in objects.items() if "table" in kinds}
         if actual_tables != expected:
             raise RuntimeError(

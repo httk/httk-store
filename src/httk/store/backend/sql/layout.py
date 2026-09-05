@@ -8,7 +8,12 @@ from typing import Final, Literal
 import sqlalchemy
 
 from httk.store.backend.schema import TableSchema, resolve_schema
-from httk.store.backend.sql.mapping import dispatch_table_for, entry_dispatch_table_name, table_for
+from httk.store.backend.sql.mapping import (
+    dispatch_table_for,
+    entry_dispatch_table_name,
+    identity_owner_tables,
+    table_for,
+)
 from httk.store.storage_layout import (
     EntryFamilyDeclaration,
     EntryFamilyLayout,
@@ -223,6 +228,7 @@ def expected_metadata(layout: StorageLayout, *, store_timestamps: bool = True) -
     """Return SQLAlchemy metadata for all protocol-owned tables of ``layout``."""
     metadata = sqlalchemy.MetaData()
     metadata_table_for(metadata)
+    identity_owner_tables(metadata)
     for family in layout.families:
         schemas = tuple(resolve_schema(record) for record in family.records)
         for schema in schemas:

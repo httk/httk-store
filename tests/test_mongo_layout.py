@@ -129,7 +129,7 @@ def _upgrade_decl(record: type) -> EntryFamilyDeclaration:
     )
 
 
-def test_first_open_stamps_seven_keys_and_reopen_trusts(mongo_test_database) -> None:
+def test_first_open_stamps_layout_capabilities_and_reopen_trusts(mongo_test_database) -> None:
     """The single layout document is canonical and byte-stable."""
     store = MongoStore(mongo_test_database, entry_records={})
     document = mongo_test_database.database[METADATA_COLLECTION].find_one({"_id": "layout"})
@@ -142,6 +142,7 @@ def test_first_open_stamps_seven_keys_and_reopen_trusts(mongo_test_database) -> 
         "document_layout",
         "generation",
         "store_timestamps",
+        "identity_ownership",
     }
     assert document["protocol"] == "2"
     assert document["document_layout"] == "mongo-v2"

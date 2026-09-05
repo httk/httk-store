@@ -71,7 +71,7 @@ from httk.store.store_timestamp import (
 from .database import MongoDatabase, TransactionsUnavailableError
 from .documents import decode_record, encode_record, preflight_document
 from .fsck import FsckSummary
-from .leases import WriterLease, acquire_writer, clear_stale_lock
+from .leases import WriterLease, acquire_fsck, acquire_writer, clear_stale_lock
 from .mapping import (
     COUNTERS_COLLECTION,
     METADATA_COLLECTION,
@@ -90,6 +90,8 @@ from .mapping import (
 __all__ = ["MongoStore", "StoreClockRegressionError"]
 
 _DOCUMENT_LAYOUT = "mongo-v2"
+_IDENTITY_OWNERS = "_httk_identity_owners"
+_IDENTITY_VERSION = "1"
 _RESERVED_PREFIX = "_httk_"
 _LINK_COLLECTION_PREFIX = "_httk_link_"
 _METADATA_KEYS = frozenset(
@@ -101,6 +103,7 @@ _METADATA_KEYS = frozenset(
         "document_layout",
         "generation",
         "store_timestamps",
+        "identity_ownership",
     }
 )
 _LOGGER = logging.getLogger("httk.store.backend.mongo")
@@ -304,6 +307,7 @@ class MongoStore:
         self._database = database
         self._entry_ids = entry_ids
         self._upgrade = upgrade
+        self._identity_ownership_ready = True
         self._store_timestamps = store_timestamps
         self._store_timestamp_resolution = store_timestamp_resolution
         self._allow_clock_regression = allow_clock_regression
@@ -432,6 +436,11 @@ class MongoStore:
                 stored = database[METADATA_COLLECTION].find_one({"_id": "layout"})
             else:
                 self._install_layout(supplied)
+                self._ensure_identity_owners()
+                database[METADATA_COLLECTION].update_one(
+                    {"_id": "layout"},
+                    {"$set": {"identity_ownership": _IDENTITY_VERSION}},
+                )
                 return
 
         if stored is None:
@@ -452,10 +461,16 @@ class MongoStore:
             # accumulate instead of overwriting a single "declaration" payload.
             return typing.cast("dict[str, object]", diff.setdefault("declaration", {}))
 
-        if set(stored) != _METADATA_KEYS:
+        ownership_pending = "identity_ownership" not in stored
+        if set(stored) != (_METADATA_KEYS - {"identity_ownership"} if ownership_pending else _METADATA_KEYS):
             declaration_diff()["metadata_keys"] = {
                 "expected": tuple(sorted(_METADATA_KEYS)),
                 "actual": tuple(sorted(stored)),
+            }
+        if not ownership_pending and stored.get("identity_ownership") != _IDENTITY_VERSION:
+            declaration_diff()["identity_ownership"] = {
+                "expected": _IDENTITY_VERSION,
+                "actual": stored.get("identity_ownership"),
             }
         protocol_actual = stored.get("protocol")
         document_layout_actual = stored.get("document_layout")
@@ -532,6 +547,7 @@ class MongoStore:
         expected_reserved = {
             METADATA_COLLECTION,
             COUNTERS_COLLECTION,
+            _IDENTITY_OWNERS,
             *(entry_dispatch_table_name(family.name) for family in persisted.families if len(family.records) > 1),
         }
         problems: dict[str, object] = {}
@@ -549,9 +565,118 @@ class MongoStore:
                 }
         if problems:
             raise StorageLayoutUpgradeRequiredError({"schema": problems})
+        self._install_layout(persisted)
+        self._identity_ownership_ready = not ownership_pending
+        if not ownership_pending:
+            indexes = self._database.database[_IDENTITY_OWNERS].index_information()
+            expected_indexes = {
+                "identity_value": [("family", 1), ("kind", 1), ("value", 1)],
+                "identity_owner": [
+                    ("family", 1),
+                    ("kind", 1),
+                    ("backing", 1),
+                    ("owner", 1),
+                ],
+            }
+            if any(
+                indexes.get(name, {}).get("key") != keys
+                or not indexes.get(name, {}).get("unique")
+                or "partialFilterExpression" in indexes.get(name, {})
+                for name, keys in expected_indexes.items()
+            ):
+                raise StorageLayoutUpgradeRequiredError(
+                    {"schema": {_IDENTITY_OWNERS: "missing identity uniqueness indexes"}}
+                )
+        if ownership_pending and self._upgrade:
+            lease = acquire_fsck(self._database.database)
+            try:
+                self._ensure_identity_owners()
+                self._sync_identity_ownership(lease)
+                self._database.database[METADATA_COLLECTION].update_one(
+                    {"_id": "layout"},
+                    {"$set": {"identity_ownership": _IDENTITY_VERSION}},
+                )
+                self._identity_ownership_ready = True
+            finally:
+                lease.release()
         if upgrade_pending:
             self._restamp_entry_schemas(persisted)
-        self._install_layout(persisted)
+
+    def _require_identity_ownership(self) -> None:
+        if not self._identity_ownership_ready:
+            raise StorageLayoutUpgradeRequiredError(
+                {
+                    "declaration": {
+                        "identity_ownership": {
+                            "expected": _IDENTITY_VERSION,
+                            "actual": None,
+                        }
+                    }
+                },
+                hint="reopen with upgrade=True to validate durable entry-id ownership before writing",
+            )
+
+    def _ensure_identity_owners(self) -> None:
+        collection = self._database.database[_IDENTITY_OWNERS]
+        collection.create_index(
+            [("family", 1), ("kind", 1), ("value", 1)],
+            unique=True,
+            name="identity_value",
+        )
+        collection.create_index(
+            [("family", 1), ("kind", 1), ("backing", 1), ("owner", 1)],
+            unique=True,
+            name="identity_owner",
+        )
+
+    def _claim_entry_identity(self, record_type: type, document: Mapping[str, Any]) -> None:
+        family = self._family_for_backing(record_type)
+        if family is None or family.definition_id is None:
+            return
+        backing = family.record_names[family.records.index(record_type)]
+        for kind, owner in (
+            ("id", document["alt_id"]),
+            ("immutable_id", document["_id"]),
+        ):
+            value = document["f"].get(kind)
+            if value is None:
+                raise EntryIdConflictError(family.name, str(value), None, int(owner))
+            claim = {
+                "family": family.name,
+                "kind": kind,
+                "value": value,
+                "backing": backing,
+                "owner": owner,
+            }
+            try:
+                self._database.database[_IDENTITY_OWNERS].update_one(
+                    claim,
+                    {"$setOnInsert": claim},
+                    upsert=True,
+                    **self._session_kwargs(),
+                )
+            except DuplicateKeyError as error:
+                raise EntryIdConflictError(family.name, str(value), None, int(owner)) from error
+
+    def _sync_identity_ownership(self, lease: Any, *, reconcile: bool = False) -> None:
+        """Validate/backfill claims under the existing exclusive fsck fence."""
+        # ponytail: degraded writes scan family claims under the existing exclusive
+        # fence; add targeted dirty-family tracking if standalone throughput matters.
+        owners = self._database.database[_IDENTITY_OWNERS]
+        for family in self.layout.families:
+            if family.definition_id is None:
+                continue
+            for backing, record in zip(family.record_names, family.records, strict=True):
+                collection = self._database.database[collection_name_for(resolve_schema(record))]
+                if reconcile:
+                    for claim in owners.find({"family": family.name, "backing": backing}):
+                        lease.refresh_heartbeat()
+                        key = "alt_id" if claim["kind"] == "id" else "_id"
+                        if collection.find_one({key: claim["owner"]}, {"_id": 1}) is None:
+                            owners.delete_one({"_id": claim["_id"]})
+                for document in collection.find({}, {"f.id": 1, "f.immutable_id": 1, "alt_id": 1}):
+                    lease.refresh_heartbeat()
+                    self._claim_entry_identity(record, document)
 
     def _raise_unversioned(self, collection_names: set[str]) -> None:
         schema: dict[str, object] = {METADATA_COLLECTION: {"missing": True}}
@@ -632,6 +757,7 @@ class MongoStore:
         :return: None.
         :raises ValueError: If a requested physical name is reserved.
         """
+        self._require_identity_ownership()
         requested: list[tuple[str, dict[str, Any], list[Any]]] = []
         seen: set[str] = set()
         for cls in classes:
@@ -843,6 +969,7 @@ class MongoStore:
 
     @contextlib.contextmanager
     def _transaction_scope(self) -> typing.Iterator[None]:
+        self._require_identity_ownership()
         current = self._current_transaction()
         if current is not None:
             yield
@@ -920,6 +1047,8 @@ class MongoStore:
         :return: An immutable :class:`~httk.store.backend.mongo.fsck.FsckSummary`.
         """
         from .fsck import run_fsck
+
+        self._require_identity_ownership()
 
         return run_fsck(
             self,
@@ -1023,6 +1152,7 @@ class MongoStore:
         the same group extras as revision 1.
         """
         reject_cursor_proxy(obj)
+        self._require_identity_ownership()
         record_type = resolve_storage_record(obj, as_record=as_record)
         alt_request = (
             _AlternativeRequest(
@@ -1054,11 +1184,17 @@ class MongoStore:
             )
             return sid
         with self._write_lock:
-            lease = acquire_writer(self._database.database)
+            lease = (
+                acquire_writer(self._database.database)
+                if self._database.supports_transactions
+                else acquire_fsck(self._database.database)
+            )
             previous_lease = getattr(self._local, "writer_lease", None)
             self._local.writer_lease = lease
             try:
-                self._observe_generation(lease.generation)
+                self._observe_generation(self._layout_generation())
+                if not self._database.supports_transactions:
+                    self._sync_identity_ownership(lease, reconcile=True)
                 self._ensure_graph_collections(record_type)
                 self._ensure_counter_collection()
                 captured = self._capture_store_timestamp()
@@ -1082,7 +1218,7 @@ class MongoStore:
                     sid = self._save_implicit_transaction(
                         record_type,
                         obj,
-                        lease,
+                        typing.cast(WriterLease, lease),
                         captured,
                         replace_logical_id,
                         id_series,
@@ -1418,6 +1554,8 @@ class MongoStore:
         if content_key is not None:
             document["content_id"] = content_key
         preflight_document(document, self._max_bson_size, record_type)
+        if not self._database.supports_transactions:
+            self._claim_entry_identity(record_type, document)
         try:
             collection.insert_one(document, **self._session_kwargs())
         except DuplicateKeyError as error:
@@ -1442,6 +1580,8 @@ class MongoStore:
                 )
             return sid
         projection.inserted.append((record_type, sid))
+        if self._database.supports_transactions:
+            self._claim_entry_identity(record_type, document)
         self._projection_sids(projection)[validation_key] = sid
         return sid
 
@@ -1660,6 +1800,30 @@ class MongoStore:
             self._database.database[collection_name_for(resolve_schema(record_type))].delete_one(
                 {"_id": sid}, **self._session_kwargs()
             )
+            family = self._family_for_backing(record_type)
+            if family is not None and family.definition_id is not None:
+                backing = family.record_names[family.records.index(record_type)]
+                owners = self._database.database[_IDENTITY_OWNERS]
+                owners.delete_one(
+                    {
+                        "family": family.name,
+                        "kind": "immutable_id",
+                        "backing": backing,
+                        "owner": sid,
+                    },
+                    **self._session_kwargs(),
+                )
+                collection = self._database.database[collection_name_for(resolve_schema(record_type))]
+                if collection.find_one({"alt_id": sid}, {"_id": 1}, **self._session_kwargs()) is None:
+                    owners.delete_one(
+                        {
+                            "family": family.name,
+                            "kind": "id",
+                            "backing": backing,
+                            "owner": sid,
+                        },
+                        **self._session_kwargs(),
+                    )
             for key, value in tuple(sids.items()):
                 if value == sid and key[0] is record_type:
                     del sids[key]
@@ -2433,6 +2597,12 @@ class MongoStore:
         plan = _metadata_plan(record_type)
         if plan is not None:
             self._check_metadata_at(record_type, sid, source, projection, record_type.__name__, plan)
+        if record_type in self._entry_record_types:
+            document = self._database.database[collection_name_for(resolve_schema(record_type))].find_one(
+                {"_id": sid}, **self._session_kwargs()
+            )
+            assert document is not None
+            self._claim_entry_identity(record_type, document)
 
     def _metadata_parent_document(
         self, record_type: type, sid: int, plan: Any, projection: SaveProjection

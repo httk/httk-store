@@ -139,6 +139,8 @@ def run_fsck(
                 condition = table.c[ROLE_COLUMN] == 0
                 if survivors:
                     condition = sqlalchemy.and_(condition, table.c[SID_COLUMN].not_in(survivors))
+                if store.write_profile == "degraded" and schema.cls in store._entry_record_types:
+                    store._touch_dirty_table(connection, table)
                 result = connection.execute(sqlalchemy.delete(table).where(condition))
                 counters[table_name].deleted += max(result.rowcount, 0)
             # Deleting unreachable dependency parents can make their owned
@@ -147,6 +149,11 @@ def run_fsck(
             _sweep_ownerless_children(connection, graph, present, counters)
         elif collect_garbage:
             violations.append("sweep aborted because unattributed application tables exist")
+        if mutation_allowed and (repair or collect_garbage):
+            for table_name in schemas:
+                if table_name in present:
+                    store._release_unused_identity_claims(connection, table_name)
+            store._sync_identity_ownership(connection, store.layout)
         store._clear_identity_caches()
     if timestamp_repaired:
         with store._mutation_lock, store._read_connection() as connection:

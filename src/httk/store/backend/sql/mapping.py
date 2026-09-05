@@ -45,6 +45,8 @@ __all__ = [
     "ALT_KIND_COLUMN",
     "CONTENT_ID_COLUMN",
     "DISPATCH_CONTENT_ID_COLUMN",
+    "ENTRY_ID_OWNERS_TABLE_NAME",
+    "IMMUTABLE_ID_OWNERS_TABLE_NAME",
     "LOGICAL_ID_COLUMN",
     "RETRACTED_COLUMN",
     "ROLE_COLUMN",
@@ -56,6 +58,7 @@ __all__ = [
     "backing_dispatch_column_name",
     "dispatch_table_for",
     "entry_dispatch_table_name",
+    "identity_owner_tables",
     "link_table_for",
     "sqlalchemy_metadata",
     "table_for",
@@ -95,6 +98,9 @@ RETRACTED_COLUMN: Final = "retracted"
 """Whether a weak-link revision retracts the pair (``1``) or asserts it (``0``)."""
 
 _MAX_IDENTIFIER_LENGTH: Final = 63
+
+ENTRY_ID_OWNERS_TABLE_NAME: Final = "_httk_entry_id_owners"
+IMMUTABLE_ID_OWNERS_TABLE_NAME: Final = "_httk_immutable_id_owners"
 
 _TYPE_FOR_KIND: Final[dict[ScalarKind, type[sqlalchemy.types.TypeEngine[Any]]]] = {
     "int": sqlalchemy.Integer,
@@ -177,6 +183,35 @@ def dispatch_table_for(
     terms = " + ".join(f"CASE WHEN {column_name} IS NOT NULL THEN 1 ELSE 0 END" for column_name in column_names)
     columns.append(sqlalchemy.CheckConstraint(f"({terms}) = 1", name=_index_name("ck", name, ("exactly_one",))))
     return sqlalchemy.Table(name, metadata, *columns)
+
+
+def identity_owner_tables(
+    metadata: sqlalchemy.MetaData,
+) -> tuple[sqlalchemy.Table, sqlalchemy.Table]:
+    """Build the two family-wide entry-identity ownership tables."""
+    entry = metadata.tables.get(ENTRY_ID_OWNERS_TABLE_NAME)
+    if entry is None:
+        entry = sqlalchemy.Table(
+            ENTRY_ID_OWNERS_TABLE_NAME,
+            metadata,
+            sqlalchemy.Column("family", sqlalchemy.Text, primary_key=True, nullable=False),
+            sqlalchemy.Column("entry_id", sqlalchemy.Text, primary_key=True, nullable=False),
+            sqlalchemy.Column("backing", sqlalchemy.Text, nullable=False),
+            sqlalchemy.Column("logical_id", sqlalchemy.BigInteger, nullable=False),
+            sqlalchemy.UniqueConstraint("family", "backing", "logical_id"),
+        )
+    immutable = metadata.tables.get(IMMUTABLE_ID_OWNERS_TABLE_NAME)
+    if immutable is None:
+        immutable = sqlalchemy.Table(
+            IMMUTABLE_ID_OWNERS_TABLE_NAME,
+            metadata,
+            sqlalchemy.Column("family", sqlalchemy.Text, primary_key=True, nullable=False),
+            sqlalchemy.Column("immutable_id", sqlalchemy.Text, primary_key=True, nullable=False),
+            sqlalchemy.Column("backing", sqlalchemy.Text, nullable=False),
+            sqlalchemy.Column("sid", sqlalchemy.BigInteger, nullable=False),
+            sqlalchemy.UniqueConstraint("family", "backing", "sid"),
+        )
+    return entry, immutable
 
 
 def table_for(schema: TableSchema, metadata: sqlalchemy.MetaData, *, store_timestamps: bool = True) -> sqlalchemy.Table:

@@ -95,6 +95,8 @@ from httk.store.backend.sql.mapping import (
     ALT_KIND_COLUMN,
     CONTENT_ID_COLUMN,
     DISPATCH_CONTENT_ID_COLUMN,
+    ENTRY_ID_OWNERS_TABLE_NAME,
+    IMMUTABLE_ID_OWNERS_TABLE_NAME,
     LOGICAL_ID_COLUMN,
     RETRACTED_COLUMN,
     ROLE_COLUMN,
@@ -106,6 +108,7 @@ from httk.store.backend.sql.mapping import (
     backing_dispatch_column_name,
     dispatch_table_for,
     entry_dispatch_table_name,
+    identity_owner_tables,
     table_for,
 )
 from httk.store.backend.sql.rows import RowHydrator, StaleResultError, decode_field, is_lazy_row, lazy_row_identity
@@ -145,6 +148,9 @@ if TYPE_CHECKING:
     from httk.store.backend.sql.bulk import BulkIngest
 
 _Projection = SaveProjection
+
+_IDENTITY_OWNERSHIP_KEY = "identity_ownership"
+_IDENTITY_OWNERSHIP_VERSION = "1"
 
 # A sid resolver assigns (by saving recursively, or by an in-memory allocator)
 # an integer sid to a referenced record: ``(record_type, source, path) -> sid``.
@@ -269,6 +275,7 @@ class SqlStore:
         self._database = database
         self._entry_ids = entry_ids
         self._upgrade = upgrade
+        self._identity_ownership_ready = True
         self._store_timestamps = store_timestamps
         self._store_timestamp_resolution = store_timestamp_resolution
         self._allow_clock_regression = allow_clock_regression
@@ -467,6 +474,9 @@ class SqlStore:
             else:
                 metadata_table.create(connection, checkfirst=False)
                 self._initialization_ddl_journal.append(metadata_table)
+                for owner_table in identity_owner_tables(expected):
+                    owner_table.create(connection, checkfirst=False)
+                    self._initialization_ddl_journal.append(owner_table)
                 self._stamp_layout(connection, supplied)
             self._install_layout(supplied, expected, names_before | {METADATA_TABLE_NAME})
             self._initialize_store_timestamp_mark(connection)
@@ -590,7 +600,13 @@ class SqlStore:
         stored: Mapping[str, str],
         supplied: StorageLayout | None,
     ) -> None:
-        required_keys = {"protocol", "entry_declaration", "entry_schemas", "store_timestamps"}
+        required_keys = {
+            "protocol",
+            "entry_declaration",
+            "entry_schemas",
+            "store_timestamps",
+            _IDENTITY_OWNERSHIP_KEY,
+        }
         persistent_optional_keys = {"write_profile"}
         recognized_runtime_keys = {"ingest_state", "lease"}
         allowed_keys = required_keys | persistent_optional_keys | recognized_runtime_keys
@@ -606,7 +622,9 @@ class SqlStore:
             for key in stored
             if key not in allowed_keys and not (key.startswith("dirty:") and len(key) > len("dirty:"))
         }
-        if unknown_keys or not required_keys <= set(stored):
+        missing_keys = required_keys - set(stored)
+        ownership_upgrade_pending = missing_keys == {_IDENTITY_OWNERSHIP_KEY}
+        if unknown_keys or (missing_keys and not ownership_upgrade_pending):
             declaration_diff()["metadata_keys"] = {
                 "expected": tuple(sorted(required_keys)),
                 "recognized_runtime": tuple(sorted(recognized_runtime_keys)),
@@ -614,6 +632,11 @@ class SqlStore:
             }
         if stored.get("protocol") != STORAGE_PROTOCOL_VERSION:
             diff["protocol"] = {"expected": STORAGE_PROTOCOL_VERSION, "actual": stored.get("protocol")}
+        if not ownership_upgrade_pending and stored.get(_IDENTITY_OWNERSHIP_KEY) != _IDENTITY_OWNERSHIP_VERSION:
+            declaration_diff()[_IDENTITY_OWNERSHIP_KEY] = {
+                "expected": _IDENTITY_OWNERSHIP_VERSION,
+                "actual": stored.get(_IDENTITY_OWNERSHIP_KEY),
+            }
         persisted_timestamps = stored.get("store_timestamps")
         parsed_timestamps = parse_store_timestamp_state(persisted_timestamps)
         effective_timestamps = None if parsed_timestamps is None else parsed_timestamps[0]
@@ -701,6 +724,8 @@ class SqlStore:
         declaration_owned = {
             METADATA_TABLE_NAME,
             "_httk_sid_counters",
+            ENTRY_ID_OWNERS_TABLE_NAME,
+            IMMUTABLE_ID_OWNERS_TABLE_NAME,
             *(entry_dispatch_table_name(family.name) for family in persisted.families if len(family.records) > 1),
         }
         object_problems: dict[str, object] = {}
@@ -728,6 +753,14 @@ class SqlStore:
                 }
         if object_problems:
             raise StorageLayoutUpgradeRequiredError({"schema": object_problems})
+        if not ownership_upgrade_pending and self.backend_facts.metadata_backend != "keepermap":
+            self._validate_identity_owner_tables(connection)
+        if ownership_upgrade_pending:
+            self._identity_ownership_ready = False
+            if self._upgrade:
+                self._upgrade_identity_ownership(connection, persisted)
+                self._identity_ownership_ready = True
+                names_before = actual_table_names(connection)
         if upgrade_plan is not None:
             self._apply_additive_upgrade(connection, persisted, upgrade_plan)
             names_before = actual_table_names(connection)
@@ -761,6 +794,7 @@ class SqlStore:
             "entry_declaration": declaration_json(layout),
             "entry_schemas": schema_fingerprint_json(layout),
             "store_timestamps": self._store_timestamp_state,
+            _IDENTITY_OWNERSHIP_KEY: _IDENTITY_OWNERSHIP_VERSION,
         }
         if self._write_profile != "transactional":
             rows["write_profile"] = self._write_profile
@@ -807,6 +841,262 @@ class SqlStore:
         connection.execute(
             sqlalchemy.update(table).where(table.c.key == "entry_schemas").values(value=schema_fingerprint_json(layout))
         )
+
+    def _upgrade_identity_ownership(self, connection: sqlalchemy.Connection, layout: StorageLayout) -> None:
+        """Validate existing entry ids, create claims, then mark the capability complete."""
+        if self.backend_facts.metadata_backend == "keepermap":
+            self._ensure_degraded_lease(connection)
+            self._sync_identity_ownership(connection, layout)
+            from httk.store.backend.clickhouse.support import stamp_store_metadata
+
+            stamp_store_metadata(
+                connection,
+                metadata_table_for(sqlalchemy.MetaData()),
+                {_IDENTITY_OWNERSHIP_KEY: _IDENTITY_OWNERSHIP_VERSION},
+            )
+            return
+        self._ensure_degraded_lease(connection)
+        owner_metadata = sqlalchemy.MetaData()
+        for owner_table in identity_owner_tables(owner_metadata):
+            owner_table.create(connection, checkfirst=True)
+        self._validate_identity_owner_tables(connection)
+        self._sync_identity_ownership(connection, layout)
+        metadata = metadata_table_for(sqlalchemy.MetaData())
+        connection.execute(
+            sqlalchemy.insert(metadata).values(key=_IDENTITY_OWNERSHIP_KEY, value=_IDENTITY_OWNERSHIP_VERSION)
+        )
+
+    def _sync_identity_ownership(self, connection: sqlalchemy.Connection, layout: StorageLayout) -> None:
+        """Validate durable family identities and fill missing claims, including bulk survivors."""
+        # ponytail: one set-wise family scan at bulk finalization; restrict it to
+        # appended owners if incremental bulk workloads make this scan material.
+        present = actual_table_names(connection)
+        for family in layout.families:
+            if family.definition_id is None:
+                continue
+            selections: dict[str, list[Any]] = {"id": [], "immutable_id": []}
+            for backing_name, record_type in zip(family.record_names, family.records, strict=True):
+                table_name = resolve_schema(record_type).table_name
+                if table_name not in present:
+                    continue
+                table = table_for(
+                    resolve_schema(record_type),
+                    sqlalchemy.MetaData(),
+                    store_timestamps=self._store_timestamps,
+                )
+                for field, owner_column in (
+                    ("id", ALT_ID_COLUMN),
+                    ("immutable_id", SID_COLUMN),
+                ):
+                    selections[field].append(
+                        sqlalchemy.select(
+                            table.c[field].label("value"),
+                            sqlalchemy.literal(backing_name).label("backing"),
+                            table.c[owner_column].label("owner"),
+                        ).distinct()
+                    )
+            for field, selects in selections.items():
+                if not selects:
+                    continue
+                rows = sqlalchemy.union_all(*selects).subquery()
+                for columns in ((rows.c.value,), (rows.c.backing, rows.c.owner)):
+                    conflict = connection.execute(
+                        sqlalchemy.select(sqlalchemy.func.min(rows.c.value))
+                        .group_by(*columns)
+                        .having(
+                            sqlalchemy.or_(
+                                sqlalchemy.func.count() > 1,
+                                sqlalchemy.func.count(rows.c.value) == 0,
+                            )
+                        )
+                        .limit(1)
+                    ).first()
+                    if conflict is not None:
+                        raise EntryIdConflictError(family.name, str(conflict[0]), None, None)
+                if self.backend_facts.metadata_backend == "keepermap":
+                    # KeeperMap's exclusive lease and construction marker fence the
+                    # only supported write: one empty-store ingest. Final rows are
+                    # immutable afterwards; MergeTree is never treated as unique.
+                    continue
+                entry, immutable = identity_owner_tables(sqlalchemy.MetaData())
+                target = entry if field == "id" else immutable
+                id_column = "entry_id" if field == "id" else "immutable_id"
+                owner_column = "logical_id" if field == "id" else "sid"
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                insert = sqlite_insert if connection.dialect.name == "sqlite" else pg_insert
+                connection.execute(
+                    insert(target)
+                    .from_select(
+                        ["family", id_column, "backing", owner_column],
+                        sqlalchemy.select(
+                            sqlalchemy.literal(family.name),
+                            rows.c.value,
+                            rows.c.backing,
+                            rows.c.owner,
+                        ).where(sqlalchemy.true()),
+                    )
+                    .on_conflict_do_nothing()
+                )
+                conflict = connection.execute(
+                    sqlalchemy.select(rows.c.value)
+                    .select_from(
+                        rows.outerjoin(
+                            target,
+                            sqlalchemy.and_(
+                                target.c.family == family.name,
+                                target.c[id_column] == rows.c.value,
+                                target.c.backing == rows.c.backing,
+                                target.c[owner_column] == rows.c.owner,
+                            ),
+                        )
+                    )
+                    .where(target.c.family.is_(None))
+                    .limit(1)
+                ).first()
+                if conflict is not None:
+                    raise EntryIdConflictError(family.name, str(conflict[0]), None, None)
+
+    @staticmethod
+    def _validate_identity_owner_tables(connection: sqlalchemy.Connection) -> None:
+        present = actual_table_names(connection)
+        for table in identity_owner_tables(sqlalchemy.MetaData()):
+            expected = {
+                tuple(column.name for column in constraint.columns)
+                for constraint in table.constraints
+                if isinstance(
+                    constraint,
+                    (sqlalchemy.PrimaryKeyConstraint, sqlalchemy.UniqueConstraint),
+                )
+            }
+            if table.name not in present or actual_columns(connection, table.name) != frozenset(table.c.keys()):
+                raise StorageLayoutUpgradeRequiredError(
+                    {"schema": {table.name: {"identity_ownership": "missing or malformed table"}}}
+                )
+            if connection.dialect.name == "duckdb":
+                constraints = connection.execute(
+                    sqlalchemy.text(
+                        "SELECT constraint_column_names FROM duckdb_constraints() WHERE database_name=current_database() "
+                        "AND schema_name=current_schema() AND table_name=:name AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')"
+                    ),
+                    {"name": table.name},
+                )
+                actual = {tuple(row[0]) for row in constraints}
+            else:
+                inspector = sqlalchemy.inspect(connection)
+                actual = {tuple(inspector.get_pk_constraint(table.name)["constrained_columns"])}
+                actual.update(tuple(item["column_names"]) for item in inspector.get_unique_constraints(table.name))
+            if not expected <= actual:
+                raise StorageLayoutUpgradeRequiredError(
+                    {"schema": {table.name: {"identity_ownership": "missing unique constraint"}}}
+                )
+
+    def _claim_identity_values(
+        self,
+        connection: sqlalchemy.Connection,
+        family_name: str,
+        backing_name: str,
+        entry_id: str,
+        group_id: int,
+        immutable_id: str,
+        sid: int,
+    ) -> None:
+        """Atomically claim one logical and immutable identity through native unique constraints."""
+        entry_owners, immutable_owners = identity_owner_tables(sqlalchemy.MetaData())
+        claims = (
+            (
+                entry_owners,
+                {
+                    "family": family_name,
+                    "entry_id": entry_id,
+                    "backing": backing_name,
+                    "logical_id": group_id,
+                },
+            ),
+            (
+                immutable_owners,
+                {
+                    "family": family_name,
+                    "immutable_id": immutable_id,
+                    "backing": backing_name,
+                    "sid": sid,
+                },
+            ),
+        )
+        dialect = connection.dialect.name
+        for table, values in claims:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+            insert = sqlite_insert if dialect == "sqlite" else pg_insert
+            try:
+                connection.execute(insert(table).values(values).on_conflict_do_nothing())
+            except IntegrityError as error:
+                raise EntryIdConflictError(family_name, entry_id, None, group_id) from error
+            id_column = "entry_id" if table is entry_owners else "immutable_id"
+            owner_column = LOGICAL_ID_COLUMN if table is entry_owners else SID_COLUMN
+            expected_owner = group_id if table is entry_owners else sid
+            existing = connection.execute(
+                sqlalchemy.select(table.c.backing, table.c[owner_column]).where(
+                    table.c.family == family_name,
+                    table.c[id_column] == values[id_column],
+                )
+            ).one_or_none()
+            if existing != (backing_name, expected_owner):
+                raise EntryIdConflictError(
+                    family_name,
+                    str(values[id_column]),
+                    None if existing is None else int(existing[1]),
+                    expected_owner,
+                )
+
+    def _claim_entry_identity(
+        self,
+        connection: sqlalchemy.Connection,
+        record_type: type,
+        values: Mapping[str, Any],
+        *,
+        group_id: int,
+        sid: int,
+    ) -> None:
+        family = self._family_for_backing(record_type)
+        if family is None or family.definition_id is None or self.backend_facts.metadata_backend == "keepermap":
+            return
+        backing_name = family.record_names[family.records.index(record_type)]
+        self._claim_identity_values(
+            connection,
+            family.name,
+            backing_name,
+            str(values["id"]),
+            group_id,
+            str(values["immutable_id"]),
+            sid,
+        )
+
+    def _release_unused_identity_claims(self, connection: sqlalchemy.Connection, table_name: str) -> None:
+        """Remove claims whose owner row is absent, under a transaction or degraded lease."""
+        for family in self.layout.families:
+            if family.definition_id is None:
+                continue
+            for backing, record in zip(family.record_names, family.records, strict=True):
+                if resolve_schema(record).table_name != table_name:
+                    continue
+                parent = self._table(table_name)
+                entry, immutable = identity_owner_tables(sqlalchemy.MetaData())
+                for owners, owner_column, parent_column in (
+                    (entry, "logical_id", ALT_ID_COLUMN),
+                    (immutable, "sid", SID_COLUMN),
+                ):
+                    connection.execute(
+                        sqlalchemy.delete(owners).where(
+                            owners.c.family == family.name,
+                            owners.c.backing == backing,
+                            ~sqlalchemy.exists(
+                                sqlalchemy.select(1).where(parent.c[parent_column] == owners.c[owner_column])
+                            ),
+                        )
+                    )
 
     def _initialize_store_timestamp_mark(self, connection: sqlalchemy.Connection) -> None:
         """Derive the writable process-local timestamp mark from present parent tables."""
@@ -914,6 +1204,18 @@ class SqlStore:
 
     def _check_mutation_policy(self, operation: str, *, empty_deferred_bulk: bool = False) -> None:
         """Apply the single public mutation policy for backend capability gates."""
+        if not self._identity_ownership_ready:
+            raise StorageLayoutUpgradeRequiredError(
+                {
+                    "declaration": {
+                        _IDENTITY_OWNERSHIP_KEY: {
+                            "expected": _IDENTITY_OWNERSHIP_VERSION,
+                            "actual": None,
+                        }
+                    }
+                },
+                hint="reopen with upgrade=True to validate and install durable entry-id ownership before writing",
+            )
         if self.backend_facts.supports_incremental_save:
             return
         if operation == "bulk_ingest" and empty_deferred_bulk:
@@ -1038,6 +1340,8 @@ class SqlStore:
                         self._local.store_timestamp_transaction = timestamp_state
                         try:
                             yield
+                            if token.rolled_back:
+                                raise RuntimeError("transaction was rolled back after an entry-id conflict")
                         except BaseException:
                             if self._write_profile == "degraded":
                                 self._initialize_store_timestamp_mark(connection)
@@ -1083,9 +1387,19 @@ class SqlStore:
         if current is not None:
             with self._mutation_lock, self._degraded_lifecycle_guard():
                 self._ensure_degraded_lease(current)
-                started = self._begin_degraded_operation()
+                started = self._begin_degraded_operation(current)
                 try:
                     yield current
+                except EntryIdConflictError:
+                    if self._write_profile == "transactional":
+                        token = self._current_transaction_token()
+                        if token is not None:
+                            token.rolled_back = True
+                        current.rollback()
+                        self._pending_table_names().clear()
+                        self._tables_present.clear()
+                        self._clear_identity_caches()
+                    raise
                 finally:
                     self._end_degraded_operation(current, started)
             return
@@ -1094,7 +1408,7 @@ class SqlStore:
             with self._mutation_lock, self._degraded_lifecycle_guard():
                 with self._database.engine.begin() as connection:
                     self._ensure_degraded_lease(connection)
-                    started = self._begin_degraded_operation()
+                    started = self._begin_degraded_operation(connection)
                     stack = self._connection_stack()
                     stack.append(connection)
                     try:
@@ -1256,9 +1570,12 @@ class SqlStore:
     def _operation_dirty_state(self) -> tuple[str, list[str]] | None:
         return cast(tuple[str, list[str]] | None, getattr(self._local, "dirty_state", None))
 
-    def _begin_degraded_operation(self) -> bool:
+    def _begin_degraded_operation(self, connection: sqlalchemy.Connection) -> bool:
         if self._write_profile != "degraded" or self._operation_dirty_state() is not None:
             return False
+        metadata = metadata_table_for(sqlalchemy.MetaData())
+        for key in connection.execute(sqlalchemy.select(metadata.c.key).where(metadata.c.key.like("dirty:%"))):
+            self._release_unused_identity_claims(connection, str(key[0]).removeprefix("dirty:"))
         self._local.dirty_state = (f"{self._lease_owner}:{uuid.uuid4().hex}", [])
         return True
 
@@ -1270,6 +1587,7 @@ class SqlStore:
             if getattr(self._local, "degraded_crashed", False):
                 return
             for table_name in touched:
+                self._release_unused_identity_claims(connection, table_name)
                 connection.execute(
                     sqlalchemy.text('DELETE FROM "_httk_store_metadata" WHERE key = :key AND value = :value'),
                     {"key": f"dirty:{table_name}", "value": value},
@@ -1317,6 +1635,7 @@ class SqlStore:
 
     def _targeted_dirty_sweep(self, connection: sqlalchemy.Connection, table: sqlalchemy.Table) -> None:
         """Delete only child-element residue attributable to one dirty table."""
+        self._release_unused_identity_claims(connection, table.name)
         schemas = tuple(resolve_schema(record) for record in self._known_record_types)
         graph = LogicalEdgeGraph.from_store(self, schemas)
         for edge in graph.ownership():
@@ -1911,6 +2230,15 @@ class SqlStore:
                         _field_path(path, spec.field),
                         id_series=id_series,
                     )
+            if enforced_entry:
+                self._claim_entry_identity(
+                    connection,
+                    record_type,
+                    values,
+                    group_id=int(values[ALT_ID_COLUMN]),
+                    sid=sid,
+                )
+                self._after_degraded_write(f"identity-claim:{table.name}")
             try:
                 connection.execute(sqlalchemy.insert(table).values(values))
             except IntegrityError as error:
@@ -2077,6 +2405,9 @@ class SqlStore:
                     )
                 except IntegrityError as error:
                     self._raise_entry_id_integrity(table, values, error)
+        if enforced_entry:
+            group_id = alt_group if alt_group is not None else (replacement if replacement is not None else sid)
+            self._claim_entry_identity(connection, record_type, values, group_id=group_id, sid=sid)
         projection.inserted.append((record_type, sid))
         for spec in schema.fields:
             if spec.role == "child":
@@ -3367,6 +3698,16 @@ class SqlStore:
         if plan is None:
             return
         self._check_metadata_at(connection, record_type, sid, source, projection, record_type.__name__, plan)
+        if record_type in self._entry_record_types:
+            table = self._table(resolve_schema(record_type).table_name)
+            row = connection.execute(sqlalchemy.select(table).where(table.c[SID_COLUMN] == sid)).mappings().one()
+            self._claim_entry_identity(
+                connection,
+                record_type,
+                dict(row),
+                group_id=int(row[ALT_ID_COLUMN]),
+                sid=sid,
+            )
 
     def _check_metadata_at(
         self,
@@ -3612,7 +3953,12 @@ class SqlStore:
 
     # ------------------------------------------------------------------ identity caches
 
-    def _discard_inserted(self, connection: sqlalchemy.Connection, projection: _Projection, checkpoint: int) -> None:
+    def _discard_inserted(
+        self,
+        connection: sqlalchemy.Connection,
+        projection: _Projection,
+        checkpoint: int,
+    ) -> None:
         # In the autocommit permanentization profile, pre-parent residue is the
         # deliberate crash-recovery input for fsck; only transactional saves
         # compensate dependency inserts after a dedup hit.
@@ -3629,6 +3975,7 @@ class SqlStore:
                     connection.execute(sqlalchemy.delete(table).where(table.c[f"{schema.table_name}_sid"] == sid))
             table = self._table(schema.table_name)
             connection.execute(sqlalchemy.delete(table).where(table.c[SID_COLUMN] == sid))
+            self._release_unused_identity_claims(connection, table.name)
         del projection.inserted[checkpoint:]
         # No rollback token here: dedup compensation runs inside save(), where no
         # user code can perform a deferred lazy read on this thread-local

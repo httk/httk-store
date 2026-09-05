@@ -316,7 +316,10 @@ def _mark(
 
 
 def _report_unattributed_collections(
-    store: MongoStore, schemas: Mapping[str, TableSchema], counters: dict[str, _Counters], violations: list[str]
+    store: MongoStore,
+    schemas: Mapping[str, TableSchema],
+    counters: dict[str, _Counters],
+    violations: list[str],
 ) -> tuple[str, ...]:
     """Report unknown collections and return non-reserved sweep blockers."""
     expected_dispatch = {
@@ -325,7 +328,15 @@ def _report_unattributed_collections(
     # Weak-link collections (``_httk_link_*``) are reserved but attributable to a
     # known source schema, so they are not "unrecognized reserved collections".
     expected_links = {link.table_name for schema in schemas.values() for link in schema.links}
-    reserved = {METADATA_COLLECTION, COUNTERS_COLLECTION, *expected_dispatch, *expected_links}
+    from .store import _IDENTITY_OWNERS
+
+    reserved = {
+        METADATA_COLLECTION,
+        COUNTERS_COLLECTION,
+        _IDENTITY_OWNERS,
+        *expected_dispatch,
+        *expected_links,
+    }
     unattributed: list[str] = []
     for name in store._database.database.list_collection_names():
         if name.startswith("system.") or name in schemas or name in reserved:
@@ -511,6 +522,8 @@ def run_fsck(
                 _LOGGER.warning("MongoStore fsck: %s", message, extra={"context": "storage"})
             elif collect_garbage:
                 _sweep(store, schemas, marked, counters, lease=lease)
+            if not unattributed and (repair or collect_garbage):
+                store._sync_identity_ownership(lease, reconcile=True)
             store._identity._clear_identity_caches()
             store._last_generation = generation
             return FsckSummary(

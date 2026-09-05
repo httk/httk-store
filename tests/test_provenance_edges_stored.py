@@ -283,5 +283,98 @@ def test_forward_only_run_has_no_hydrated_target_dependency() -> None:
         ]
 
 
+def test_prefixed_mounts_preserve_revision_and_alternative_edges() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        target = store.fetch(RecordRow, store.save(RecordRow("target")), eager=True)
+        other = _save(store, RecordRow("other"))
+        store.replace(target, RecordRow("target-v2"))
+        store.save(RecordRow("target-alt"), alternative_of=target.id, alternative_kind="variant")
+        run = store.fetch(Run, store.save(Run(inputs=(RunEdge("v1", "records", target.id),))), eager=True)
+        store.replace(run, Run(inputs=(RunEdge("v2", "records", other),)))
+        store.save(
+            Run(inputs=(RunEdge("alt", "records", target.id),)), alternative_of=run.id, alternative_kind="variant"
+        )
+        sources = (
+            StoredEntrySource(store, RunEntry, "runs", "R:"),
+            StoredEntrySource(store, RecordFamily, "records", "D:"),
+        )
+        runs = StoredEntryFederation((sources[0],), source_inventory=sources)
+        records = StoredEntryFederation((sources[1],), source_inventory=sources)
+        forward = f'_httk_relationships._httk_has_input.id HAS "D:{target.id}"'
+        assert not runs.query(forward).rows
+        revisions = runs.query(forward, revisions=True)
+        assert [row["id"] for row in revisions.rows] == ["R:" + run.immutable_id]
+        assert revisions.relationships[0]["_httk_has_input"][0].id == "D:" + target.id
+        alternatives = runs.query(forward, alternatives=True)
+        assert [row["id"] for row in alternatives.rows] == ["R:" + run.id + "~variant"]
+        assert alternatives.relationships[0]["_httk_has_input"][0].label == "alt"
+        reverse = f'_httk_relationships._httk_is_input.id HAS "R:{run.id}"'
+        assert [row["id"] for row in records.query(reverse).rows] == ["D:" + other]
+        assert not records.query(reverse, alternatives=True).rows
+        assert all(not rel for rel in records.query(alternatives=True).relationships)
+        store.replace(
+            store.fetch(Run, store.save(Run(inputs=(RunEdge("v2", "records", other),))), eager=True),
+            Run(inputs=(RunEdge("v3", "records", target.id),)),
+        )
+        assert len(records.query(reverse, revisions=True).rows) == 2
+        assert all(
+            rel["_httk_is_input"][0].id == "R:" + run.id for rel in records.query(reverse, revisions=True).relationships
+        )
+
+
+def test_same_prefix_and_self_mount_resolution_with_custom_wire_names() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        target = _save(store, RecordRow("r"))
+        run = _save(store, Run(inputs=(RunEdge("record", "records", target),)))
+        sources = (
+            StoredEntrySource(store, RunEntry, "run-a", "A:"),
+            StoredEntrySource(store, RunEntry, "run-b", "B:"),
+            StoredEntrySource(store, RecordFamily, "rec-a", "A:"),
+            StoredEntrySource(store, RecordFamily, "rec-b", "B:"),
+        )
+        wire_names = {"records": "_custom_records", "runs": "_custom_runs"}
+        runs = StoredEntryFederation(sources[:2], source_inventory=sources, served_type_names=wire_names)
+        records = StoredEntryFederation(sources[2:], source_inventory=sources, served_type_names=wire_names)
+        for row, rel in zip(runs.query().rows, runs.query().relationships, strict=True):
+            edge = rel["_httk_has_input"][0]
+            assert (edge.entry_type, edge.id) == ("_custom_records", row["id"][:2] + target)
+        for row, rel in zip(records.query().rows, records.query().relationships, strict=True):
+            edge = rel["_httk_is_input"][0]
+            assert (edge.entry_type, edge.id) == ("_custom_runs", row["id"][:2] + run)
+        assert [row["id"] for row in records.query(f'_httk_relationships._httk_is_input.id HAS "A:{run}"').rows] == [
+            "A:" + target
+        ]
+        # Same-family selection is the source itself even when another mount exists.
+        self_run = _save(store, Run(inputs=(RunEdge("prior", "runs", run),)))
+        self_sources = sources[:2]
+        for source in self_sources:
+            federation = StoredEntryFederation((source,), source_inventory=self_sources)
+            page = federation.query(f'id = "{source.public_id_prefix}{self_run}"')
+            assert page.relationships[0]["_httk_has_input"][0].id == source.public_id_prefix + run
+
+
+def test_reverse_relationship_union_of_run_mounts_needs_no_forward_target_override() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        target = _save(store, RecordRow("r"))
+        run = _save(store, Run(inputs=(RunEdge("in", "records", target),)))
+        sources = (
+            StoredEntrySource(store, RunEntry, "run-a", "A:"),
+            StoredEntrySource(store, RunEntry, "run-b", "B:"),
+            StoredEntrySource(store, RecordFamily, "record", "D:"),
+        )
+        records = StoredEntryFederation((sources[2],), source_inventory=sources)
+        edges = records.query().relationships[0]["_httk_is_input"]
+        assert {edge.id for edge in edges} == {"A:" + run, "B:" + run}
+        key = "_httk_relationships._httk_is_input.id"
+        for operator in ("HAS ALL", "HAS ONLY"):
+            assert [row["id"] for row in records.query(f'{key} {operator} "A:{run}", "B:{run}"').rows] == [
+                "D:" + target
+            ]
+        assert not records.query(f'{key} HAS ONLY "A:{run}"').rows
+
+
 if __name__ == "__main__":  # pragma: no cover - manual smoke check
     pytest.main([__file__, "-q"])

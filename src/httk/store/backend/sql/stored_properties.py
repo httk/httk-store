@@ -74,6 +74,7 @@ from httk.store.query.optimade_filters import (
 from httk.store.store_timestamp import ns_operand_to_store_units
 
 __all__ = [
+    "RelationshipSourceMap",
     "StoredPropertySqlCandidateStream",
     "StoredPropertySqlConfigurationError",
     "StoredPropertySqlPlan",
@@ -96,6 +97,24 @@ _RFC3339_TIMESTAMP: Final = re.compile(
 
 class StoredPropertySqlConfigurationError(ValueError):
     """A configured family/backing cannot realize its declared entry definition."""
+
+
+@dataclass(frozen=True)
+class RelationshipSourceMap:
+    """Carry resolved mount prefixes and wire names for one source's relationships.
+
+    Federations derive this mapping from their source inventory.
+
+    :param prefixes: Loose-edge forward target prefixes keyed by internal family type.
+    :param reverse_prefixes: Prefixes of reverse source mounts keyed by their concrete backing class.
+    :param wire_types: Served relationship target names keyed by internal family type.
+    :param backing_prefixes: Typed target prefixes keyed by their concrete backing class.
+    """
+
+    prefixes: Mapping[str, str]
+    reverse_prefixes: Mapping[type, tuple[str, ...]]
+    wire_types: Mapping[str, str]
+    backing_prefixes: Mapping[type, str]
 
 
 @dataclass(frozen=True)
@@ -690,6 +709,7 @@ class StoredPropertySqlPlan:
         revisions: bool = False,
         alternatives: bool = False,
         related_property_resolver: RelatedPropertyResolver | None = None,
+        relationship_source_map: RelationshipSourceMap | None = None,
     ) -> tuple[StoredPropertySqlCandidateStream, ...]:
         """Return ID-only concrete streams for a bounded federated page.
 
@@ -708,6 +728,7 @@ class StoredPropertySqlPlan:
         :param revisions: Whether ids render immutable revisions instead of mains (mains-only lineage stream).
         :param alternatives: Whether the stream serves named alternatives with composite ``<id>~<kind>`` ids.
         :param related_property_resolver: Optional depth-1 related-property resolver; the default matches nothing.
+        :param relationship_source_map: Resolved relationship mount prefixes and wire names, when federated.
         :return: One candidate stream for each configured backing.
         """
         ast = parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string
@@ -723,6 +744,7 @@ class StoredPropertySqlPlan:
                 revisions,
                 alternatives,
                 related_property_resolver,
+                relationship_source_map,
             )
             searcher.output(SqlColumn(searcher, variable._alias.c[SID_COLUMN]), "sid")
             searcher.output(SqlColumn(searcher, variable._alias.c["id"]), "id")
@@ -882,6 +904,7 @@ class StoredPropertySqlPlan:
         revisions: bool = False,
         alternatives: bool = False,
         related_property_resolver: RelatedPropertyResolver | None = None,
+        relationship_source_map: RelationshipSourceMap | None = None,
     ) -> tuple[SqlSearcher, SqlVariable, tuple[_SqlValue, ...]]:
         # Alternatives are each their own lineage, so every listed alternative
         # is its latest revision (only_latest); ``only_main_alt=False`` lets
@@ -895,13 +918,23 @@ class StoredPropertySqlPlan:
         variable = searcher.variable(backing.backing)
         if alternatives:
             searcher.add(
-                cast(SqlExpression, _SqlPredicate(_bool_clause(variable._alias.c[ALT_KIND_COLUMN].is_not(None))))
+                cast(
+                    SqlExpression,
+                    _SqlPredicate(_bool_clause(variable._alias.c[ALT_KIND_COLUMN].is_not(None))),
+                )
             )
         context = _SqlQueryContext(searcher, variable)
         if ast is None:
             searcher.add(cast(SqlExpression, context.always_true()))
         else:
-            handlers, relationship_targets = self._handlers(backing, context, public_id_prefix, revisions, alternatives)
+            handlers, relationship_targets = self._handlers(
+                backing,
+                context,
+                public_id_prefix,
+                revisions,
+                alternatives,
+                relationship_source_map,
+            )
             try:
                 predicate = translate_filter_ast(
                     ast,
@@ -957,9 +990,15 @@ class StoredPropertySqlPlan:
         public_id_prefix: str,
         revisions: bool,
         alternatives: bool,
+        relationship_source_map: RelationshipSourceMap | None = None,
     ) -> tuple[HandlerTable, tuple[str, ...]]:
         handlers: dict[str, Mapping[str, Callable[..., Any]]] = {
-            "id": _id_handlers(context, public_id_prefix, revisions=revisions, alternatives=alternatives),
+            "id": _id_handlers(
+                context,
+                public_id_prefix,
+                revisions=revisions,
+                alternatives=alternatives,
+            ),
             "type": _type_handlers(self.entry_type),
         }
         if revisions:
@@ -985,12 +1024,17 @@ class StoredPropertySqlPlan:
                 handlers[name] = _null_handlers(context)
             elif projection.query is not None:
                 handlers[name] = _projection_handlers(projection, context)
-        relationship_handlers, relationship_targets = self._relationship_handlers(backing.backing, alternatives)
+        relationship_handlers, relationship_targets = self._relationship_handlers(
+            backing.backing, alternatives, relationship_source_map
+        )
         handlers.update(relationship_handlers)
         return handlers, relationship_targets
 
     def _relationship_handlers(
-        self, backing: type, alternatives: bool
+        self,
+        backing: type,
+        alternatives: bool,
+        source_map: RelationshipSourceMap | None = None,
     ) -> tuple[dict[str, Mapping[str, Callable[..., Any]]], tuple[str, ...]]:
         """Build the backing's relationship-filter handlers and 2-segment targets.
 
@@ -1005,6 +1049,7 @@ class StoredPropertySqlPlan:
 
         :param backing: The concrete backing class whose relationships are derived.
         :param alternatives: Whether this is an alternatives (``~alts``) stream.
+        :param source_map: Resolved source mount prefixes and wire names.
         :return: The relationship handler table and the bare relationship targets.
         """
         store = self.store
@@ -1017,16 +1062,33 @@ class StoredPropertySqlPlan:
         # relationship then holds the UNION of their targets — registering the
         # first-declared field's handler alone would silently drop the rest.
         typed: dict[str, list[Mapping[str, Callable[..., Any]]]] = {}
+
+        def add_typed(target: type, handler: Mapping[str, Callable[..., Any]]) -> None:
+            rtype = _served_type_for_target(store, target)
+            if rtype is None:
+                return
+            if source_map is not None:
+                internal = store._entry_record_types[target][0]
+                rtype = source_map.wire_types.get(internal, rtype)
+                handler = _prefixed_has_handlers(handler, source_map.backing_prefixes.get(target, ""))
+            typed.setdefault(rtype, []).append(handler)
+
         for spec in schema.fields:
-            if spec.role in ("reference", "child") and spec.target is not None:
-                rtype = _served_type_for_target(store, spec.target)
-                if rtype is not None:
-                    typed.setdefault(rtype, []).append(_related_id_has_handlers(store, spec.target, spec.field))
+            if (
+                spec.role in ("reference", "child")
+                and spec.target is not None
+                and (spec.related is None or spec.related.serve)
+            ):
+                add_typed(
+                    spec.target,
+                    _related_id_has_handlers(store, spec.target, spec.field),
+                )
         for link in schema.links:
             if link.exposed_relationship and link.target is not None:
-                rtype = _served_type_for_target(store, link.target)
-                if rtype is not None:
-                    typed.setdefault(rtype, []).append(_weak_link_id_has_handlers(store, link.target, link.name))
+                add_typed(
+                    link.target,
+                    _weak_link_id_has_handlers(store, link.target, link.name),
+                )
         for rtype, per_field in typed.items():
             handler = per_field[0] if len(per_field) == 1 else _union_has_handlers(per_field)
             handlers[f"{rtype}.id"] = handler
@@ -1044,7 +1106,10 @@ class StoredPropertySqlPlan:
                 wire_key = wire_relationship_key(marker.relationship, forward.definition_id)
                 forward_by_key.setdefault(wire_key, []).append((forward, field_name))
             for wire_key, families_fields in forward_by_key.items():
-                handlers.setdefault(f"{_REL_ROOT}.{wire_key}.id", _forward_edge_has_handlers(store, families_fields))
+                handlers.setdefault(
+                    f"{_REL_ROOT}.{wire_key}.id",
+                    _forward_edge_has_handlers(store, families_fields, source_map),
+                )
 
         internal_target = getattr(self.family, "type", None)
         if strong and isinstance(internal_target, str):
@@ -1061,9 +1126,11 @@ class StoredPropertySqlPlan:
             for wire_key, families_fields in reverse_by_key.items():
                 handlers.setdefault(
                     f"{_REL_ROOT}.{wire_key}.id",
-                    _constant_false_has_handlers()
-                    if alternatives
-                    else _reverse_edge_has_handlers(store, families_fields, internal_target),
+                    (
+                        _constant_false_has_handlers()
+                        if alternatives
+                        else _reverse_edge_has_handlers(store, families_fields, internal_target, source_map)
+                    ),
                 )
         return handlers, tuple(targets)
 
@@ -1370,13 +1437,24 @@ def _edge_source(store: SqlStore, family: StrongLinkFamily, field_name: str) -> 
     )
 
 
-def _column_equals(column: str, value: Any) -> Callable[[Any], Any]:
-    """A single-value equality predicate over a row alias's ``column`` (one HAS ALL conjunct)."""
-    return lambda row: row.c[column] == value
+def _prefixed_has_handlers(handler: Mapping[str, Callable[..., Any]], prefix: str) -> Mapping[str, Callable[..., Any]]:
+    """Translate public target ids back to stored ids without accepting another mount."""
+    if not prefix:
+        return handler
+
+    def has(entry: str, ops: Any, values: Any, variable: Any, has_type: str) -> Any:
+        raw = [
+            (value[len(prefix) :] if isinstance(value, str) and value.startswith(prefix) else None) for value in values
+        ]
+        return handler["HAS"](entry, ops, raw, variable, has_type)
+
+    return {"HAS": has}
 
 
 def _forward_edge_has_handlers(
-    store: SqlStore, families_fields: list[tuple[StrongLinkFamily, str]]
+    store: SqlStore,
+    families_fields: list[tuple[StrongLinkFamily, str]],
+    source_map: RelationshipSourceMap | None = None,
 ) -> Mapping[str, Callable[..., Any]]:
     """A forward StrongLink ``.id`` HAS handler over the filtered run's own edges.
 
@@ -1390,11 +1468,16 @@ def _forward_edge_has_handlers(
 
     :param store: The SQL store backing the run family.
     :param families_fields: The ``(family, field)`` pairs sharing one forward wire key.
+    :param source_map: Resolved mount prefixes, selected by each edge's actual target type.
     :return: A handler mapping containing the ``HAS`` operation.
     """
     sources = [_edge_source(store, family, field_name) for family, field_name in families_fields]
 
-    def one_exists(source: tuple[Any, Any, Any, str, str], outer_sid: Any, edge_predicate: Callable[[Any], Any]) -> Any:
+    def one_exists(
+        source: tuple[Any, Any, Any, str, str],
+        outer_sid: Any,
+        edge_predicate: Callable[[Any], Any],
+    ) -> Any:
         _run_table, child_table, edge_table, parent_fk, edge_fk = source
         child_alias = child_table.alias()
         edge_alias = edge_table.alias()
@@ -1411,19 +1494,34 @@ def _forward_edge_has_handlers(
         def any_source(edge_predicate: Callable[[Any], Any]) -> Any:
             return sqlalchemy.or_(*(one_exists(source, outer_sid, edge_predicate) for source in sources))
 
-        clause = _has_family_clause(has_type, values, any_source, "entry_id")
+        def public_id(row: Any) -> Any:
+            prefixes = source_map.prefixes if source_map is not None else {}
+            cases = [
+                (
+                    row.c["entry_type"] == internal,
+                    sqlalchemy.literal(prefix) + row.c["entry_id"],
+                )
+                for internal, prefix in prefixes.items()
+                if prefix
+            ]
+            return sqlalchemy.case(*cases, else_=row.c["entry_id"]) if cases else row.c["entry_id"]
+
+        clause = _has_family_clause(has_type, values, any_source, public_id)
         return _SqlPredicate(_bool_clause(clause), correlation_depth=1)
 
     return {"HAS": has_handler}
 
 
 def _reverse_edge_has_handlers(
-    store: SqlStore, families_fields: list[tuple[StrongLinkFamily, str]], internal_target: str
+    store: SqlStore,
+    families_fields: list[tuple[StrongLinkFamily, str]],
+    internal_target: str,
+    source_map: RelationshipSourceMap | None = None,
 ) -> Mapping[str, Callable[..., Any]]:
     """A reverse StrongLink ``.id`` HAS handler naming the runs that point at each row.
 
     The filtered row (a data entry) matches when a run's edge names it
-    (``entry_type``/``entry_id`` on the raw stored id, F9 raw-id caveat) and
+    (``entry_type``/``entry_id`` on the raw stored id) and
     that run is a lineage's latest main revision (the same constraint the
     reverse serving applies). The reverse edges of ALL run families/backings
     sharing one reverse wire key OR their per-source ``EXISTS`` — serving merges
@@ -1435,12 +1533,20 @@ def _reverse_edge_has_handlers(
     :param store: The SQL store backing the run families.
     :param families_fields: The ``(family, field)`` pairs sharing one reverse wire key.
     :param internal_target: The filtered family's internal (unprefixed) type name.
+    :param source_map: Resolved reverse mounts whose forward mapping points to this source.
     :return: A handler mapping containing the ``HAS`` operation.
     """
-    sources = [_edge_source(store, family, field_name) for family, field_name in families_fields]
+    sources = [
+        (_edge_source(store, family, field_name), prefix)
+        for family, field_name in families_fields
+        for prefix in (source_map.reverse_prefixes.get(family.backing, ()) if source_map is not None else ("",))
+    ]
 
     def one_exists(
-        source: tuple[Any, Any, Any, str, str], outer_id: Any, run_id_predicate: Callable[[Any], Any]
+        source: tuple[Any, Any, Any, str, str],
+        prefix: str,
+        outer_id: Any,
+        run_id_predicate: Callable[[Any], Any],
     ) -> Any:
         run_table, child_table, edge_table, parent_fk, edge_fk = source
         run_alias = run_table.alias()
@@ -1457,7 +1563,7 @@ def _reverse_edge_has_handlers(
                 edge_alias.c["entry_type"] == internal_target,
                 edge_alias.c["entry_id"] == outer_id,
                 latest_main_condition(run_table, run_alias),
-                run_id_predicate(run_alias),
+                run_id_predicate(sqlalchemy.literal(prefix) + run_alias.c["id"] if prefix else run_alias.c["id"]),
             )
         )
         return sqlalchemy.exists(statement)
@@ -1466,16 +1572,22 @@ def _reverse_edge_has_handlers(
         outer_id = search_variable._alias.c["id"]
 
         def any_source(run_id_predicate: Callable[[Any], Any]) -> Any:
-            return sqlalchemy.or_(*(one_exists(source, outer_id, run_id_predicate) for source in sources))
+            return sqlalchemy.or_(
+                sqlalchemy.false(),
+                *(one_exists(source, prefix, outer_id, run_id_predicate) for source, prefix in sources),
+            )
 
-        clause = _has_family_clause(has_type, values, any_source, "id")
+        clause = _has_family_clause(has_type, values, any_source, lambda value: value)
         return _SqlPredicate(_bool_clause(clause), correlation_depth=1)
 
     return {"HAS": has_handler}
 
 
 def _has_family_clause(
-    has_type: str, values: Any, any_source: Callable[[Callable[[Any], Any]], Any], column: str
+    has_type: str,
+    values: Any,
+    any_source: Callable[[Callable[[Any], Any]], Any],
+    column: str | Callable[[Any], Any],
 ) -> Any:
     """Compose one HAS-family clause from a per-value EXISTS-over-sources builder.
 
@@ -1489,16 +1601,26 @@ def _has_family_clause(
     :return: The composed SQL boolean clause.
     :raises FilterTranslationError: If ``has_type`` is not a supported set operator.
     """
+
+    def value_of(row: Any) -> Any:
+        return row.c[column] if isinstance(column, str) else column(row)
+
     if has_type == "HAS_ANY":
-        return any_source(lambda row: row.c[column].in_(values))
+        return any_source(lambda row: value_of(row).in_(values))
     if has_type == "HAS_ALL":
-        return sqlalchemy.and_(*(any_source(_column_equals(column, value)) for value in values))
+
+        def match_value(value: Any) -> Any:
+            return any_source(lambda row: value_of(row) == value)
+
+        return sqlalchemy.and_(*(match_value(value) for value in values))
     if has_type == "HAS_ONLY":
-        return sqlalchemy.not_(any_source(lambda row: row.c[column].notin_(values)))
+        return sqlalchemy.not_(any_source(lambda row: value_of(row).notin_(values)))
     raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
 
-def _union_has_handlers(per_field: list[Mapping[str, Callable[..., Any]]]) -> Mapping[str, Callable[..., Any]]:
+def _union_has_handlers(
+    per_field: list[Mapping[str, Callable[..., Any]]],
+) -> Mapping[str, Callable[..., Any]]:
     """A typed-relationship ``.id`` HAS handler over the UNION of several fields' targets.
 
     Used when one backing declares several reference/child fields (or exposed

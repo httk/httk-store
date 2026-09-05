@@ -377,15 +377,28 @@ and expose the lineage id as `_httk_id`.
 `EntryIdScheme(type_in_base=True)` appends the served entry type to the base.
 For multi-backing families, the number is `logical_id * backing_count + backing_index`, which keeps ids unique across
 the family's backing tables.
-Cross-transaction id races are detected by each backing table's unique immutable-id index; use a family-owned id-ownership
-table if family-wide ownership must be serialized.
+Entry-ID ownership is enforced across every backing in a defined family.
+SQL ownership claims share the record transaction. An identity conflict aborts
+that transaction, even if the exception is caught inside its context; earlier
+writes roll back and lazy records from it expire. Degraded and bulk-fenced
+profiles retain their exclusive lease and recovery guarantees.
+
+Existing stores without the ownership capability remain readable, but writes
+require reopening with `upgrade=True`. This validates and backfills ownership
+without changing IDs, revision numbers, or content IDs; conflicts abort without
+rewriting records. Keep a backup before any upgrade. Mongo uses unique ownership
+indexes and its existing transaction sessions; standalone writes serialize
+through its exclusive maintenance lease, conservatively reconciling orphaned
+claims before writing.
 
 An explicit URL-safe id which does not match that recommended form is accepted
 with a warning; unsafe ids are rejected. Backing records of every family with
 a definition id must declare nullable, identity-skipped `id` (indexed) and
 `immutable_id` (unique) fields. Because this adds physical columns and a
 unique index, stores created before this change must be rebuilt rather than
-reopened with the old schema. `immutable_id` uniqueness is per backing table.
+reopened with the old schema. This older column-layout requirement is distinct
+from the additive ownership-capability upgrade above; immutable IDs are now
+unique across every backing of their defined family.
 
 Plain `fetch()` and `searcher()` queries keep returning **all** rows of a
 lineage. Pass `only_latest=True` to `store.searcher()` to restrict *root*
@@ -615,9 +628,29 @@ carried lineage-level on `~revs`.
 aliases), part of the served-route relationship filtering that landed this
 series.
 
+**Mounted ids.** `StoredEntryFederation(source_inventory=...)` resolves relationship
+ids using the target family's mount in the same store. `adapter_from_stores`
+supplies this inventory automatically. Explicit `StoredEntrySource.relationship_sources`
+selections (family class to source name) win, followed by the source itself for
+same-family edges, a unique target mount, or a unique target mount with the same
+prefix. Ambiguous mounts raise at configuration time. Forward and reverse
+relationships, `include`, and relationship-id filters use the same selection;
+unmounted loose targets retain their raw ids. An explicit override must name a
+mounted source of the requested family in the same store.
+
+Depth-1 related-property filters use these same target mounts. The factory
+returned by `related_property_resolver_factory(plans)` accepts the source store
+and an optional `RelationshipSourceMap`; federation supplies both. Each matching
+candidate receives its concrete typed target backing's prefix before ids are
+combined, so families sharing a wire type and raw id remain distinct. Unrelated
+backings are excluded. The sibling search also applies the target prefix to
+`id` equality and string matching; `immutable_id` stays intrinsic and unprefixed.
+A direct `factory(store)` call without the map resolves
+raw ids across the same-store plans. Both forms search latest main revisions;
+named alternatives and stale revisions cannot satisfy the property filter.
+
 **Accepted limitations.** The cross-store reverse gap (reverse derives only
-within one source store); the F9 raw-id caveat (non-empty `public_id_prefix`
-untested by design, both directions); a backend with a custom `id_of` mapping
+within one source store); a backend with a custom `id_of` mapping
 gets empty reverse blocks; `product_relationships()` emits a forward-only
 `_httk_has_product` with no reverse.
 

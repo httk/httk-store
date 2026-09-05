@@ -10,7 +10,8 @@ import heapq
 import json
 import warnings
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import batched
 from types import MappingProxyType
 from typing import Any, Final, cast
 
@@ -18,6 +19,7 @@ import sqlalchemy
 from httk.core import ALTERNATIVE_KIND_PATTERN, RelatedEntry
 from httk.core.optimade import FilterAst
 
+import httk.store.store_common
 from httk.store.backend.schema import resolve_schema
 from httk.store.backend.sql.entry_provider import _live_targets_by_source
 from httk.store.backend.sql.mapping import (
@@ -36,6 +38,7 @@ from httk.store.backend.sql.provenance_edges import (
 )
 from httk.store.backend.sql.store import SqlStore, _served_definition
 from httk.store.backend.sql.stored_properties import (
+    RelationshipSourceMap,
     StoredPropertySqlCandidateStream,
     StoredPropertySqlPlan,
     _served_type_for_target,
@@ -49,9 +52,11 @@ _RelatedMap = Mapping[str, tuple[RelatedEntry, ...]]
 _EMPTY_RELATIONSHIPS: Final[_RelatedMap] = MappingProxyType({})
 
 # A per-store depth-1 related-property resolver source: called with the store
-# whose row is being filtered, it returns the resolver restricted to that store's
-# sibling plans (same-store scope), or None when nothing is available for it.
-RelatedResolverFactory = Callable[[EntryStore], RelatedPropertyResolver | None]
+# whose row is being filtered and its relationship mount context, it returns a
+# resolver restricted to that store's sibling plans, or None when unavailable.
+type RelatedResolverFactory = Callable[
+    [httk.store.store_common.EntryStore, RelationshipSourceMap | None], RelatedPropertyResolver | None
+]
 
 __all__ = [
     "DuplicateEntryIdError",
@@ -70,16 +75,21 @@ def related_property_resolver_factory(
     """Build a same-store depth-1 related-property resolver factory over sibling plans.
 
     ``plans`` are the family plans available to a serving edge (one per source).
-    The returned factory, given the store whose row is being filtered, yields a
+    The returned factory accepts the store whose row is being filtered and an
+    optional :class:`~httk.store.backend.sql.stored_properties.RelationshipSourceMap`, yielding a
     :data:`~httk.store.query.optimade_filters.RelatedPropertyResolver` that resolves a
     dotted ``<related_type>.<prop>`` filter to the matching related-entry ids by
     running the stripped sub-filter through the sibling plan for ``related_type``
     **in that same store** (same-store scope, mirroring reverse serving). Only
     the sibling's own properties are consulted; the sub-search runs
     ``only_latest=True`` over mains, so stale revisions and named alternatives can
-    never satisfy the filter. The collected ids are the sibling rows' raw stored
-    ``id`` column — exactly what the ``<related_type>.id HAS ...`` handler the
-    semi-join rewrites to matches against.
+    never satisfy the filter. With a relationship map, each matching candidate
+    receives its concrete backing's target prefix before ids are combined;
+    that same prefix applies to ``id`` predicates in the sibling search.
+    Unrelated backings are excluded, and custom wire types map back to the
+    original plan type. Calling the factory with only the store returns raw
+    stored ids instead. These ids feed the ``<related_type>.id HAS ...`` handler
+    used by the semi-join rewrite.
 
     :param plans: The family plans (one per source) available to the serving edge.
     :return: A per-store resolver factory (a miss returns an empty tuple, i.e. matches nothing).
@@ -88,15 +98,40 @@ def related_property_resolver_factory(
     for plan in plans:
         plans_by_type.setdefault(plan.entry_type, []).append(plan)
 
-    def factory(store: EntryStore) -> RelatedPropertyResolver | None:
+    def factory(store: EntryStore, source_map: RelationshipSourceMap | None = None) -> RelatedPropertyResolver | None:
+        original_types = (
+            {
+                wire: wire_type_for_internal(cast(SqlStore, store), internal)
+                for internal, wire in source_map.wire_types.items()
+            }
+            if source_map is not None
+            else {}
+        )
+
         def resolve(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:
             matched: dict[str, None] = {}
-            for plan in plans_by_type.get(related_type, ()):
+            for plan in plans_by_type.get(original_types.get(related_type, related_type), ()):
                 if plan.store is not store:
                     continue
-                for stream in plan.candidate_searchers(sub_ast, only_latest=True):
+                prefix = (
+                    next(
+                        (
+                            source_map.backing_prefixes[backing]
+                            for backing in plan.backings
+                            if backing in source_map.backing_prefixes
+                        ),
+                        None,
+                    )
+                    if source_map is not None
+                    else ""
+                )
+                if prefix is None:
+                    continue
+                for stream in plan.candidate_searchers(sub_ast, only_latest=True, public_id_prefix=prefix):
+                    if source_map is not None and stream.backing not in source_map.backing_prefixes:
+                        continue
                     for values, _names in stream.searcher:
-                        matched.setdefault(str(values[1]))
+                        matched.setdefault(prefix + str(values[1]))
             return tuple(matched)
 
         return resolve
@@ -105,6 +140,8 @@ def related_property_resolver_factory(
 
 
 _AUDIT_BATCH_SIZE: Final = 1_000
+# Match the hydrator's conservative bound for SQL IN parameters.
+_RELATIONSHIP_BATCH_SIZE: Final = 500
 
 
 @dataclass(frozen=True)
@@ -120,12 +157,14 @@ class StoredEntrySource:
     :param entry_family: The logical entry-family class to serve.
     :param name: The unique name used to identify this source.
     :param public_id_prefix: The prefix prepended to store-minted lineage ids.
+    :param relationship_sources: Explicit target-family to same-store source-name selections for ambiguous mounts.
     """
 
     store: EntryStore
     entry_family: type
     name: str
     public_id_prefix: str = ""
+    relationship_sources: Mapping[type, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.store, EntryStore):
@@ -136,6 +175,16 @@ class StoredEntrySource:
             raise ValueError("StoredEntrySource.name must be a non-empty stripped string")
         if not isinstance(self.public_id_prefix, str):
             raise TypeError("StoredEntrySource.public_id_prefix must be a string")
+        if not isinstance(self.relationship_sources, Mapping) or not all(
+            isinstance(family, type) and isinstance(name, str) and name
+            for family, name in self.relationship_sources.items()
+        ):
+            raise TypeError("StoredEntrySource.relationship_sources must map family classes to source names")
+        object.__setattr__(
+            self,
+            "relationship_sources",
+            MappingProxyType(dict(self.relationship_sources)),
+        )
 
 
 @dataclass(frozen=True)
@@ -294,6 +343,8 @@ class StoredEntryFederation:
         :func:`related_property_resolver_factory`) enabling depth-1
         related-property filtering (``references.doi CONTAINS ...``); without it
         such dotted filters match nothing, while ``<type>.id HAS ...`` still works.
+        Called with the store and its relationship source map (or ``None``).
+    :param source_inventory: All mounted families, used to resolve relationship target prefixes; defaults to sources.
     """
 
     def __init__(
@@ -302,6 +353,7 @@ class StoredEntryFederation:
         *,
         served_type_names: Mapping[str, str] | None = None,
         related_resolver_factory: RelatedResolverFactory | None = None,
+        source_inventory: Sequence[StoredEntrySource] | None = None,
     ) -> None:
         if served_type_names is not None and not isinstance(served_type_names, Mapping):
             raise TypeError("StoredEntryFederation.served_type_names must be a mapping or None")
@@ -322,6 +374,19 @@ class StoredEntryFederation:
         entry_family = values[0].entry_family
         if any(item.entry_family is not entry_family for item in values[1:]):
             raise ValueError("StoredEntryFederation sources must use one exact entry_family")
+        self._source_inventory = tuple(source_inventory) if source_inventory is not None else values
+        if not all(isinstance(source, StoredEntrySource) for source in self._source_inventory):
+            raise TypeError("StoredEntryFederation.source_inventory must contain StoredEntrySource values")
+        inventory_by_name = {source.name: source for source in self._source_inventory}
+        if len(inventory_by_name) != len(self._source_inventory):
+            raise ValueError("StoredEntryFederation source inventory names must be unique")
+        if any(inventory_by_name.get(source.name) is not source for source in values):
+            raise ValueError("StoredEntryFederation source inventory must contain its sources")
+        for source in self._source_inventory:
+            for family, name in source.relationship_sources.items():
+                target = inventory_by_name.get(name)
+                if target is None or target.store is not source.store or target.entry_family is not family:
+                    raise ValueError(f"Invalid relationship source {name!r} for {source.name!r}/{family.__name__}")
         if sum(item.public_id_prefix == "" for item in values) > 1:
             warnings.warn(
                 "multiple StoredEntrySource values use an empty public_id_prefix; "
@@ -345,11 +410,14 @@ class StoredEntryFederation:
         ):
             raise ValueError("StoredEntryFederation sources must use equal entry type and definition")
         self._sources = resolved_sources
+        self._relationship_maps = {
+            source.name: self._relationship_map(source) for source in values if isinstance(source.store, SqlStore)
+        }
         stream_groups: dict[str, list[tuple[int, int]]] = {}
-        for source in resolved_sources:
-            for backing_index in range(len(source.plan.backings)):
-                stream_groups.setdefault(source.source.public_id_prefix, []).append(
-                    (source.source_index, backing_index)
+        for resolved in resolved_sources:
+            for backing_index in range(len(resolved.plan.backings)):
+                stream_groups.setdefault(resolved.source.public_id_prefix, []).append(
+                    (resolved.source_index, backing_index)
                 )
         self._page_colliding_streams = {
             prefix: frozenset(streams)
@@ -632,8 +700,13 @@ class StoredEntryFederation:
             # so a directly constructed (or non-SQL) federation keeps the plain
             # matches-nothing behavior and its plan signature untouched.
             resolver_kwargs: dict[str, Any] = {}
+            source_map = self._relationship_maps.get(source.source.name)
+            if source_map is not None:
+                resolver_kwargs["relationship_source_map"] = source_map
             if self._related_resolver_factory is not None:
-                resolver_kwargs["related_property_resolver"] = self._related_resolver_factory(source.source.store)
+                resolver_kwargs["related_property_resolver"] = self._related_resolver_factory(
+                    source.source.store, source_map
+                )
             candidates = source.plan.candidate_searchers(
                 filter_string,
                 sort=sort,
@@ -851,6 +924,103 @@ class StoredEntryFederation:
         collected = self._collect_relationships((candidate,), alternatives=alternatives)
         return row, collected.get(id(candidate), _EMPTY_RELATIONSHIPS)
 
+    def _relationship_target(self, source: StoredEntrySource, family: type) -> StoredEntrySource | None:
+        """Select the actual target mount using explicit, self, unique, then same-prefix resolution."""
+        candidates = [
+            item for item in self._source_inventory if item.store is source.store and item.entry_family is family
+        ]
+        override = source.relationship_sources.get(family)
+        if override is not None:
+            return next(item for item in candidates if item.name == override)
+        if family is source.entry_family:
+            return source
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            return None
+        same_prefix = [item for item in candidates if item.public_id_prefix == source.public_id_prefix]
+        if len(same_prefix) == 1:
+            return same_prefix[0]
+        raise ValueError(
+            f"Ambiguous relationship target {family.__name__} from source {source.name!r}; "
+            "set relationship_sources for that family"
+        )
+
+    def _relationship_map(self, source: StoredEntrySource) -> RelationshipSourceMap:
+        """Resolve one source's forward and reverse prefixes from the same mount selections."""
+        assert isinstance(source.store, SqlStore)
+        prefixes: dict[str, str] = {}
+        reverse: dict[type, tuple[str, ...]] = {}
+        backing_prefixes: dict[type, str] = {}
+        wire_types: dict[str, str] = {}
+        strong = strong_link_families(source.store)
+        strong_backings = {family.backing for family in strong}
+        own_layout = next(layout for layout in source.store.layout.families if layout.family is source.entry_family)
+        targets = {
+            spec.target
+            for backing in own_layout.records
+            for spec in resolve_schema(backing).fields
+            if spec.role in ("reference", "child") and (spec.related is None or spec.related.serve)
+        } | {
+            link.target
+            for backing in own_layout.records
+            for link in resolve_schema(backing).links
+            if link.exposed_relationship
+        }
+        loose_edges = any(family.backing in own_layout.records for family in strong)
+        for layout in source.store.layout.families:
+            internal = getattr(layout.family, "type", None)
+            if not isinstance(internal, str):
+                continue
+            if any(backing in targets for backing in layout.records):
+                target = self._relationship_target(source, layout.family)
+                prefix = target.public_id_prefix if target is not None else ""
+                for backing in layout.records:
+                    backing_prefixes[backing] = prefix
+            if loose_edges:
+                loose_targets = self._loose_relationship_targets(source, internal)
+                prefixes[internal] = loose_targets[0].public_id_prefix if loose_targets else ""
+            wire_types[internal] = self._served_type_names.get(internal, wire_type_for_internal(source.store, internal))
+            if not any(backing in strong_backings for backing in layout.records):
+                continue
+            mounts = [
+                item
+                for item in self._source_inventory
+                if item.store is source.store and item.entry_family is layout.family
+            ]
+            selected_prefixes = (
+                tuple(
+                    item.public_id_prefix
+                    for item in mounts
+                    if any(
+                        target is source
+                        for target in self._loose_relationship_targets(item, getattr(source.entry_family, "type", ""))
+                    )
+                )
+                if mounts
+                else ("",)
+            )
+            for backing in layout.records:
+                if backing in strong_backings:
+                    reverse[backing] = selected_prefixes
+        return RelationshipSourceMap(prefixes, reverse, wire_types, backing_prefixes)
+
+    def _loose_relationship_targets(self, source: StoredEntrySource, internal: str) -> tuple[StoredEntrySource, ...]:
+        """Resolve a loose edge's type only when mounted families agree on its prefix."""
+        families = dict.fromkeys(
+            item.entry_family
+            for item in self._source_inventory
+            if item.store is source.store and getattr(item.entry_family, "type", None) == internal
+        )
+        targets = tuple(self._relationship_target(source, family) for family in families)
+        selected = tuple(target for target in targets if target is not None)
+        if len({target.public_id_prefix for target in selected}) > 1:
+            raise ValueError(
+                f"Ambiguous relationship target type {internal!r} from source {source.name!r}: "
+                "loose edges cannot distinguish entry families with different public id prefixes"
+            )
+        return selected
+
     def _collect_relationships(
         self, candidates: Sequence[_Candidate], *, alternatives: bool = False
     ) -> dict[int, _RelatedMap]:
@@ -982,12 +1152,13 @@ class StoredEntryFederation:
         with store._read_connection() as connection:
             edges_by_sid = forward_run_edges(connection, store, family, [candidate.sid for candidate in group])
         for candidate in group:
+            source_map = self._relationship_maps[candidate.stream.source.source.name]
             for (edge_type, edge_id, label), marker in edges_by_sid.get(int(candidate.sid), []):
                 key = wire_relationship_key(marker.relationship, family.definition_id)
                 collected.setdefault(id(candidate), {}).setdefault(key, []).append(
                     RelatedEntry(
-                        wire_type_for_internal(store, edge_type),
-                        edge_id,
+                        source_map.wire_types.get(edge_type, edge_type),
+                        source_map.prefixes.get(edge_type, "") + edge_id,
                         role=marker.role,
                         label=label,
                         relationship=key,
@@ -1034,15 +1205,17 @@ class StoredEntryFederation:
                             continue
                         key = wire_relationship_key(marker.reverse, family.definition_id)
                         for candidate in candidates_by_raw.get(raw_id, ()):
-                            collected.setdefault(id(candidate), {}).setdefault(key, []).append(
-                                RelatedEntry(
-                                    family.wire_type,
-                                    run_id,
-                                    role=marker.role,
-                                    label=label,
-                                    relationship=key,
+                            source_map = self._relationship_maps[candidate.stream.source.source.name]
+                            for prefix in source_map.reverse_prefixes.get(family.backing, ()):
+                                collected.setdefault(id(candidate), {}).setdefault(key, []).append(
+                                    RelatedEntry(
+                                        source_map.wire_types.get(family.internal_type, family.wire_type),
+                                        prefix + run_id,
+                                        role=marker.role,
+                                        label=label,
+                                        relationship=key,
+                                    )
                                 )
-                            )
 
     def _collect_related_field(
         self,
@@ -1106,15 +1279,26 @@ class StoredEntryFederation:
         if not target_sids_by_sid:
             return
         id_by_sid = self._raw_ids_for_sids(
-            connection, store, spec.target, {sid for sids_ in target_sids_by_sid.values() for sid in sids_}
+            connection,
+            store,
+            spec.target,
+            {sid for sids_ in target_sids_by_sid.values() for sid in sids_},
         )
         for candidate in group:
+            source_map = self._relationship_maps[candidate.stream.source.source.name]
+            internal = store._entry_record_types[spec.target][0]
+            wire_type = source_map.wire_types.get(internal, related_type)
             for target_sid in target_sids_by_sid.get(int(candidate.sid), ()):
                 target_id = id_by_sid.get(target_sid)
                 if target_id is None:
                     continue
-                collected.setdefault(id(candidate), {}).setdefault(related_type, []).append(
-                    RelatedEntry(related_type, target_id, description=description, role=role)
+                collected.setdefault(id(candidate), {}).setdefault(wire_type, []).append(
+                    RelatedEntry(
+                        wire_type,
+                        source_map.backing_prefixes.get(spec.target, "") + target_id,
+                        description=description,
+                        role=role,
+                    )
                 )
 
     @staticmethod
@@ -1145,10 +1329,8 @@ class StoredEntryFederation:
 
         The related entry type is ``served_type_names[internal type]`` when
         mapped, else the target family's served (wire) name, else the internal
-        type as a last resort.  The related id is the target row's raw
-        stored ``id`` column at its lineage's latest revision (F9: it matches a
-        mounted target endpoint only when that target source's
-        ``public_id_prefix`` is empty; dangling targets are skipped).
+        type as a last resort. The target mount's prefix is applied to its latest
+        lineage id; unmounted targets retain raw ids and dangling targets are skipped.
 
         :param connection: The open read connection to ``store``.
         :param store: The SQL store backing this group.
@@ -1170,22 +1352,25 @@ class StoredEntryFederation:
             served = _served_definition(family_layout.family) if family_layout is not None else None
             related_type = served.name if served is not None else internal[0]
         link_table = store._table(link_spec.table_name)
-        # ponytail: full link-table scan per page; add WHERE source_lid IN (group lids) if link tables grow large.
+        source_lids = sorted(set(lid_by_sid.values()))
         targets_by_source = _live_targets_by_source(
-            connection.execute(
+            row
+            for batch in batched(source_lids, _RELATIONSHIP_BATCH_SIZE)
+            for row in connection.execute(
                 sqlalchemy.select(
                     link_table.c[SOURCE_LID_COLUMN],
                     link_table.c[TARGET_LID_COLUMN],
                     link_table.c[LOGICAL_ID_COLUMN],
                     link_table.c[SID_COLUMN],
                     link_table.c[RETRACTED_COLUMN],
-                )
+                ).where(link_table.c[SOURCE_LID_COLUMN].in_(batch))
             )
         )
         if not targets_by_source:
             return
         id_by_lid = self._target_ids(connection, store, link_spec.target, targets_by_source)
         for candidate in group:
+            source_map = self._relationship_maps[candidate.stream.source.source.name]
             source_lid = lid_by_sid.get(int(candidate.sid))
             if source_lid is None:
                 continue
@@ -1196,7 +1381,7 @@ class StoredEntryFederation:
                 collected.setdefault(id(candidate), {}).setdefault(related_type, []).append(
                     RelatedEntry(
                         related_type,
-                        target_id,
+                        source_map.backing_prefixes.get(link_spec.target, "") + target_id,
                         description=link_spec.description,
                         role=link_spec.role,
                         label=link_spec.name,
@@ -1222,18 +1407,23 @@ class StoredEntryFederation:
         target_table = store._table(resolve_schema(target).table_name)
         max_sid_by_lid: dict[int, int] = {
             int(lid): int(max_sid)
+            for batch in batched(target_lids, _RELATIONSHIP_BATCH_SIZE)
             for lid, max_sid in connection.execute(
-                sqlalchemy.select(target_table.c[LOGICAL_ID_COLUMN], sqlalchemy.func.max(target_table.c[SID_COLUMN]))
-                .where(target_table.c[LOGICAL_ID_COLUMN].in_(target_lids))
+                sqlalchemy.select(
+                    target_table.c[LOGICAL_ID_COLUMN],
+                    sqlalchemy.func.max(target_table.c[SID_COLUMN]),
+                )
+                .where(target_table.c[LOGICAL_ID_COLUMN].in_(batch))
                 .group_by(target_table.c[LOGICAL_ID_COLUMN])
             )
             if max_sid is not None  # a None max is a dangling link; fsck reports it
         }
         id_by_sid: dict[int, str] = {
             int(sid): str(value)
+            for batch in batched(max_sid_by_lid.values(), _RELATIONSHIP_BATCH_SIZE)
             for sid, value in connection.execute(
                 sqlalchemy.select(target_table.c[SID_COLUMN], target_table.c["id"]).where(
-                    target_table.c[SID_COLUMN].in_(list(max_sid_by_lid.values()))
+                    target_table.c[SID_COLUMN].in_(batch)
                 )
             )
         }

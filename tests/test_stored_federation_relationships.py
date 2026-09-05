@@ -15,6 +15,7 @@ served name, never its internal ``runs`` vocabulary.
 from dataclasses import dataclass, field
 from typing import Annotated, ClassVar
 
+import sqlalchemy
 from httk.core import PropertyDefinition, RelatedEntry, Run, RunEntry, load_entry_type_definition
 from httk.core.register import register_entry_family, register_entry_record
 from httk.core.storage import (
@@ -172,6 +173,34 @@ def test_query_serves_weak_link_relationships_with_role_and_label() -> None:
         by_id = {row["id"]: rel for row, rel in zip(page.rows, page.relationships, strict=True)}
         assert by_id[a1.id] == {"_httk_runs": (_produced_by(t1.id), _produced_by(t2.id))}
         assert all(rel == {} for entry_id, rel in by_id.items() if entry_id != a1.id)
+
+
+def test_weak_link_page_queries_restrict_source_lineages() -> None:
+    with Backend.sqlite() as database:
+        store = _store(database)
+        target = _saved(store, Run(source_id="target"))
+        for index in range(12):
+            source = _saved(store, ArtifactRecord(f"a{index:02}"))
+            store.link(source, "produced_by", target)
+        queries = []
+
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("SELECT") and "_httk_link_" in statement:
+                queries.append((statement, parameters))
+
+        sqlalchemy.event.listen(database.engine, "before_cursor_execute", capture)
+        try:
+            federation = StoredEntryFederation((StoredEntrySource(store, ArtifactCalculation, "art"),))
+            page = federation.query(sort=(("_httk_label", False),), limit=1)
+        finally:
+            sqlalchemy.event.remove(database.engine, "before_cursor_execute", capture)
+        assert len(page.rows) == 1
+        assert page.relationships == ({"_httk_runs": (_produced_by(target.id),)},)
+        assert queries
+        for statement, parameters in queries:
+            assert "WHERE" in statement
+            assert "source_lid IN" in statement
+            assert len(parameters) == 1
 
 
 def test_retracted_weak_link_disappears() -> None:

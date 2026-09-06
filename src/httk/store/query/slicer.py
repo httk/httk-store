@@ -6,6 +6,9 @@ The :class:`Slicer` compiles bracket indexing into the ordinary
 It is a thin convenience: ``note = store.searcher().slicer(Note)`` gives an
 object where ``note['title']`` iterates one field, ``note[note['value'] > 10]``
 iterates the matching records, and ``len(note[mask])`` counts them.
+``note[mask]['title']`` iterates that field over the matching records, and
+``note[mask][['title', 'value']]`` iterates named rows (``.title``/``.value``)
+projected through the searcher's native ``results()``.
 
 Nothing here touches a searcher until it is iterated or measured. A slicer
 holds only a zero-argument factory that mints a *fresh* searcher and the target
@@ -20,11 +23,11 @@ operations therefore never share filter state.
 No sorting is offered: some conforming stores (the federation) reject it.
 """
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-__all__ = ["Slicer", "SlicerColumn", "SlicerMask", "SlicerSelection"]
+__all__ = ["Slicer", "SlicerColumn", "SlicerMask", "SlicerProjection", "SlicerSelection"]
 
 type _Op = Literal["eq", "ne", "lt", "le", "gt", "ge", "is_in", "contains", "startswith", "endswith"]
 """The comparison and matching operators a :class:`_Cmp` node can carry."""
@@ -106,6 +109,30 @@ def _resolve(variable: Any, path: tuple[str, ...]) -> Any:
     for name in path:
         field = getattr(field, name)
     return field
+
+
+def _validate_names(names: Sequence[str]) -> tuple[str, ...]:
+    """Validate a named-row projection's column names.
+
+    Each name must be a single-segment Python identifier (it becomes a
+    ``results`` keyword argument), and the list must be non-empty with no
+    duplicates.
+
+    :param names: The field names requested for a named-row projection.
+    :return: The validated names, in the given order.
+    :raises ValueError: If ``names`` is empty or contains a duplicate name.
+    :raises TypeError: If any name is not a valid Python identifier string.
+    """
+    if len(names) == 0:
+        raise ValueError("a named-row projection requires at least one column name")
+    seen: set[str] = set()
+    for name in names:
+        if not isinstance(name, str) or not name.isidentifier():
+            raise TypeError(f"projected column names must be valid Python identifiers, got {name!r}")
+        if name in seen:
+            raise ValueError(f"duplicate projected column name: {name!r}")
+        seen.add(name)
+    return tuple(names)
 
 
 def _compile(node: _Node, variable: Any) -> Any:
@@ -224,26 +251,33 @@ class _SlicerStr:
 class SlicerColumn:
     """One field of a :class:`Slicer`, iterable and comparable.
 
-    Iterating yields the field's decoded scalar values. Comparisons and the
+    Iterating yields the field's decoded scalar values, across every record of
+    the slicer or, when reached through a :class:`SlicerSelection`, across
+    only its matching records. Comparisons and the
     ``isin``/``isna``/``notna``/``between`` helpers, plus the ``.str`` literal
     matchers, build a :class:`SlicerMask` for use as a slicer index key.
 
     :param slicer: The owning slicer.
     :param path: The attribute names from the query variable to this field.
+    :param ast: The owning selection's op tree to filter by, or ``None`` for
+        every record of the slicer.
     """
 
-    def __init__(self, slicer: Slicer, path: tuple[str, ...]) -> None:
+    def __init__(self, slicer: Slicer, path: tuple[str, ...], ast: "_Node | None" = None) -> None:
         self._slicer = slicer
         self._path = path
+        self._ast = ast
 
     def __iter__(self) -> Iterator[Any]:
-        """Iterate this field's decoded scalar values across every record.
+        """Iterate this field's decoded scalar values across the matching records.
 
-        :yield: Each record's decoded field value.
+        :yield: Each matching record's decoded field value.
         """
         slicer = self._slicer
         searcher = slicer._make()
         variable = searcher.variable(slicer._target)
+        if self._ast is not None:
+            searcher.add(_compile(self._ast, variable))
         field = _resolve(variable, self._path)
         yield from searcher.results(col=field).scalars("col")
 
@@ -361,6 +395,27 @@ class SlicerSelection:
         self._slicer = slicer
         self._ast = ast
 
+    def __getitem__(self, key: "str | Sequence[str]") -> "SlicerColumn | SlicerProjection":
+        """Select one field's values, or project named rows, over the matching records.
+
+        :param key: A field-name string, or a non-empty list/tuple of
+            single-segment field names.
+        :return: A filtered column view for a string key, or a named-row
+            projection for a list/tuple of field names.
+        :raises TypeError: If ``key`` is neither a field-name string nor a
+            list/tuple of field names, or if a name in the list/tuple is not
+            a valid Python identifier.
+        :raises ValueError: If the list/tuple is empty or has a duplicate name.
+        """
+        if isinstance(key, str):
+            return SlicerColumn(self._slicer, (key,), self._ast)
+        if isinstance(key, list | tuple):
+            return SlicerProjection(self._slicer, self._ast, _validate_names(key))
+        raise TypeError(
+            "selection indexing accepts a field-name string or a list/tuple of field names only, "
+            f"got {type(key).__name__}"
+        )
+
     def __iter__(self) -> Iterator[Any]:
         """Iterate the matching reconstructed records.
 
@@ -371,6 +426,50 @@ class SlicerSelection:
         variable = searcher.variable(slicer._target)
         searcher.add(_compile(self._ast, variable))
         yield from searcher.results(record=variable).scalars("record")
+
+    def __len__(self) -> int:
+        """Count the matching records.
+
+        :return: The number of matching records.
+        """
+        slicer = self._slicer
+        searcher = slicer._make()
+        variable = searcher.variable(slicer._target)
+        searcher.add(_compile(self._ast, variable))
+        return searcher.count()
+
+
+class SlicerProjection:
+    """Named rows of a :class:`SlicerSelection`, projected to chosen fields.
+
+    Iterating yields the searcher's own native result rows (from
+    :meth:`~httk.store.query.protocols.Searcher.results`), unchanged, each
+    exposing every requested name by attribute or subscript. Each iteration
+    runs against its own fresh searcher, so it never shares filter state with
+    another operation.
+
+    :param slicer: The owning slicer.
+    :param ast: The op tree selecting the records.
+    :param names: The single-segment field names to project, in order.
+    """
+
+    def __init__(self, slicer: Slicer, ast: _Node, names: tuple[str, ...]) -> None:
+        self._slicer = slicer
+        self._ast = ast
+        self._names = names
+
+    def __iter__(self) -> Iterator[Any]:
+        """Iterate the matching records as native named rows.
+
+        :yield: Each matching record's result row, named by the projection's
+            field names.
+        """
+        slicer = self._slicer
+        searcher = slicer._make()
+        variable = searcher.variable(slicer._target)
+        searcher.add(_compile(self._ast, variable))
+        outputs = {name: _resolve(variable, (name,)) for name in self._names}
+        yield from searcher.results(**outputs)
 
     def __len__(self) -> int:
         """Count the matching records.

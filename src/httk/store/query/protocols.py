@@ -212,7 +212,11 @@ class ResultRow:
         return self._value(key)
 
     def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
+        # Dunders and the slot internals are rejected before any row-name lookup:
+        # interpreter/copy/pickle probes stay cheap, and an unset slot read during
+        # construction cannot recurse. Everything else -- provider-prefixed OPTIMADE
+        # names included -- resolves against the declared output names.
+        if name.startswith("__") or name in ResultRow.__slots__:
             raise AttributeError(name)
         try:
             return self[name]

@@ -200,6 +200,53 @@ def test_reusing_a_selection_does_not_mutate(store):
     assert first == second == hand_records(store, lambda v: v.value > 10)
 
 
+# --------------------------------------------------------------- selection projection
+
+
+def test_selection_column_yields_field_over_matching_records(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    titles = list(selection["title"])
+    assert sorted(titles) == sorted(n.title for n in NOTES if n.value > 10)
+    assert sorted(titles) == sorted(r.title for r in selection)
+
+
+def test_selection_projection_yields_named_rows(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    rows = list(selection[["title", "value"]])
+    got = {(row.title, row.value) for row in rows}
+    expected = {(n.title, n.value) for n in NOTES if n.value > 10}
+    assert got == expected
+    assert got == {(r.title, r.value) for r in selection}
+
+
+def test_selection_projection_with_combined_mask(store):
+    note = slicer(store)
+    mask = (note["value"] > 10) & (note["title"] != "dummy")
+    projection = note[mask][["title", "other"]]
+    got = {(row.title, row.other) for row in projection}
+    expected = {(n.title, n.other) for n in NOTES if n.value > 10 and n.title != "dummy"}
+    assert got == expected
+
+
+def test_selection_projection_is_lazy_and_mints_fresh_searchers(store):
+    note = slicer(store)
+    projection = note[note["value"] > 10][["title"]]  # built, nothing touched yet
+    first = {row.title for row in projection}
+    second = {row.title for row in projection}  # a second iteration mints its own searcher
+    assert first == second == {n.title for n in NOTES if n.value > 10}
+
+
+def test_selection_column_is_lazy(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    column = selection["title"]  # built, nothing touched yet
+    first = sorted(column)
+    second = sorted(column)
+    assert first == second == sorted(n.title for n in NOTES if n.value > 10)
+
+
 # --------------------------------------------------------------- errors
 
 
@@ -215,6 +262,43 @@ def test_unsupported_key_types_raise_type_error(store):
         _ = note[123]
     with pytest.raises(TypeError):
         _ = note[["title", "value"]]
+
+
+def test_selection_projection_unknown_field_raises_attribute_error(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    with pytest.raises(AttributeError):
+        list(selection[["title", "nope"]])
+
+
+def test_selection_projection_rejects_empty_list(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    with pytest.raises(ValueError):
+        _ = selection[[]]
+
+
+def test_selection_projection_rejects_duplicate_names(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    with pytest.raises(ValueError):
+        _ = selection[["title", "title"]]
+
+
+def test_selection_projection_rejects_non_identifier_name(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    with pytest.raises(TypeError):
+        _ = selection[["title", "a.b"]]
+    with pytest.raises(TypeError):
+        _ = selection[["title", "not an identifier"]]
+
+
+def test_selection_getitem_unsupported_key_type_raises_type_error(store):
+    note = slicer(store)
+    selection = note[note["value"] > 10]
+    with pytest.raises(TypeError):
+        _ = selection[123]
 
 
 def test_mask_operators_require_sibling_mask(store):
@@ -259,3 +343,22 @@ def test_federated_slicer_over_in_memory_sqlite():
         variable = hand.variable(Note)
         hand.add(variable.value > 10)
         assert got == set(hand.results(record=variable).scalars("record"))
+
+
+def test_result_rows_expose_provider_prefixed_names_as_attributes() -> None:
+    """Provider-prefixed OPTIMADE output names resolve as row attributes; dunder
+    and slot-internal probes still raise immediately (copy/pickle safety)."""
+    import copy
+    import pickle
+
+    from httk.store.query.protocols import ResultRow
+
+    row = ResultRow(("Fe2O3", 0.5), ("_anyterial_formula", "_anyterial_max_spin_splitting"))
+    assert row._anyterial_formula == "Fe2O3"
+    assert row._anyterial_max_spin_splitting == 0.5
+    assert copy.deepcopy(row)._anyterial_formula == "Fe2O3"
+    assert pickle.loads(pickle.dumps(row))._anyterial_formula == "Fe2O3"
+    with pytest.raises(AttributeError):
+        _ = row._no_such_output
+    with pytest.raises(AttributeError):
+        _ = row.__wrapped__

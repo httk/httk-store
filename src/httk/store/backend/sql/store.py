@@ -3479,25 +3479,35 @@ class SqlStore:
             source_lid = self._lid_of(connection, source_cls, source)
         return self._linked_by_lid(spec, source_lid, eager=eager)
 
-    def _linked_by_lid(self, spec: LinkSpec, source_lid: int, *, eager: bool = False) -> tuple[Any, ...]:
+    def _linked_by_lid(
+        self, spec: LinkSpec, source_lid: int, *, eager: bool = False, as_of: object = None
+    ) -> tuple[Any, ...]:
         """Latest live-linked targets of ``source_lid`` under ``spec`` (the query core of :meth:`linked`).
 
-        Shared by :meth:`linked` (which resolves the source lineage id first) and
+        Shared by :meth:`linked` (which resolves the source lineage id first),
         the fetched-row ``.links`` accessor (which already holds the lineage id
-        from the row's chunk). Targets are deduplicated by lineage and ordered by
-        first-link order; each is the latest revision of its target lineage.
+        from the row's chunk), and a link-set search output (which passes its
+        searcher's ``as_of``). Targets are deduplicated by lineage and ordered by
+        first-link order; each is the latest revision of its target lineage. When
+        ``as_of`` is given, both the link rows and each target's latest revision
+        are bounded by that cutoff — the same semantics the predicate path
+        applies to link rows and targets.
         """
         target_cls = spec.target
+        as_of_units = (
+            None if as_of is None else ns_operand_to_store_units(as_of, cast(int, self._store_timestamp_resolution))
+        )
         with self._read_connection() as connection:
             link_table = self._table(spec.table_name)
-            rows = connection.execute(
-                sqlalchemy.select(
-                    link_table.c[TARGET_LID_COLUMN],
-                    link_table.c[LOGICAL_ID_COLUMN],
-                    link_table.c[SID_COLUMN],
-                    link_table.c[RETRACTED_COLUMN],
-                ).where(link_table.c[SOURCE_LID_COLUMN] == source_lid)
-            ).all()
+            link_query = sqlalchemy.select(
+                link_table.c[TARGET_LID_COLUMN],
+                link_table.c[LOGICAL_ID_COLUMN],
+                link_table.c[SID_COLUMN],
+                link_table.c[RETRACTED_COLUMN],
+            ).where(link_table.c[SOURCE_LID_COLUMN] == source_lid)
+            if as_of_units is not None:
+                link_query = link_query.where(link_table.c[STORE_TIMESTAMP_COLUMN] <= as_of_units)
+            rows = connection.execute(link_query).all()
             # Latest revision per link lineage, then per target keep the smallest
             # live lineage root (first-link order); a target is live if any of
             # its lineages is live.
@@ -3522,11 +3532,12 @@ class SqlStore:
             target_table = self._table(resolve_schema(target_cls).table_name)
             target_sids: list[int] = []
             for target_lid in ordered_target_lids:
-                max_sid = connection.execute(
-                    sqlalchemy.select(sqlalchemy.func.max(target_table.c[SID_COLUMN])).where(
-                        target_table.c[LOGICAL_ID_COLUMN] == target_lid
-                    )
-                ).scalar_one_or_none()
+                max_sid_query = sqlalchemy.select(sqlalchemy.func.max(target_table.c[SID_COLUMN])).where(
+                    target_table.c[LOGICAL_ID_COLUMN] == target_lid
+                )
+                if as_of_units is not None:
+                    max_sid_query = max_sid_query.where(target_table.c[STORE_TIMESTAMP_COLUMN] <= as_of_units)
+                max_sid = connection.execute(max_sid_query).scalar_one_or_none()
                 if max_sid is not None:  # a None max is a dangling link; fsck reports it
                     target_sids.append(int(max_sid))
         return tuple(self.fetch_many(target_cls, target_sids, eager=eager))

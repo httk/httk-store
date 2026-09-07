@@ -2427,18 +2427,28 @@ class MongoStore:
         source_lid = self._lid_of(source_cls, source)
         return self._linked_by_lid(spec, source_lid)
 
-    def _linked_by_lid(self, spec: LinkSpec, source_lid: int) -> tuple[Any, ...]:
+    def _linked_by_lid(self, spec: LinkSpec, source_lid: int, *, as_of: object = None) -> tuple[Any, ...]:
         """Latest live-linked targets of ``source_lid`` under ``spec`` (the query core of :meth:`linked`).
 
-        Shared by :meth:`linked` (which resolves the source lineage id first) and
-        the fetched record's ``.links`` accessor (which already holds the lineage
-        id). Targets are deduplicated by lineage and ordered by first-link order;
-        each is the latest revision of its target lineage.
+        Shared by :meth:`linked` (which resolves the source lineage id first),
+        the fetched record's ``.links`` accessor (which already holds the
+        lineage id), and a link-set search output (which passes its searcher's
+        ``as_of``). Targets are deduplicated by lineage and ordered by
+        first-link order; each is the latest revision of its target lineage.
+        When ``as_of`` is given, both the link documents and each target's
+        latest revision are bounded by that cutoff — the same semantics the
+        predicate path applies to link rows and targets.
         """
+        as_of_units = (
+            None if as_of is None else ns_operand_to_store_units(as_of, cast(int, self._store_timestamp_resolution))
+        )
         collection = self._database.database[spec.table_name]
+        link_filter: dict[str, Any] = {"source_lid": source_lid}
+        if as_of_units is not None:
+            link_filter["store_timestamp"] = {"$lte": as_of_units}
         latest: dict[int, tuple[int, int, int]] = {}  # logical_id -> (sid, retracted, target_lid)
         for row in collection.find(
-            {"source_lid": source_lid},
+            link_filter,
             {"target_lid": 1, "logical_id": 1, "_id": 1, "retracted": 1},
             **self._session_kwargs(),
         ):
@@ -2467,8 +2477,11 @@ class MongoStore:
         target_collection = self._database.database[collection_name_for(target_schema)]
         target_sids: list[int] = []
         for target_lid in ordered_target_lids:
+            target_filter: dict[str, Any] = {"logical_id": target_lid}
+            if as_of_units is not None:
+                target_filter["store_timestamp"] = {"$lte": as_of_units}
             document = target_collection.find_one(
-                {"logical_id": target_lid},
+                target_filter,
                 {"_id": 1},
                 sort=[("_id", -1)],
                 **self._session_kwargs(),

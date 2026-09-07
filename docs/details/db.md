@@ -576,9 +576,18 @@ is null. Prefer `has_any()` or an explicit link-presence test when that
 distinction matters. Link and target aliases are **always**
 latest-filtered regardless of `only_latest` (that is what "weak" means), and
 `as_of` is honored on both the link rows and the targets — a link or target
-revision created after the cutoff is invisible. Projecting a result over a link
-path is rejected (`UnsupportedQueryError`), like variable-length child
-projections. Mongo limitation: `v.links.<name> == <target search variable>`
+revision created after the cutoff is invisible. A bare `v.links.<name>` is also
+usable as a `results()` **output**: it yields a tuple of the latest live-linked
+targets per row, deduplicated by lineage and ordered by first-link order (the
+same targets `store.linked()` returns), honoring `as_of` exactly like the
+predicate form — a link or target revision created after the cutoff is absent
+from the tuple. Declaring the output registers no join/lookup by itself (only
+predicate use of a link set does); the resolution cost is one `linked()`-style
+resolution per matched row, in addition to any query the link's own
+predicates already run. Chaining into a target field before projecting it
+(`results(x=v.links.<name>.<field>)`) stays rejected (`UnsupportedQueryError`),
+like variable-length child projections — only the bare link set is a valid
+output. Mongo limitation: `v.links.<name> == <target search variable>`
 raises `UnsupportedQueryError`; a stored-object RHS works.
 
 **Serving.** Only links declared `exposed_relationship=True` whose target class

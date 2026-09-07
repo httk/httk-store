@@ -363,6 +363,10 @@ class SqlResultSet:
         output = state._plan._outputs[index]
         assert state._rows is not None
         value = state._rows[position][index]
+        if output.link is not None:
+            if value is None:
+                return ()
+            return state._plan._store._linked_by_lid(output.link, int(value), as_of=state._plan._as_of)
         if output.target is not None:
             if value is None:
                 return None
@@ -462,14 +466,19 @@ class SqlResultSet:
         :param name: The declared scalar projection name.
         :return: The selected result column.
         :raises KeyError: If ``name`` is not declared.
-        :raises TypeError: If ``name`` names an object projection.
+        :raises TypeError: If ``name`` names an object or weak-link-set output.
         """
-        scalar_names = tuple(output.name for output in self._plan._outputs if output.target is None)
+        scalar_names = tuple(
+            output.name for output in self._plan._outputs if output.target is None and output.link is None
+        )
         if name not in self.names:
             raise KeyError(f"unknown column {name!r}; declared scalar projections: {scalar_names}")
         index = self.names.index(name)
-        if self._plan._outputs[index].target is not None:
+        output = self._plan._outputs[index]
+        if output.target is not None:
             raise TypeError(f"column {name!r} is an object output; declared scalar projections: {scalar_names}")
+        if output.link is not None:
+            raise TypeError(f"column {name!r} is a weak-link-set output; declared scalar projections: {scalar_names}")
         return ResultColumn(self, index)
 
     def page(
@@ -588,6 +597,8 @@ class SqlResultSet:
             _index, output = matching[0]
             if output.target is not None:
                 raise UnsupportedQueryError(f"paging order {order.name!r} is an object projection, not a scalar")
+            if output.link is not None:
+                raise UnsupportedQueryError(f"paging order {order.name!r} is a weak-link-set output, not a scalar")
             if output.from_child or output.variable is not root:
                 raise UnsupportedQueryError(
                     f"paging order {order.name!r} must be a scalar projection of the root query variable"
@@ -772,6 +783,7 @@ class SqlResultSet:
                     "child": output.from_child,
                     "field": None if output.spec is None else output.spec.field,
                     "role": None if output.spec is None else output.spec.role,
+                    **({"link": output.link.name} if output.link is not None else {}),
                 }
                 for output in self._plan._outputs
             ],

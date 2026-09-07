@@ -23,7 +23,15 @@ from httk.store.query.paging_tokens import (
     _validate_anchor_types,
 )
 
-from .searcher import MongoField, MongoSearcher, MongoVariable, _MongoOutput, _scalar_value, _variable_document
+from .searcher import (
+    MongoField,
+    MongoSearcher,
+    MongoVariable,
+    _MongoOutput,
+    _resolve_link_output,
+    _scalar_value,
+    _variable_document,
+)
 from .store import _DOCUMENT_LAYOUT
 
 __all__ = ["MongoResultSet"]
@@ -147,7 +155,10 @@ class MongoResultSet:
         if name not in self.names:
             raise KeyError(f"unknown output {name!r}; declared: {self.names}")
         index = self.names.index(name)
-        if isinstance(self._outputs[index].value, MongoVariable):
+        output = self._outputs[index]
+        if output.link is not None:
+            raise TypeError(f"column {name!r} is a weak-link-set output")
+        if isinstance(output.value, MongoVariable):
             raise TypeError(f"column {name!r} is an object output")
         return self.scalars(name)
 
@@ -231,6 +242,8 @@ class MongoResultSet:
             if len(matching) > 1:
                 raise UnsupportedQueryError(f"paging order {order.name!r} names duplicate result projections")
             _index, output = matching[0]
+            if output.link is not None:
+                raise UnsupportedQueryError(f"paging order {order.name!r} is a weak-link-set output, not a scalar")
             if isinstance(output.value, MongoVariable):
                 raise UnsupportedQueryError(f"paging order {order.name!r} is an object projection, not a scalar")
             field = output.value
@@ -425,6 +438,7 @@ class MongoResultSet:
                     else output.value._variable is root,
                     "path": None if isinstance(output.value, MongoVariable) else output.value._path,
                     "role": None if isinstance(output.value, MongoVariable) else output.value._spec.role,
+                    **({"link": output.link} if output.link is not None else {}),
                 }
                 for output in self._outputs
             ],
@@ -482,7 +496,9 @@ class MongoResultSet:
         """Decode this result set's declared outputs from one candidate document."""
         values: list[Any] = []
         for output in self._outputs:
-            if isinstance(output.value, MongoVariable):
+            if output.link is not None:
+                values.append(_resolve_link_output(self._plan._store, document, output, self._plan._as_of))
+            elif isinstance(output.value, MongoVariable):
                 source = _variable_document(document, output.value)
                 values.append(
                     None if source is None else self._plan._store.fetch(output.value._cls, int(source["_id"]))

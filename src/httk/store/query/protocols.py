@@ -384,6 +384,10 @@ class SearchVariable(Protocol):
     They exist so a translation layer can express a constant truth value
     without inventing a probe field. A ``field == field`` probe is NULL-unsound,
     since it yields NULL (not true) for a NULL field.
+
+    ``links.<name>`` is a reserved relationship namespace: usable as a
+    predicate root (``v.links.p == other``, field chaining, set operations)
+    and, on its own, as a set-valued :meth:`Searcher.output`.
     """
 
     def always_true(self) -> SearchExpression:
@@ -404,7 +408,8 @@ class SearchResult(NamedTuple):
 
     ``values`` holds one entry per :meth:`Searcher.output` call in declaration
     order; it is a tuple, so ``values, names = result`` and ``result[0][0]``
-    both work.
+    both work. A relationship-namespace output yields a tuple of related
+    records for that entry, rather than a single value.
     """
 
     values: tuple[Any, ...]
@@ -429,7 +434,12 @@ class Searcher(Protocol):
         ...
 
     def output(self, variable: Any, name: str) -> None:
-        """Declare ``variable`` as a named result output."""
+        """Declare ``variable`` as a named result output.
+
+        A relationship-namespace value (``v.links.<name>``, not chained
+        further) is a set-valued output: it yields a tuple of related records
+        per row, resolved after the query, rather than a single value.
+        """
         ...
 
     def add(self, expression: Any) -> None:

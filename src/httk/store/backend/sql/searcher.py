@@ -644,14 +644,18 @@ class SqlLinks:
 class SqlLinkSet:
     """One weak-link traversal from a search variable to the latest live-linked targets.
 
-    Construction LEFT OUTER JOINs a fresh alias of the link table onto the
-    parent variable, its onclause selecting the source's live, latest-of-lineage
-    link rows (``source_lid == parent.logical_id AND retracted == 0 AND
+    Construction registers nothing: the alias, its LEFT OUTER JOIN onto the
+    parent variable, and the searcher's grouped mode are created lazily by
+    ``_join()``, on first use as a predicate operand — so a link set used
+    only as a set-valued ``results()`` output (resolved after the query, from
+    the parent's own ``logical_id``) never joins or groups the query. Once
+    joined, the onclause selects the source's live, latest-of-lineage link
+    rows (``source_lid == parent.logical_id AND retracted == 0 AND
     latest-of-lineage`` — plus the candidate-row ``as_of`` cutoff in the
     onclause, never in WHERE, so no-link LEFT JOIN rows survive for vacuous-truth
-    forms), and switches the searcher into grouped mode. All link and target
-    aliases are *always* latest-filtered: that is what "weak" means, and it is
-    orthogonal to the root-variable ``only_latest`` concern.
+    forms). All link and target aliases are *always* latest-filtered: that is
+    what "weak" means, and it is orthogonal to the root-variable ``only_latest``
+    concern.
 
     Identity comparisons (``== stored_object`` / ``== target_variable``,
     :meth:`has_any`, :meth:`has_only`) run over the link row's ``target_lid``
@@ -666,11 +670,24 @@ class SqlLinkSet:
     def __init__(self, variable: "SqlVariable", spec: LinkSpec) -> None:
         self._variable = variable
         self._spec = spec
-        searcher = variable._searcher
-        self._searcher = searcher
-        link_table = searcher._store._table(spec.table_name)
+        self._searcher = variable._searcher
+        self._alias: sqlalchemy.FromClause | None = None
+
+    def _join(self) -> sqlalchemy.FromClause:
+        """Register this link's LEFT OUTER JOIN and grouped mode, once.
+
+        Idempotent, and called from every predicate entry point before the
+        alias is used — so a link set that is only ever declared as a
+        ``results()`` output (never predicated) registers no join at all.
+
+        :return: The (possibly freshly created) link table alias.
+        """
+        if self._alias is not None:
+            return self._alias
+        variable = self._variable
+        searcher = self._searcher
+        link_table = searcher._store._table(self._spec.table_name)
         alias = link_table.alias()
-        self._alias = alias
         conds: list[sqlalchemy.ColumnElement[bool]] = [
             _bool_clause(alias.c[SOURCE_LID_COLUMN] == variable._alias.c[LOGICAL_ID_COLUMN]),
             _bool_clause(alias.c[RETRACTED_COLUMN] == 0),
@@ -679,7 +696,13 @@ class SqlLinkSet:
         self._append_as_of(conds, alias)
         variable._joins.append((alias, _bool_clause(sqlalchemy.and_(*conds)), None))
         searcher._grouped = True
-        self._target_column = SqlColumn(searcher, alias.c[TARGET_LID_COLUMN], from_child=True, link_path=True)
+        self._alias = alias
+        return alias
+
+    @property
+    def _target_column(self) -> "SqlColumn":
+        alias = self._join()
+        return SqlColumn(self._searcher, alias.c[TARGET_LID_COLUMN], from_child=True, link_path=True)
 
     def _append_as_of(self, conds: list[sqlalchemy.ColumnElement[bool]], alias: sqlalchemy.FromClause) -> None:
         """Add the candidate-row ``store_timestamp <= as_of`` cutoff to a join onclause, if set."""
@@ -720,7 +743,8 @@ class SqlLinkSet:
 
     def __eq__(self, other: object) -> SqlExpression:  # type: ignore[override]
         """Match sources with a live linked target whose lineage equals ``other``."""
-        return self._target_column._plain(self._target_column._element == self._operand(other))
+        target_column = self._target_column
+        return target_column._plain(target_column._element == self._operand(other))
 
     def __ne__(self, other: object) -> SqlExpression:  # type: ignore[override]
         """Match sources with no live linked target whose lineage equals ``other`` (set-wise)."""
@@ -776,10 +800,11 @@ class SqlLinkSet:
                 f"children, tensors, or nested links of a weak-link target is not supported)"
             )
         searcher = self._searcher
+        link_alias = self._join()  # the link join must precede the target join in the flat list
         target_table = searcher._store._table(target_schema.table_name)
         target_alias = target_table.alias()
         conds: list[sqlalchemy.ColumnElement[bool]] = [
-            _bool_clause(target_alias.c[LOGICAL_ID_COLUMN] == self._alias.c[TARGET_LID_COLUMN]),
+            _bool_clause(target_alias.c[LOGICAL_ID_COLUMN] == link_alias.c[TARGET_LID_COLUMN]),
             searcher._latest_of_lineage_in(target_table, target_alias).where_clause,
         ]
         self._append_as_of(conds, target_alias)
@@ -969,7 +994,13 @@ class SqlVariable:
 
 @dataclasses.dataclass(frozen=True)
 class _Output:
-    """One declared output and its exact reconstruction projection."""
+    """One declared output and its exact reconstruction projection.
+
+    ``link`` is set only for a weak-link-set output: ``element`` then projects
+    the source variable's own ``logical_id`` (never a joined column), and
+    ``target`` stays ``None`` — resolution happens after the query, through
+    :meth:`~httk.store.backend.sql.store.SqlStore._linked_by_lid`.
+    """
 
     name: str
     element: sqlalchemy.ColumnElement[Any]
@@ -981,6 +1012,7 @@ class _Output:
     codec: ValueCodec | None = None
     decoder: Any = None
     presentation_converter: Callable[[object], object] | None = None
+    link: LinkSpec | None = None
 
 
 class SqlSearcher:
@@ -1093,15 +1125,34 @@ class SqlSearcher:
         subquery = sqlalchemy.select(sqlalchemy.literal(1)).select_from(newer).where(*conds).correlate(alias)
         return _same(~subquery.exists())
 
-    def output(self, variable: "SqlVariable | SqlColumn", name: str) -> None:
-        """Append an output for a reconstructed instance or raw column value.
+    def output(self, variable: "SqlVariable | SqlColumn | SqlLinkSet", name: str) -> None:
+        """Append an output for a reconstructed instance, a raw column value, or a link set.
 
-        :param variable: The query variable or column to project.
+        A weak-link-set output (a bare ``v.links.<name>``) yields a tuple of
+        the latest live-linked targets per row, resolved after the query from
+        the source row's own logical id; it registers no join, unlike
+        predicate use of the same link set. Chaining into a target field
+        (``v.links.<name>.<field>``) is a variable-length set predicate, not a
+        projectable value, and stays rejected.
+
+        :param variable: The query variable, column, or link set to project.
         :param name: The name exposed for the projected value.
         :return: None.
-        :raises TypeError: If ``variable`` is neither a query variable nor a query column.
+        :raises TypeError: If ``variable`` is none of a query variable, a query column, or a link set.
+        :raises httk.store.query.protocols.UnsupportedQueryError: If ``variable`` chains into a link target field.
         """
-        if isinstance(variable, SqlVariable):
+        if isinstance(variable, SqlLinkSet):
+            self._outputs.append(
+                _Output(
+                    name,
+                    variable._variable._alias.c[LOGICAL_ID_COLUMN],
+                    None,
+                    False,
+                    variable=variable._variable,
+                    link=variable._spec,
+                )
+            )
+        elif isinstance(variable, SqlVariable):
             self._outputs.append(_Output(name, variable._alias.c[SID_COLUMN], variable._cls, False))
         elif isinstance(variable, SqlColumn):
             if variable._link_path:
@@ -1148,7 +1199,9 @@ class SqlSearcher:
                 )
             )
         else:
-            raise TypeError(f"output() takes a search variable or a search column, got {type(variable).__name__}")
+            raise TypeError(
+                f"output() takes a search variable, a search column, or a link set, got {type(variable).__name__}"
+            )
 
     def add(self, expression: SqlExpression) -> None:
         """Add a condition; all added conditions must hold.
@@ -1363,7 +1416,13 @@ class SqlSearcher:
             for row in rows:
                 values: list[Any] = []
                 for index, (output, value) in enumerate(zip(self._outputs, row, strict=True)):
-                    if output.target is None:
+                    if output.link is not None:
+                        values.append(
+                            ()
+                            if value is None
+                            else self._store._linked_by_lid(output.link, int(value), as_of=self._as_of)
+                        )
+                    elif output.target is None:
                         values.append(
                             output.presentation_converter(value) if output.presentation_converter is not None else value
                         )

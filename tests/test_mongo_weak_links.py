@@ -755,3 +755,176 @@ def test_reopen_mark_reflects_a_link_as_the_newest_event(mongo_test_database):
     reopened = _store(mongo_test_database)  # fresh handle recomputes the mark from present collections
     # The link's timestamp (newer than any record) advances the reopen clock-regression mark.
     assert reopened._store_timestamp_mark == link_ts
+
+
+# =========================================================================== #
+# Link-set outputs — a bare v.links.<name> as a set-valued results() output.
+# =========================================================================== #
+
+
+def test_output_only_link_set_registers_no_lookup(mongo_test_database):
+    store = _store(mongo_test_database)
+    store.save(Result("R"))
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    searcher.output(v.links.projects, "projects")
+    assert searcher._link_lookups == []
+
+
+def test_link_set_output_without_outputting_source_variable(mongo_test_database):
+    store = _store(mongo_test_database)
+    p = Project("P")
+    store.save(p)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    (row,) = list(searcher.results(projects=v.links.projects))
+    assert _names(row.projects) == ["P"]
+
+
+def test_link_set_output_is_empty_tuple_for_an_unlinked_source(mongo_test_database):
+    store = _store(mongo_test_database)
+    store.save(Result("R"))
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    (row,) = list(searcher.results(label=v.label, projects=v.links.projects))
+    assert row.projects == ()
+
+
+def test_link_set_output_yields_distinct_targets_per_row_in_first_link_order(mongo_test_database):
+    store = _store(mongo_test_database)
+    p1, p2, p3 = Project("P1"), Project("P2"), Project("P3")
+    for p in (p1, p2, p3):
+        store.save(p)
+    r1 = Result("R1")
+    store.save(r1)
+    store.link(r1, "projects", p2)
+    store.link(r1, "projects", p1)
+    r2 = Result("R2")
+    store.save(r2)
+    store.link(r2, "projects", p3)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    by_label = {row.label: row.projects for row in searcher.results(label=v.label, projects=v.links.projects)}
+    assert [p.name for p in by_label["R1"]] == ["P2", "P1"]
+    assert [p.name for p in by_label["R2"]] == ["P3"]
+
+
+def test_link_set_output_combined_with_a_predicate_on_the_same_link_name(mongo_test_database):
+    store = _store(mongo_test_database)
+    p1, p2 = Project("P1"), Project("P2")
+    store.save(p1)
+    store.save(p2)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p1)
+    store.link(r, "projects", p2)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    searcher.add(v.links.projects == p1)  # a fresh link-set predicate registers its own $lookup
+    (row,) = list(searcher.results(projects=v.links.projects))  # a separate, output-only link set
+    assert _names(row.projects) == ["P1", "P2"]  # the output reflects every live link, not just the predicate match
+
+
+def test_link_set_output_saved_and_searched_in_the_same_store(mongo_test_database):
+    """The identity cache would hand back a plain (no ``.links``) instance; the output never uses it."""
+    store = _store(mongo_test_database)
+    p = Project("P")
+    store.save(p)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    (row,) = list(searcher.results(item=v, projects=v.links.projects))
+    assert type(row.item) is Result  # the identity-cached plain instance, with no .links
+    assert _names(row.projects) == ["P"]
+
+
+def test_link_set_output_chained_field_projection_still_rejected(mongo_test_database):
+    store = _store(mongo_test_database)
+    p = Project("P")
+    store.save(p)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    with pytest.raises(UnsupportedQueryError, match="weak-link path"):
+        searcher.results(pname=v.links.projects.name)
+
+
+def test_link_set_output_honors_as_of(mongo_test_database):
+    store = _store(mongo_test_database)
+    store._clock = lambda: 1_000_000
+    p1 = Project("P1")
+    store.save(p1)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p1)  # live as of 1M
+
+    store._clock = lambda: 3_000_000
+    p2 = Project("P2")
+    store.save(p2)
+    store.link(r, "projects", p2)  # created after the 2M cutoff
+
+    past = store.searcher(as_of=2_000_000)
+    pv = past.variable(Result)
+    (past_row,) = list(past.results(projects=pv.links.projects))
+    assert _names(past_row.projects) == ["P1"]
+
+    now = store.searcher()
+    nv = now.variable(Result)
+    (now_row,) = list(now.results(projects=nv.links.projects))
+    assert _names(now_row.projects) == ["P1", "P2"]
+
+
+def test_link_set_output_works_with_page(mongo_test_database):
+    from httk.store import PageOrder
+
+    store = _store(mongo_test_database)
+    p = Project("P")
+    store.save(p)
+    r = Result("R")
+    store.save(r)
+    store.link(r, "projects", p)
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    result = searcher.results(label=v.label, projects=v.links.projects)
+    page = result.page(size=10, order_by=(PageOrder("label"),))
+    assert len(page.rows) == 1
+    assert _names(page.rows[0].projects) == ["P"]
+
+
+def test_page_order_by_link_set_output_is_rejected(mongo_test_database):
+    from httk.store import PageOrder
+
+    store = _store(mongo_test_database)
+    store.save(Result("R"))
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    result = searcher.results(label=v.label, projects=v.links.projects)
+    with pytest.raises(UnsupportedQueryError, match="weak-link-set output"):
+        result.page(size=10, order_by=(PageOrder("projects"),))
+
+
+def test_column_over_a_link_set_output_is_rejected(mongo_test_database):
+    store = _store(mongo_test_database)
+    store.save(Result("R"))
+
+    searcher = store.searcher()
+    v = searcher.variable(Result)
+    result = searcher.results(label=v.label, projects=v.links.projects)
+    with pytest.raises(TypeError, match="weak-link-set output"):
+        result.column("projects")

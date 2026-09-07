@@ -479,14 +479,25 @@ class FederatedResultSet:
         :param name: The scalar projection name.
         :return: A lazy column view over the projection.
         :raises KeyError: If ``name`` is not a declared output.
-        :raises TypeError: If ``name`` identifies an object output.
+        :raises TypeError: If ``name`` identifies an object or weak-link-set output.
         """
-        scalar_names = tuple(output.name for output in self._plan.outputs if not isinstance(output, _RecordOutput))
+
+        def _is_link_output(output: _FederatedOutput) -> bool:
+            return isinstance(output, _FieldOutput) and output.path[:1] == ("links",)
+
+        scalar_names = tuple(
+            output.name
+            for output in self._plan.outputs
+            if not isinstance(output, _RecordOutput) and not _is_link_output(output)
+        )
         if name not in self.names:
             raise KeyError(f"unknown column {name!r}; declared scalar projections: {scalar_names}")
         index = self.names.index(name)
-        if isinstance(self._plan.outputs[index], _RecordOutput):
+        output = self._plan.outputs[index]
+        if isinstance(output, _RecordOutput):
             raise TypeError(f"column {name!r} is an object output; declared scalar projections: {scalar_names}")
+        if _is_link_output(output):
+            raise TypeError(f"column {name!r} is a weak-link-set output; declared scalar projections: {scalar_names}")
         return FederatedResultColumn(self, index)
 
     def cursor(self) -> Iterator[ResultRow]:

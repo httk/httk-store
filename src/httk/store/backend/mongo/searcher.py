@@ -735,13 +735,17 @@ class MongoLinks:
 class MongoLinkSet:
     """One weak-link traversal from a query variable to the latest live-linked targets.
 
-    Construction registers a ``$lookup`` that leaves each source document carrying
-    an array field (``_httk_link_<n>``) of its live, latest-of-lineage link
-    elements, each embedding the latest revision of its target lineage as
-    ``_httk_target`` (bounded by ``as_of`` when set). The array is deliberately
-    **not** ``$unwind``-ed — that would multiply source documents and break
-    grouped multiplicity and count(); predicates are no-unwind ``$elemMatch``
-    array predicates instead (see :class:`LinkPredicateNode`).
+    Construction registers nothing: the ``$lookup`` that leaves each source
+    document carrying an array field (``_httk_link_<n>``) of its live,
+    latest-of-lineage link elements, each embedding the latest revision of its
+    target lineage as ``_httk_target`` (bounded by ``as_of`` when set), is
+    appended lazily by ``_register()`` on first use as a predicate operand —
+    so a link set used only as a set-valued ``results()`` output (resolved
+    after the query, from the parent document's own ``logical_id``) never adds
+    a ``$lookup`` stage. The array is deliberately **not** ``$unwind``-ed once
+    registered — that would multiply source documents and break grouped
+    multiplicity and count(); predicates are no-unwind ``$elemMatch`` array
+    predicates instead (see :class:`LinkPredicateNode`).
 
     Identity comparisons (``== stored_object``, :meth:`has_any`, :meth:`has_only`)
     run over each element's ``target_lid``; attribute access chains into a scalar
@@ -751,7 +755,7 @@ class MongoLinkSet:
     :param spec: The resolved weak-link declaration.
     """
 
-    __slots__ = ("_path", "_searcher", "_spec", "_variable")
+    __slots__ = ("_path", "_registered", "_searcher", "_spec", "_variable")
 
     def __init__(self, variable: "MongoVariable", spec: LinkSpec) -> None:
         self._variable = variable
@@ -759,7 +763,19 @@ class MongoLinkSet:
         searcher = variable._searcher
         self._searcher = searcher
         self._path = f"_httk_link_{searcher._next_link_index()}"
-        searcher._link_lookups.append(self._build_lookup_stage())
+        self._registered = False
+
+    def _register(self) -> None:
+        """Append this link's ``$lookup`` stage once, on first predicate use.
+
+        ``_link_lookups`` is consumed only at :meth:`MongoSearcher._pipeline`,
+        so a late append (from a predicate built after other stages exist) is
+        order-safe.
+        """
+        if self._registered:
+            return
+        self._registered = True
+        self._searcher._link_lookups.append(self._build_lookup_stage())
 
     def _as_of_units(self) -> int | None:
         if self._searcher._as_of is None:
@@ -861,10 +877,12 @@ class MongoLinkSet:
 
     def _has_any_lids(self, lids: list[int]) -> MongoExpression:
         """Match a source with a live linked target among ``lids`` (the node :meth:`has_any` emits)."""
+        self._register()
         return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$in": lids}}, False))
 
     def _has_only_lids(self, lids: list[int]) -> MongoExpression:
         """Require every live linked target among ``lids`` (the node :meth:`has_only` emits)."""
+        self._register()
         return MongoExpression(LinkPredicateNode(self._path, {"target_lid": {"$nin": lids}}, True))
 
     def __eq__(self, other: object) -> MongoExpression:  # type: ignore[override]
@@ -924,6 +942,7 @@ class MongoLinkSet:
                 f"{self._spec.target.__name__}.{name} is a {spec.role} field (chaining through references, "
                 f"children, tensors, or nested links of a weak-link target is not supported)"
             )
+        self._register()
         return MongoLinkField(self, spec)
 
 
@@ -1117,10 +1136,16 @@ class MongoVariable:
 
 @dataclass(frozen=True, slots=True)
 class _MongoOutput:
-    """One object or scalar projection in a frozen Mongo result plan."""
+    """One object, scalar, or weak-link-set projection in a frozen Mongo result plan.
+
+    ``link`` is set only for a weak-link-set output: ``value`` is then the
+    *source* variable (never a target), and resolution happens after the
+    query, through :func:`_resolve_link_output`.
+    """
 
     name: str
     value: MongoVariable | MongoField
+    link: str | None = None
 
 
 class MongoSearcher:
@@ -1234,8 +1259,18 @@ class MongoSearcher:
             self.add(cast(MongoField, variable.store_timestamp) <= self._as_of)
         return variable
 
-    def output(self, variable: MongoVariable | MongoField, name: str) -> None:
-        """Declare an object variable or scalar field output."""
+    def output(self, variable: "MongoVariable | MongoField | MongoLinkSet", name: str) -> None:
+        """Declare an object variable, scalar field, or weak-link-set output.
+
+        A weak-link-set output (a bare ``v.links.<name>``) yields a tuple of
+        the latest live-linked targets per row, resolved after the query from
+        the source document's own ``logical_id``; it registers no ``$lookup``,
+        unlike predicate use of the same link set. Chaining into a target
+        field (``v.links.<name>.<field>``) stays rejected.
+        """
+        if isinstance(variable, MongoLinkSet):
+            self._outputs.append(_MongoOutput(name, variable._variable, link=variable._spec.name))
+            return
         _reject_link_output(variable)
         if not isinstance(variable, (MongoVariable, MongoField)):
             raise TypeError(f"output() takes a Mongo variable or field, got {type(variable).__name__}")
@@ -1557,7 +1592,9 @@ class MongoSearcher:
         for document in documents:
             row: list[Any] = []
             for output in chosen:
-                if isinstance(output.value, MongoVariable):
+                if output.link is not None:
+                    row.append(_resolve_link_output(self._store, document, output, self._as_of))
+                elif isinstance(output.value, MongoVariable):
                     object_document = _variable_document(document, output.value)
                     if object_document is None:
                         row.append(None)
@@ -1575,9 +1612,15 @@ class MongoSearcher:
 
     def results(self, **outputs: Any) -> Any:
         """Return a materialized :class:`~httk.store.backend.mongo.results.MongoResultSet` for this query."""
-        for value in outputs.values():
-            _reject_link_output(value)
-        selected = [_MongoOutput(name, value) for name, value in outputs.items()] if outputs else None
+        selected: list[_MongoOutput] | None = None
+        if outputs:
+            selected = []
+            for name, value in outputs.items():
+                if isinstance(value, MongoLinkSet):
+                    selected.append(_MongoOutput(name, value._variable, link=value._spec.name))
+                    continue
+                _reject_link_output(value)
+                selected.append(_MongoOutput(name, value))
         return __import__("httk.store.backend.mongo.results", fromlist=["MongoResultSet"]).MongoResultSet(
             self, selected
         )
@@ -1607,6 +1650,32 @@ def _variable_document(document: dict[str, Any], variable: MongoVariable) -> dic
         return document
     value = document.get(variable._alias)
     return value if isinstance(value, dict) else None
+
+
+def _resolve_link_output(
+    store: "MongoStore", document: dict[str, Any], output: "_MongoOutput", as_of: object
+) -> tuple[Any, ...]:
+    """Resolve one weak-link-set search output for a matched document.
+
+    Never goes through ``record.links``: the identity cache returns the
+    user's plain saved instance for a same-store save-then-search, and a
+    plain instance carries no ``.links``. Instead, this reads the source
+    document's own ``logical_id`` and resolves the link set the same way
+    :meth:`MongoStore.linked` does, honouring the searcher's ``as_of``.
+
+    :param store: The store whose link table and targets are queried.
+    :param document: The matched aggregation document.
+    :param output: The declared weak-link-set output (``output.link`` set, ``output.value`` the source variable).
+    :param as_of: The searcher's historic cutoff, or ``None``.
+    :return: The live-linked targets' latest revisions, or ``()`` when the source variable did not match.
+    """
+    assert isinstance(output.value, MongoVariable)
+    assert output.link is not None
+    source = _variable_document(document, output.value)
+    if source is None:
+        return ()
+    spec = store._link_spec(output.value._cls, output.link)
+    return store._linked_by_lid(spec, int(source["logical_id"]), as_of=as_of)
 
 
 def _scalar_value(document: dict[str, Any], field: MongoField) -> Any:

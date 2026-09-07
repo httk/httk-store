@@ -18,8 +18,8 @@ A search is built, not written. Four calls do everything:
   `&`, `|` and `~` combine them. Several `add()` calls are ANDed.
 
 `output(variable_or_field, name)`
-: Declare what a match yields — the whole reconstructed object, or one field.
-  Declaration order is result order.
+: Declare what a match yields — the whole reconstructed object, one field, or a
+  weak-link set (see below). Declaration order is result order.
 
 iteration / `count()`
 : Run it. Iterating yields one `SearchResult` per match; `count()` returns how
@@ -52,6 +52,22 @@ about a *set* of rows, and the DSL says which one you mean:
 
 `has_any(a) & has_any(b)` is the "HAS ALL" pattern, and works because each
 access to a child field mints an independent join.
+
+## Weak links
+
+Weak links are store-managed associations between record lineages, declared in
+`StorageInfo.links` on the source class and reached through a `links` namespace:
+
+- `v.links.<name>.<field> == value` chains into the linked target as a set
+  predicate, exactly like a child field; `~`, `has_any` and `has_only` behave
+  set-wise, and each access mints an independent join.
+- `v.links.<name>` on its own is a set-valued output:
+  `results(projects=v.links.projects)` yields, per matched row, a tuple of the
+  currently linked targets (latest revision, first-link order), resolved after
+  the query and honouring `as_of`. Chaining a field onto a link *output* stays
+  rejected — that is a set predicate, not a projectable value.
+
+The full weak-link contract is in the versioned database guide.
 
 ## Results
 

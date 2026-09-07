@@ -156,7 +156,8 @@ class _Chunk:
             if exact is None:
                 return None
             assert spec.shape is not None
-            # The float columns are query-only; exact text is the round-trip source.
+            # Exact text is the round-trip source; the float columns are query-only here
+            # (a lazy row's ``_httk_stored_floats`` reads them directly, without decoding).
             return decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols)
         if spec.role == "reference":
             target_sid = row[self.columns[spec.columns[0].name]]
@@ -463,6 +464,37 @@ def _row_decode(self: Any, spec: FieldSpec, *, eager: bool = False) -> Any:
     return chunk.value(self.__dict__[_ROW_SID], spec, eager=eager)
 
 
+def _row_stored_floats(self: Any, field: str) -> list[list[float]] | None:
+    """Return a lazy row's stored float companions for a child field, or ``None``.
+
+    :param self: The lazy row.
+    :param field: The child field's name.
+    :return: One inner list per child row in index order, holding the row's float columns (every
+        element column except the trailing ``{field}_exact``). ``None`` when the instance has no
+        loaded chunk (a ``replace()``-created row), when ``field`` is not a child field with an
+        exact column, or when an optional child field is absent. Nothing is decoded; the values
+        are the documented approximate companions written beside the exact text.
+    """
+    chunk = self.__dict__.get(_ROW_CHUNK)
+    if chunk is None:
+        return None
+    sid = self.__dict__[_ROW_SID]
+    spec = next((candidate for candidate in chunk.hydrator._schema.fields if candidate.field == field), None)
+    if spec is None or spec.role != "child" or spec.child is None:
+        return None
+    names = [column.name for column in spec.child.element_columns]
+    if not names or names[-1] != f"{field}_exact":
+        return None
+    float_names = names[:-1]
+    if chunk.parent_token is not None or chunk.child_tokens:
+        chunk._check_live(sid, field)
+    if spec.optional and not chunk.parent_rows[sid][chunk.columns[f"{field}_present"]]:
+        return None
+    grouped, columns = chunk._child_rows(spec)
+    indices = [columns[name] for name in float_names]
+    return [[row[i] for i in indices] for row in grouped.get(sid, [])]
+
+
 @functools.cache
 def row_class(cls: type) -> type:
     """Return the cached lazy subclass for a frozen storable dataclass.
@@ -470,6 +502,10 @@ def row_class(cls: type) -> type:
     :param cls: The frozen storable dataclass to proxy.
     :return: The cached lazy row subclass.
     :raises httk.store.backend.schema.SchemaError: If the class uses unsupported slots or custom equality or hashing.
+
+    A lazy row also carries ``_httk_stored_floats(field)``, discovered by other packages with
+    ``getattr(record, "_httk_stored_floats", None)`` to read a child field's stored float columns
+    without decoding its exact text.
     """
     if "__slots__" in cls.__dict__:
         raise SchemaError(f"{cls.__name__}: lazy storage rows do not support slots dataclasses")
@@ -523,6 +559,7 @@ def row_class(cls: type) -> type:
         "sid": property(sid),
         "links": _LinksDescriptor(),
         "_httk_decode": _row_decode,
+        "_httk_stored_floats": _row_stored_floats,
         "__copy__": lambda self: _reject_copy("copy.copy"),
         "__deepcopy__": lambda self, memo: _reject_copy("copy.deepcopy"),
         "__reduce_ex__": lambda self, protocol: _reject_copy("pickle"),

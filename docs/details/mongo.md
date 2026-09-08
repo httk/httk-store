@@ -80,7 +80,7 @@ multi-document transactional deployment.
 ## Declaring records and opening a store
 
 Record declarations are the same non-intrusive frozen-dataclass declarations
-described in [Backend storage](db.md#declaring-a-storable-class). The Mongo
+described in [Backend storage](db-records.md#declaring-a-storable-class). The Mongo
 backend persists the logical entry-family declaration in its metadata
 collection. On the first open, pass `entry_records`; later opens validate the
 persisted declaration rather than silently changing it:
@@ -93,13 +93,13 @@ store = MongoStore(
 ```
 
 Beyond the declaration, reopen also verifies the same per-table
-[schema fingerprint](db.md#vocabulary) as `SqlStore`: a record
+[schema fingerprint](db-schema.md#vocabulary) as `SqlStore`: a record
 class whose resolved on-disk shape or content identity changed since creation is
 rejected up front with `StorageLayoutUpgradeRequiredError`, whose diff names the
 offending collections (`{"schema": {collection: {"expected", "actual"}}}`).
 `MongoStore(database, ..., upgrade=True)` applies a purely additive change under
 the same rule as
-[`SqlStore`](db.md#applying-a-purely-additive-change-with-upgradetrue) — new
+[`SqlStore`](db-schema.md#applying-a-purely-additive-change-with-upgradetrue) — new
 tables plus new non-child, non-derived, `IdentitySkip` fields whose columns are
 all nullable. Documents are schemaless, so the apply is only the fingerprint
 re-stamp (done last, after every other check passes, since Mongo has no
@@ -111,13 +111,13 @@ is exactly additive.
 Application-private families can instead use the same explicit
 `EntryFamilyDeclaration`/`EntryRecordDeclaration` and `entry_families=` API as
 `SqlStore`. Such declarations bypass global discovery and must be supplied
-again on every reopen; see [Vocabulary](db.md#vocabulary) for the complete
+again on every reopen; see [Vocabulary](db-schema.md#vocabulary) for the complete
 example and binding rules.
 
 The document layout is backend-specific, while the vocabulary of entry
 families, records, content ids, sids, projections, and stored properties is
-shared with the SQL layer. See [Vocabulary](db.md#vocabulary) for those
-concepts and [Declaring a storable class](db.md#declaring-a-storable-class)
+shared with the SQL layer. See [Vocabulary](db-schema.md#vocabulary) for those
+concepts and [Declaring a storable class](db-records.md#declaring-a-storable-class)
 for the marker and schema rules. MongoDB sids are integers allocated from a
 reserved counters collection; they are local to a store and are never reused.
 
@@ -135,7 +135,7 @@ non-deduplicating meanings as `SqlStore`; identity-excluded metadata conflicts
 are still checked. Nested non-storable children are embedded in the owning
 document. Nested storable records are stored in their own collection and
 referenced by sid. For the shared save/fetch, projection, validation, and
-dedup semantics, see [Storing and fetching](db.md#storing-and-fetching).
+dedup semantics, see [Storing and fetching](db-records.md#storing-and-fetching).
 
 An entry family with several backing record classes has a separate dispatch
 collection. Saving a configured backing makes its content identity discoverable
@@ -154,7 +154,7 @@ that lineage oldest-first, and `store.searcher(only_latest=True)` restricts
 root variables to each lineage's latest document. The semantics — idempotent
 same-lineage replacement, `EntryReplacementError` on a cross-lineage dedup hit,
 and `only_latest` leaving reference/child scopes unfiltered — match SQL exactly;
-see [Record replacement and lineages](db.md#record-replacement-and-lineages).
+see [Record replacement and lineages](db-revisions.md#record-replacement-and-lineages).
 
 ## Alternatives
 
@@ -287,7 +287,7 @@ with `add()`, declare outputs, and consume either portable `SearchResult`
 values or a named `results()` set. Reference paths, child set operations,
 stored-property plans, scalar projections, sorting, offsets, limits, and
 OPTIMADE filter wiring use the shared concepts documented in
-[Searching](db.md#searching) and [Neutral portable Store profile](db.md#neutral-portable-store-profile).
+[Searching](db-querying.md#searching) and [Neutral portable Store profile](db-querying.md#neutral-portable-store-profile).
 Disconnected cartesian variables are outside MongoStore's supported query
 profile.
 
@@ -314,7 +314,7 @@ an opaque continuation token, with an internal sid tie-breaker and explicit
 null ordering. The normal restrictions apply: one root variable, scalar root
 outputs for order keys, no `add_sort()`, nonzero offset, or query limit, and a
 page size of at most 10,000. Pages do not promise snapshot consistency across
-calls. See [Continuation pages](db.md#continuation-pages) for the token and
+calls. See [Continuation pages](db-querying.md#continuation-pages) for the token and
 consumer contract.
 
 Stored properties that use `scaled_exact_equal()` (or another predicate that
@@ -361,7 +361,7 @@ are operational behavior, not guarantees to be inferred from SQL parity.
    can exist between a degraded-mode crash or dedup-discard and the next fsck.
    Degraded-mode compensation deletes nothing; fsck is the collector.
    SQL's v2.3.0 degraded SQLite profile follows the same main/dependency role
-   and fsck model; see [the SQL permanentization section](db.md#permanentization-degraded-writes-and-fsck).
+   and fsck model; see [the SQL permanentization section](db-recovery.md#permanentization-degraded-writes-and-fsck).
 
 5. **Client-verified exact predicates.** `scaled_exact_equal()` and any
    client-verified predicate cost client-side verification and over-fetch. If

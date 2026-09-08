@@ -24,7 +24,7 @@ Records are content-addressed (`content_id`) as well as locally numbered
 Store timestamps are enabled by default. They support historic predicates such
 as `store_timestamp <= T`; configure their unit size with
 `store_timestamp_resolution` (default: microseconds, `time_ns() // 1000`).
-The [detailed guide](details/db.md#store-timestamps) covers the query syntax,
+The [detailed guide](details/db-timestamps.md#store-timestamps) covers the query syntax,
 deduplication semantics, clock guard, and fsck repair behavior.
 
 Append-only record replacement is available too: `store.replace(predecessor,
@@ -37,7 +37,7 @@ cell beside a primitive one, say: `store.save(obj, alternative_of=<main entry id
 alternative_kind="conventional")` stores a sibling that shares the main's public
 `id` (addressed as `<id>~<kind>`, with its own revision lineage), while ordinary
 queries stay mains-only by default (`only_main_alt=True`). See
-[the detailed guide](details/db.md#alternatives).
+[the detailed guide](details/db-revisions.md#alternatives).
 
 The full guide, {doc}`details/db`, covers declaring storable classes with the
 httk-core marker vocabulary, entry families and multi-record dispatch, the

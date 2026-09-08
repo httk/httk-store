@@ -49,4 +49,4 @@ Under PostgreSQL **bulk** ingest, a `NaN` inside a stored **list-of-floats
 rows through SQLite shards, and SQLite has no `NaN`, so the value is lost in the
 list column.  A **scalar** float `NaN` IS preserved under bulk ingest, and the
 serial `save()` path preserves `NaN` in both scalar and list fields on all
-backends.  See the [database backend details](details/db.md#bulk-ingestion).
+backends.  See the [database backend details](details/db-bulk-ingestion.md#bulk-ingestion).

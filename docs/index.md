@@ -14,7 +14,7 @@ dataclasses over SQLite, DuckDB, or PostgreSQL (via the `httk-store[db]` /
 The `httk-store[mongodb]` extra provides MongoDB storage through the same neutral
 contracts. ClickHouse supports bulk ingestion and read serving via
 `httk-store[clickhouse,parallel]`, subject to the
-[documented write restrictions](details/db.md#clickhouse-bulk-fenced-writes).
+[documented write restrictions](details/db-recovery.md#clickhouse-bulk-fenced-writes).
 
 ```{admonition} Quick links
 :class: tip

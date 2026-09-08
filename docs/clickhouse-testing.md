@@ -86,5 +86,5 @@ WHERE key = 'ingest_state' AND value = '<observed marker JSON>';
 Bootstrap-lock residue follows the same rule: inspect the exact UUID key/value,
 verify the writer is dead, then execute `SET keeper_map_strict_mode = 1;`
 before the exact `_httk_bootstrap` delete.  Never use a key-only delete or
-delete a live writer's value.  See the [database backend details](details/db.md#clickhouse-bulk-fenced-writes)
+delete a live writer's value.  See the [database backend details](details/db-recovery.md#clickhouse-bulk-fenced-writes)
 for the lifecycle and failure semantics.

@@ -29,7 +29,8 @@ from test_db_bulk_parallel import TwoFloatMeta
 from httk.store.backend.sql import Backend, SqlStore
 from httk.store.backend.sql.bulk import BulkIngest
 from httk.store.backend.clickhouse.support import ClickHouseBulkIntegrityError
-from httk.store.backend.sql.layout import StoreUnderConstructionError
+from httk.store.backend.sql.layout import StoreUnderConstructionError, actual_schema_objects
+from httk.store.backend.sql.mapping import ENTRY_ID_OWNERS_TABLE_NAME, IMMUTABLE_ID_OWNERS_TABLE_NAME
 from httk.store.store_common import EntryMetadataConflictError
 
 
@@ -94,7 +95,12 @@ def clickhouse_bulk_database():
 
 def _dense(store: SqlStore, database: Backend) -> None:
     with database.engine.connect() as connection:
+        present = actual_schema_objects(connection)
         for name, table in store._metadata.tables.items():
+            if name not in present:
+                assert store.backend_facts.metadata_backend == "keepermap"
+                assert name in {ENTRY_ID_OWNERS_TABLE_NAME, IMMUTABLE_ID_OWNERS_TABLE_NAME}
+                continue
             if "sid" not in table.c:
                 continue
             count, low, high = connection.execute(text(f'SELECT count(), min(sid), max(sid) FROM "{name}"')).one()

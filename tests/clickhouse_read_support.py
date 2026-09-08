@@ -8,6 +8,7 @@ import pytest
 from conftest import clickhouse_test_uri
 from test_clickhouse_bulk import _clickhouse_bulk_database
 
+from httk.store import EntryIdScheme
 from httk.store.backend.sql import SqlStore
 
 CLICKHOUSE_PARAM = pytest.param("clickhousedb", marks=pytest.mark.xdist_group("clickhouse_read"))
@@ -25,7 +26,7 @@ def bulk_store(records: Iterable[Any], *, entry_records: dict[type, Any] | None 
     """Build one isolated ClickHouse store from a suite's save plan."""
 
     with clickhouse_database() as database:
-        store = SqlStore(database, entry_records=entry_records or {})
+        store = SqlStore(database, entry_records=entry_records or {}, entry_ids=EntryIdScheme("httk.test", "1"))
         with store.bulk_ingest(finalize="deferred") as bulk:
             for record in records:
                 bulk.save(record)

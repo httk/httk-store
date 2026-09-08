@@ -18,7 +18,7 @@ from test_db_stored_properties import (
     GenericCalculationSecond,
 )
 
-from httk.store import PageOrder
+from httk.store import EntryIdScheme, PageOrder
 from httk.store.backend.sql import SqlStore, stored_property_sql_plan
 from httk.store.backend.clickhouse.support import ClickHouseUnsupportedQueryError
 from httk.store.backend.sql.entry_provider import StoreEntryProvider
@@ -49,7 +49,9 @@ def clickhouse_corpus():
     )
     with clickhouse_database() as database:
         store = SqlStore(
-            database, entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)}
+            database,
+            entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+            entry_ids=EntryIdScheme("httk.test", "1"),
         )
         with store.bulk_ingest(finalize="deferred") as bulk:
             for record in records:
@@ -61,8 +63,10 @@ def clickhouse_corpus():
 def clickhouse_federation():
     with clickhouse_database() as first_database, clickhouse_database() as second_database:
         family_records = {FederatedCalculation: (FederationFirst, FederationSecond)}
-        first_store = SqlStore(first_database, entry_records=family_records)
-        second_store = SqlStore(second_database, entry_records=family_records)
+        first_store = SqlStore(first_database, entry_records=family_records, entry_ids=EntryIdScheme("httk.test", "1"))
+        second_store = SqlStore(
+            second_database, entry_records=family_records, entry_ids=EntryIdScheme("httk.test", "1")
+        )
         first_records = (_record("alpha-first"), _record("alpha-second", second=True))
         second_records = (_record("beta-first"),)
         with first_store.bulk_ingest(finalize="deferred") as first_bulk:
@@ -110,7 +114,7 @@ def test_live_literal_like_and_scalar_binary_projection(clickhouse_corpus: SqlSt
 
 def test_stored_properties_reject_only_returned_nested_correlation(clickhouse_corpus: SqlStore) -> None:
     plan = stored_property_sql_plan(clickhouse_corpus, CalculationEntry)
-    assert [row[0][0].label for row in plan.filter_searchers('immutable_id = "one-third"')[0]] == ["first"]
+    assert [row[0][0].label for row in plan.filter_searchers('_httk_selector = "one-third"')[0]] == ["first"]
     for literal in (
         "nested",
         "filtered-count-nested",
@@ -120,9 +124,9 @@ def test_stored_properties_reject_only_returned_nested_correlation(clickhouse_co
         "boolean-combinators-nested",
     ):
         with pytest.raises(ClickHouseUnsupportedQueryError, match="beyond one immediate scope"):
-            plan.filter_searchers(f'immutable_id = "{literal}"')
-    assert list(plan.filter_searchers('immutable_id = "filtered-count-single"')[0])
-    plan.filter_searchers('immutable_id = "unused-nested"')
+            plan.filter_searchers(f'_httk_selector = "{literal}"')
+    assert list(plan.filter_searchers('_httk_selector = "filtered-count-single"')[0])
+    plan.filter_searchers('_httk_selector = "unused-nested"')
 
     def nested_sort(context):
         return context.count(context.scope("parts").scope("ratios"))
@@ -132,7 +136,7 @@ def test_stored_properties_reject_only_returned_nested_correlation(clickhouse_co
             backing,
             projections={
                 **backing.projections,
-                "immutable_id": replace(backing.projections["immutable_id"], sort=nested_sort),
+                "_httk_selector": replace(backing.projections["_httk_selector"], sort=nested_sort),
             },
         )
         for backing in plan._backings
@@ -146,12 +150,12 @@ def test_stored_properties_reject_only_returned_nested_correlation(clickhouse_co
         nested_backings,
     )
     with pytest.raises(ClickHouseUnsupportedQueryError, match="beyond one immediate scope"):
-        nested_plan.candidate_searchers(sort=(("immutable_id", False),))
+        nested_plan.candidate_searchers(sort=(("_httk_selector", False),))
 
 
 def test_entry_provider_and_optimade_serving_end_to_end(clickhouse_corpus: SqlStore) -> None:
     provider = StoreEntryProvider(clickhouse_corpus, {"books": Book, "writers": Writer})
-    assert [row["__id"] for row in provider.records("books")] == ["books-1", "books-2"]
+    assert sorted(row["__id"] for row in provider.records("books")) == ["httk.test.book-1-1", "httk.test.book-1-2"]
     pytest.importorskip("httk.serve.optimade")
     from httk.serve.optimade import adapter_from_providers
     from httk.serve.optimade.backend import execute_query
@@ -169,12 +173,13 @@ def test_entry_provider_and_optimade_serving_end_to_end(clickhouse_corpus: SqlSt
             parse_optimade_filter("_httk_custom_pages > 200"),
         )
     )
-    assert [row.values["id"] for row in rows] == ["books-1"]
+    assert [row.values["id"] for row in rows] == ["httk.test.book-1-1"]
 
 
 def test_federation_surface_is_bulk_populated(clickhouse_federation: StoredEntryFederation) -> None:
-    page = clickhouse_federation.query(sort=(("immutable_id", False),), limit=10)
-    assert [row["immutable_id"] for row in page.rows] == ["alpha-first", "alpha-second", "beta-first"]
+    page = clickhouse_federation.query(sort=(("_httk_label", False),), limit=10)
+    assert [row["_httk_label"] for row in page.rows] == ["alpha-first", "alpha-second", "beta-first"]
+    assert [row["immutable_id"] for row in page.rows] == ["httk.test-1-2~1", "httk.test-1-3~1", "httk.test-1-2~1"]
 
 
 def test_query_behavior_surface_handles_synthetic_nulls(clickhouse_corpus: SqlStore) -> None:

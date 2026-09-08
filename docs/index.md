@@ -11,6 +11,10 @@ OPTIMADE property definitions with `jsonschema`, and provides the database
 storage layer `httk.store.backend.sql` — relational storage and querying of plain frozen
 dataclasses over SQLite, DuckDB, or PostgreSQL (via the `httk-store[db]` /
 `httk-store[duckdb]` / `httk-store[postgresql]` extras).
+The `httk-store[mongodb]` extra provides MongoDB storage through the same neutral
+contracts. ClickHouse supports bulk ingestion and read serving via
+`httk-store[clickhouse,parallel]`, subject to the
+[documented write restrictions](details/db.md#clickhouse-bulk-fenced-writes).
 
 ```{admonition} Quick links
 :class: tip
@@ -30,7 +34,12 @@ onward to it in the **Details** section of the sidebar.
 
 ## Install
 
-Preferably work in a Python virtual environment, then do:
+Use Python 3.12 or newer in a virtual environment, then install from PyPI:
+```bash
+python -m pip install "httk-store==2.1.0"
+```
+
+For a source checkout:
 ```bash
 git clone https://github.com/httk/httk-store
 cd httk-store

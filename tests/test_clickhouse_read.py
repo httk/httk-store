@@ -15,7 +15,7 @@ from test_db_stored_properties import (
     GenericCalculationSecond,
 )
 
-from httk.store import PageOrder, UnsupportedQueryError
+from httk.store import EntryIdScheme, PageOrder, UnsupportedQueryError
 from httk.store.backend.sql import SqlStore, stored_property_sql_plan
 from httk.store.backend.clickhouse.support import ClickHouseUnsupportedQueryError
 from httk.store.backend.sql.mapping import STORE_TIMESTAMP_COLUMN
@@ -51,6 +51,7 @@ def clickhouse_read_store():
         store = SqlStore(
             database,
             entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+            entry_ids=EntryIdScheme("httk.test", "1"),
         )
         with store.bulk_ingest(finalize="deferred") as bulk:
             for record in READ_ROWS:
@@ -111,11 +112,11 @@ def test_clickhouse_optimade_and_stored_property_read_paths(clickhouse_read_stor
     assert [item[0][0].title for item in optimade] == ["50% Mg"]
 
     plan = stored_property_sql_plan(clickhouse_read_store, CalculationEntry)
-    assert [item[0][0].label for item in plan.filter_searchers('immutable_id = "one-third"')[0]] == ["first"]
+    assert [item[0][0].label for item in plan.filter_searchers('_httk_selector = "one-third"')[0]] == ["first"]
     with pytest.raises(ClickHouseUnsupportedQueryError, match="beyond one immediate scope"):
-        plan.filter_searchers('immutable_id = "nested"')
+        plan.filter_searchers('_httk_selector = "nested"')
     with pytest.raises(UnsupportedQueryError):
-        plan.filter_searchers('immutable_id = "composition"')
+        plan.filter_searchers('_httk_selector = "composition"')
 
 
 @pytest.mark.parametrize(

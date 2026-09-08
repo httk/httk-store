@@ -109,7 +109,8 @@ def test_clickhouse_facts_and_keeper_round_trip(clickhouse_database: Backend) ->
         assert dict(connection.execute(text("SELECT key, value FROM _httk_store_metadata")).all()) == {
             "protocol": STORAGE_PROTOCOL_VERSION,
             "entry_declaration": '{"families":[],"format":2}',
-            "entry_schemas": '{"tables":{}}',
+            "entry_schemas": '{"entry_id_tables":[],"tables":{}}',
+            "identity_ownership": "1",
             "write_profile": "bulk-fenced",
             "store_timestamps": "v1:1000",
         }
@@ -394,11 +395,12 @@ def test_clickhouse_concurrent_first_open_converges_without_raw_table_exists(
                 assert stamps == {
                     "protocol": STORAGE_PROTOCOL_VERSION,
                     "entry_declaration": '{"families":[],"format":2}',
-                    "entry_schemas": '{"tables":{}}',
+                    "entry_schemas": '{"entry_id_tables":[],"tables":{}}',
+                    "identity_ownership": "1",
                     "write_profile": "bulk-fenced",
                     "store_timestamps": "v1:1000",
                 }
-                assert len(stamps) == 5
+                assert len(stamps) == 6
             finally:
                 if first_database is not None:
                     first_database.dispose()

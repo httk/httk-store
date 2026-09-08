@@ -84,11 +84,13 @@ class Book:
         return len(self.keywords)
 
 
-ADA = Writer("Ada", 1815)
-BOOLE = Writer("Boole", 1815)
-CARA = Writer("Cara", 1820)
+ADA = Writer("Ada", 1815, id="httk.test.writer-1-1", immutable_id="httk.test.writer-1-1~1")
+BOOLE = Writer("Boole", 1815, id="httk.test.writer-1-2", immutable_id="httk.test.writer-1-2~1")
+CARA = Writer("Cara", 1820, id="httk.test.writer-1-3", immutable_id="httk.test.writer-1-3~1")
 
 BOOK_1 = Book(
+    id="httk.test.book-1-1",
+    immutable_id="httk.test.book-1-1~1",
     title="Analytical Engines",
     pages=350,
     price=Fraction(1, 3),
@@ -102,6 +104,8 @@ BOOK_1 = Book(
     author=ADA,
 )
 BOOK_2 = Book(
+    id="httk.test.book-1-2",
+    immutable_id="httk.test.book-1-2~1",
     title="Silence",
     pages=120,
     price=Fraction(-7, 5),

@@ -13,6 +13,13 @@ management. Built on the stdlib-only contracts and models in *httk-core*, it
 provides in-memory `httk.core.EntryProvider` implementations for the standard
 OPTIMADE entry types (`references`, `files`, `calculations`),
 property-definition validation on `jsonschema`, and a database storage layer
-(`httk.store.backend.sql`, via the `httk-store[db]` extra) that stores plain frozen
-dataclasses in SQLite or DuckDB, makes them queryable through a backend-agnostic
-search DSL, and serves them through the entry-provider contract.
+that stores plain frozen dataclasses in SQLite, DuckDB, PostgreSQL, or MongoDB,
+makes them queryable through a backend-agnostic search DSL, and serves them
+through the entry-provider contract. ClickHouse supports bulk ingestion and
+read serving with its documented write restrictions.
+
+Install the optional backend you need with `httk-store[db]` (SQLite),
+`httk-store[duckdb]`, `httk-store[postgresql]`, `httk-store[mongodb]`, or
+`httk-store[clickhouse,parallel]`. See the
+[storage documentation](https://docs.httk.org/httk-store/db.html) for backend
+capabilities and deployment requirements.

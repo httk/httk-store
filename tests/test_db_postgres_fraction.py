@@ -16,6 +16,7 @@ import pytest
 import sqlalchemy
 from sqlalchemy.engine import make_url
 
+from httk.store import EntryIdScheme
 from httk.store.backend.sql import Backend, SqlStore, stored_property_sql_plan
 from httk.store.backend.sql.engine import _fraction_scaled_equal
 
@@ -84,18 +85,19 @@ def test_inline_fraction_equality_matches_python_reference(postgres_uri, argumen
 
 
 def test_stored_property_exact_fraction_filter_selects_matching_rows(postgres_uri):
-    # Mirrors test_db_stored_properties' 'immutable_id = "one-third"' case, whose
+    # Mirrors test_db_stored_properties' '_httk_selector = "one-third"' case, whose
     # query emits httk_fraction_scaled_equal against the energy_exact column.
     database = Backend.postgresql(postgres_uri)
     try:
         store = SqlStore(
             database,
             entry_records={CalculationEntry: (GenericCalculationFirst, GenericCalculationSecond)},
+            entry_ids=EntryIdScheme("httk.test", "1"),
         )
         store.save(FIRST)
         store.save(SECOND)
         plan = stored_property_sql_plan(store, CalculationEntry)
-        matched = {record.label for record in _records(plan.filter_searchers('immutable_id = "one-third"'))}
+        matched = {record.label for record in _records(plan.filter_searchers('_httk_selector = "one-third"'))}
         assert matched == {"first"}
     finally:
         database.dispose()

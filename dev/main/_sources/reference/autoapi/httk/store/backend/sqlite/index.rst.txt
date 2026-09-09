@@ -1,0 +1,25 @@
+httk.store.backend.sqlite
+=========================
+
+.. py:module:: httk.store.backend.sqlite
+
+.. autoapi-nested-parse::
+
+   SQLite-specific construction for the SQL storage backend.
+
+   The dialect-agnostic engine wrapper and store live in
+   :mod:`httk.store.backend.sql`; this package holds only the SQLite constructor
+   body that :meth:`httk.store.backend.sql.engine.Backend.sqlite` delegates to.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/store/backend/sqlite/engine/index
+   /reference/autoapi/httk/store/backend/sqlite/hooks/index
+
+

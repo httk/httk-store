@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "project": "httk-store",
+  "url": "https://docs.httk.org/httk-store",
+  "source_commit": "df89282af27a2e380bb3254dda6ebf15cf1a9eea",
+  "default": {
+    "name": "v2.1.0",
+    "path": "latest/",
+    "channel": "release"
+  },
+  "versions": [
+    {
+      "name": "v2.1.0",
+      "path": "v2.1.0/",
+      "channel": "release"
+    },
+    {
+      "name": "dev:main",
+      "path": "dev/main/",
+      "channel": "dev"
+    }
+  ]
+}

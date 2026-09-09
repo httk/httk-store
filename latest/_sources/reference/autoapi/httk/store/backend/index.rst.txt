@@ -1,0 +1,49 @@
+httk.store.backend
+==================
+
+.. py:module:: httk.store.backend
+
+.. autoapi-nested-parse::
+
+   Storage backends for *httk-store*.
+
+   Each subpackage is a self-contained storage backend:
+
+   - :mod:`httk.store.backend.sql` — the SQLAlchemy-backed relational layer
+     (:class:`~httk.store.backend.sql.engine.Backend`,
+     :class:`~httk.store.backend.sql.store.SqlStore`) shared by every SQL dialect;
+   - :mod:`httk.store.backend.sqlite`, :mod:`httk.store.backend.duckdb`,
+     :mod:`httk.store.backend.clickhouse`, :mod:`httk.store.backend.postgresql` —
+     the per-dialect constructor and quirk code the SQL layer delegates to; and
+   - :mod:`httk.store.backend.mongo` — the MongoDB-backed layer
+     (:class:`~httk.store.backend.mongo.store.MongoStore`).
+
+   Two backend-neutral modules sit alongside the subpackages, driver-free and
+   shared by every backend:
+
+   - :mod:`httk.store.backend.schema` — :func:`~httk.store.backend.schema.resolve_schema`
+     and the schema IR that drives storage; and
+   - :mod:`httk.store.backend.codecs` — the :class:`~httk.store.backend.codecs.ValueCodec`
+     registry with exact, round-trippable encodings.
+
+   Importing this package pulls in neither ``sqlalchemy`` nor ``pymongo``; the
+   driver-backed names load lazily on first use of the relevant subpackage.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/store/backend/clickhouse/index
+   /reference/autoapi/httk/store/backend/codecs/index
+   /reference/autoapi/httk/store/backend/duckdb/index
+   /reference/autoapi/httk/store/backend/mongo/index
+   /reference/autoapi/httk/store/backend/postgresql/index
+   /reference/autoapi/httk/store/backend/schema/index
+   /reference/autoapi/httk/store/backend/sql/index
+   /reference/autoapi/httk/store/backend/sqlite/index
+
+

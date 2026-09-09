@@ -1,0 +1,39 @@
+httk.store.backend.duckdb.hooks
+===============================
+
+.. py:module:: httk.store.backend.duckdb.hooks
+
+.. autoapi-nested-parse::
+
+   DuckDB engine hooks: the per-dialect behavior the neutral SQL engine dispatches to.
+
+   :mod:`httk.store.backend.sql.engine` keeps only neutral dialect dispatch; the
+   DuckDB-specific bodies live here and are imported lazily on first use by the
+   ``_DIALECT_HOOKS`` registry in :mod:`httk.store.backend.sql.engine`.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.duckdb.hooks.install_engine_functions
+
+
+Module Contents
+---------------
+
+.. py:function:: install_engine_functions(engine)
+
+   Install the exact-fraction scalar function on every DuckDB connection.
+
+   Fraction values are persisted canonically as text because SQL integer
+   products can overflow long before a valid Python :class:`~fractions.Fraction`
+   does; ``httk_fraction_scaled_equal`` preserves exact comparisons without
+   touching presentation float columns.
+
+   :param engine: The DuckDB SQLAlchemy engine to install the function on.
+   :return: None.
+
+

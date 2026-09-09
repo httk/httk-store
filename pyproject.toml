@@ -46,7 +46,7 @@ dev = [
   "pyright",
   "mypy",
   "pydoclint>=0.9,<1",
-  "sqlalchemy>=2.0,<3"
+  "httk-store[clickhouse,duckdb,mongodb,parallel]"
 ]
 docs = [
   "sphinx",
@@ -63,7 +63,7 @@ release = [
 ]
 default = ["httk-store[db]"]
 db = ["sqlalchemy>=2.0,<3"]
-duckdb = ["httk-store[db]", "duckdb_engine>=0.13", "duckdb>=1.0"]
+duckdb = ["httk-store[db]", "duckdb_engine>=0.13", "duckdb>=1.0", "numpy"]
 # clickhouse-connect 1.6.0 was probed for G0/P5; keep the compatible major range.
 clickhouse = ["httk-store[db]", "clickhouse-connect>=1.6,<2"]
 postgresql = ["httk-store[db]", "psycopg[binary]>=3.1"]

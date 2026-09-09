@@ -22,8 +22,8 @@ storage schema it derives:
   nested lists, and `stored_property` values as ordinary properties.
 - relationships, for reference fields and `list[Storable]` fields **whose
   target class is also served**. A `Related` marker on the field adds the
-  OPTIMADE `role`/`description` metadata; `StorageInfo(links=...)` lets a
-  separate join class contribute relationships without being served itself. A
+  OPTIMADE `role`/`description` metadata; exposed `WeakLink` declarations in
+  `StorageInfo.links` contribute store-managed relationships. A
   `StrongLink` marker on a run's provenance edge fields is served as a semantic
   relationship in both directions (forward on the run, derived reverse on each
   targeted served class).
@@ -49,8 +49,8 @@ fields — which is what an API actually returns.
 
 ## Ids
 
-By default an entry is identified as `"<entry type>-<sid>"`, using the row's
-integer sid: `books-1`, `writers-3`. An `id_of` callback replaces that scheme
+By default an entry uses its stored `id`; this example assigns identifiers
+such as `books-1` and `writers-3` explicitly. An `id_of` callback replaces those ids
 everywhere at once, including inside reference, child, and weak-link
 relationships. `StrongLink` run edges are the exception: they are matched by
 raw id, so a custom `id_of` provider gets empty reverse relationship blocks.
@@ -187,8 +187,8 @@ def show_provider(provider: StoreEntryProvider) -> None:
 
 def show_queries(provider: StoreEntryProvider) -> None:
     """Hand the provider to httk-serve and run OPTIMADE queries against it."""
-    from httk.serve.optimade import adapter_from_providers
-    from httk.serve.optimade.backend import execute_query
+    from httk.serve.optimade import adapter_from_providers  # pyright: ignore[reportMissingImports]
+    from httk.serve.optimade.backend import execute_query  # pyright: ignore[reportMissingImports]
 
     adapter = adapter_from_providers([provider])
     print("== The adapter serves ==")

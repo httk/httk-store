@@ -83,7 +83,14 @@ def test_example_runs_cleanly(example: Path, tmp_path: Path) -> None:
     requirements = constants.get(REQUIRES_SENTINEL) or ()
     if isinstance(requirements, (list, tuple)):
         for requirement in requirements:
-            if importlib.util.find_spec(str(requirement)) is None:
+            requirement = str(requirement)
+            try:
+                available = importlib.util.find_spec(requirement) is not None
+            except ModuleNotFoundError as error:
+                if error.name is None or not (requirement == error.name or requirement.startswith(error.name + ".")):
+                    raise
+                available = False
+            if not available:
                 pytest.skip(f"{_example_id(example)} requires the optional dependency {requirement!r}")
 
     # Subprocess, not import: an example is a *script*, and a separate process is
@@ -106,3 +113,22 @@ def test_example_runs_cleanly(example: Path, tmp_path: Path) -> None:
     assert result.returncode == 0, f"{_example_id(example)} exited {result.returncode}\n{result.stderr}"
     # Every example is meant to show something; silence means it demonstrated nothing.
     assert result.stdout.strip(), f"{_example_id(example)} printed nothing"
+
+
+@pytest.mark.parametrize(
+    ("missing_name", "expected_error"),
+    [("optional_peer", pytest.skip.Exception), ("broken_dependency", ModuleNotFoundError)],
+)
+def test_nested_optional_requirements_do_not_hide_broken_dependencies(
+    monkeypatch, tmp_path, missing_name, expected_error
+):
+    monkeypatch.setitem(globals(), "EXAMPLES_DIR", tmp_path)
+    example = tmp_path / "optional.py"
+    example.write_text('HTTK_EXAMPLE_REQUIRES = ["optional_peer.feature"]\n')
+
+    def missing_spec(_name):
+        raise ModuleNotFoundError(f"No module named {missing_name!r}", name=missing_name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", missing_spec)
+    with pytest.raises(expected_error):
+        test_example_runs_cleanly(example, tmp_path)

@@ -8,6 +8,7 @@ MergeTree sorting keys, system catalogue, and KeeperMap metadata protocol.
 import contextlib
 import datetime
 import functools
+import inspect
 import json
 import threading
 import uuid
@@ -88,13 +89,15 @@ _BINARY_QUERY_FORMATS_KEY = "_httk_query_formats"
 _BINARY_QUERY_FORMATS = {"String": "bytes"}
 
 
-def _install_binary_query_format_hook() -> None:
-    """Teach the pinned clickhouse-connect DBAPI to honor per-query formats."""
+def _install_binary_query_format_hook() -> bool:
+    """Use native per-query formats when available, installing the older driver hook otherwise."""
     from clickhouse_connect.dbapi import cursor as clickhouse_cursor
 
     if getattr(clickhouse_cursor.Cursor, "_httk_binary_query_formats", False):
-        return
+        return False
     original_execute = clickhouse_cursor.Cursor.execute
+    if "query_formats" in inspect.signature(original_execute).parameters:
+        return True
 
     @functools.wraps(original_execute)
     def execute(self: Any, operation: str, parameters: Any = None, settings: dict[str, Any] | None = None) -> None:
@@ -113,8 +116,10 @@ def _install_binary_query_format_hook() -> None:
             self.names = query_result.column_names
             self.types = [item.name for item in query_result.column_types]
 
-    clickhouse_cursor.Cursor.execute = execute  # type: ignore[method-assign]  # deliberate driver monkeypatch
-    clickhouse_cursor.Cursor._httk_binary_query_formats = True  # type: ignore[attr-defined]  # our install marker on the driver Cursor
+    patched_cursor: Any = clickhouse_cursor.Cursor
+    patched_cursor.execute = execute
+    patched_cursor._httk_binary_query_formats = True
+    return False
 
 
 def _statement_selects_binary(statement: Any) -> bool:
@@ -122,7 +127,7 @@ def _statement_selects_binary(statement: Any) -> bool:
     return any(isinstance(getattr(column, "type", None), sqlalchemy.LargeBinary) for column in columns)
 
 
-def _install_binary_query_event(engine: sqlalchemy.Engine) -> None:
+def _install_binary_query_event(engine: sqlalchemy.Engine, *, native_query_formats: bool) -> None:
     marker = "_httk_clickhouse_binary_query_event"
     if getattr(engine, marker, False):
         return
@@ -135,9 +140,20 @@ def _install_binary_query_event(engine: sqlalchemy.Engine) -> None:
         if statement is None or not _statement_selects_binary(statement):
             return
         options = dict(context.execution_options)
-        settings = dict(options.get("settings") or {})
-        settings[_BINARY_QUERY_FORMATS_KEY] = dict(_BINARY_QUERY_FORMATS)
-        options["settings"] = settings
+        if native_query_formats:
+            formats = options.get("query_formats") or {}
+            statement_formats = statement.get_execution_options().get("query_formats") or {}
+            formats = {
+                **statement_formats,
+                **{key: value for key, value in formats.items() if key not in statement_formats},
+            }
+            formats.pop("String", None)
+            options["query_formats"] = {**_BINARY_QUERY_FORMATS, **formats}
+            context.invoked_statement = statement.execution_options(query_formats=options["query_formats"])
+        else:
+            settings = dict(options.get("settings") or {})
+            settings[_BINARY_QUERY_FORMATS_KEY] = dict(_BINARY_QUERY_FORMATS)
+            options["settings"] = settings
         context.execution_options = sqlalchemy.util.immutabledict(options)
 
     setattr(engine, marker, True)
@@ -741,8 +757,8 @@ def verify_clickhouse_connection(connection: sqlalchemy.Connection) -> str:
 
 def install_connection_guards(engine: sqlalchemy.Engine) -> str:
     """Install pool checkout verification and return the first server version."""
-    _install_binary_query_format_hook()
-    _install_binary_query_event(engine)
+    native_query_formats = _install_binary_query_format_hook()
+    _install_binary_query_event(engine, native_query_formats=native_query_formats)
     state = getattr(engine, "_httk_clickhouse_guard", None)
     if state is None:
         state = {"version": None, "lock": threading.Lock()}

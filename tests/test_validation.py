@@ -2,7 +2,7 @@
 
 import jsonschema
 import pytest
-from httk.core import PropertyDefinition, load_entry_type_definition, standard_entry_type
+from httk.core import PropertyDefinition, standard_entry_type
 
 from httk.store import PropertyValidationError, validate_property, validate_record
 from httk.store.validation import _validator_schema
@@ -39,11 +39,15 @@ def test_nullable_property_accepts_none() -> None:
 
 
 def test_nullable_enum_property_accepts_none() -> None:
-    structures = load_entry_type_definition("https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures")
-    optimization_type = structures.properties["optimization_type"]
+    payload = PropertyDefinition.from_simple("optimization_type", description="Optimization category.").as_optimade()
+    payload["enum"] = ["experimental", "theoretical"]
+    optimization_type = PropertyDefinition.from_optimade("optimization_type", payload)
     assert optimization_type.nullable
     validate_property(optimization_type, None)
     validate_property(optimization_type, "experimental")
+    with pytest.raises(PropertyValidationError):
+        validate_property(optimization_type, "unknown")
+    assert optimization_type.as_optimade()["enum"] == ["experimental", "theoretical"]
 
 
 def test_non_nullable_property_rejects_none() -> None:

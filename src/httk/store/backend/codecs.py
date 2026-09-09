@@ -291,7 +291,7 @@ def encode_fracvector_exact(value: FracVector) -> str:
     """The canonical :data:`FRACVECTOR_EXACT_FORMAT` text of a rational tensor.
 
     The tensor is flattened row-major and normalized through
-    :meth:`~httk.core.FracVector.to_fractions`: ``d`` is the least positive
+    :meth:`~httk.core.vectors.fracvector.FracVectorBase.to_fractions`: ``d`` is the least positive
     common denominator of the (reduced) elements and the numerators are the
     elements scaled by ``d``. The text is therefore canonical — independent of
     the internal denominator the input happened to carry — and lossless at

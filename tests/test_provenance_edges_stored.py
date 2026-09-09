@@ -21,7 +21,7 @@ from httk.store.backend.sql import Backend, SqlStore, StoredEntrySource
 from httk.store.backend.sql.entry_provider import StoreEntryProvider
 from httk.store.backend.sql.stored_federation import StoredEntryFederation
 
-_STRUCTURES = "https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures"
+_REFERENCES = "https://schemas.optimade.org/defs/v1.2/entrytypes/optimade/references"
 
 
 @dataclass(frozen=True)
@@ -36,10 +36,10 @@ class RecordRow:
 
 
 @dataclass(frozen=True)
-class StructureRow:
-    """A minimal standard ``structures`` backing (wire type ``structures``)."""
+class ReferenceRow:
+    """A minimal standard ``references`` backing (wire type ``references``)."""
 
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="prov_edge_structure")
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="prov_edge_reference")
 
     name: str
     id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
@@ -53,23 +53,23 @@ class RecordFamily:
     definition_id = RECORDS_DEFINITION_ID
 
 
-class StructureFamily:
-    """The standard structures family (unprefixed wire name)."""
+class ReferenceFamily:
+    """The standard references family (unprefixed wire name)."""
 
-    type = "structures"
-    definition_id = _STRUCTURES
+    type = "references"
+    definition_id = _REFERENCES
 
 
 register_entry_family(name="prov-edge-records", family=f"{__name__}:RecordFamily", definition_id=RECORDS_DEFINITION_ID)
 register_entry_record(name="prov-edge-records-rec", family="prov-edge-records", record=f"{__name__}:RecordRow")
-register_entry_family(name="prov-edge-structures", family=f"{__name__}:StructureFamily", definition_id=_STRUCTURES)
-register_entry_record(name="prov-edge-structures-rec", family="prov-edge-structures", record=f"{__name__}:StructureRow")
+register_entry_family(name="prov-edge-references", family=f"{__name__}:ReferenceFamily", definition_id=_REFERENCES)
+register_entry_record(name="prov-edge-references-rec", family="prov-edge-references", record=f"{__name__}:ReferenceRow")
 
 
 def _store(database: Backend) -> SqlStore:
     return SqlStore(
         database,
-        entry_records={RunEntry: Run, RecordFamily: RecordRow, StructureFamily: StructureRow},
+        entry_records={RunEntry: Run, RecordFamily: RecordRow, ReferenceFamily: ReferenceRow},
         entry_ids=EntryIdScheme("httk.test", "1"),
     )
 
@@ -79,7 +79,7 @@ def _save(store: SqlStore, record: object) -> str:
 
 
 def _provider(store: SqlStore) -> StoreEntryProvider:
-    return StoreEntryProvider(store, {"_httk_runs": Run, "_httk_records": RecordRow, "structures": StructureRow})
+    return StoreEntryProvider(store, {"_httk_runs": Run, "_httk_records": RecordRow, "references": ReferenceRow})
 
 
 def _federation(store: SqlStore, family: type, name: str) -> StoredEntryFederation:
@@ -95,11 +95,11 @@ def test_sql_provider_forward_three_groups_and_reverse() -> None:
     with Backend.sqlite() as database:
         store = _store(database)
         rec = _save(store, RecordRow("r"))
-        struct = _save(store, StructureRow("s"))
+        ref = _save(store, ReferenceRow("s"))
         run = Run(
-            inputs=(RunEdge("in-rec", "records", rec), RunEdge("in-str", "structures", struct)),
+            inputs=(RunEdge("in-rec", "records", rec), RunEdge("in-ref", "references", ref)),
             artifacts=(RunEdge("art-rec", "records", rec),),
-            outputs=(RunEdge("out-str", "structures", struct),),
+            outputs=(RunEdge("out-ref", "references", ref),),
             source_id="ws:job",
         )
         run_id = _save(store, run)
@@ -110,15 +110,15 @@ def test_sql_provider_forward_three_groups_and_reverse() -> None:
         for entry in forward:
             by_key.setdefault(entry.relationship, []).append((entry.entry_type, entry.id, entry.role, entry.label))
         assert sorted(by_key["_httk_has_input"]) == sorted(
-            [("_httk_records", rec, "input", "in-rec"), ("structures", struct, "input", "in-str")]
+            [("_httk_records", rec, "input", "in-rec"), ("references", ref, "input", "in-ref")]
         )
         assert by_key["_httk_has_artifact"] == [("_httk_records", rec, "artifact", "art-rec")]
-        assert by_key["_httk_has_output"] == [("structures", struct, "output", "out-str")]
+        assert by_key["_httk_has_output"] == [("references", ref, "output", "out-ref")]
 
         rec_rel = dict(provider.relationships("_httk_records"))[rec]
-        struct_rel = dict(provider.relationships("structures"))[struct]
+        ref_rel = dict(provider.relationships("references"))[ref]
         rec_by_key = {e.relationship: e for e in rec_rel}
-        struct_by_key = {e.relationship: e for e in struct_rel}
+        ref_by_key = {e.relationship: e for e in ref_rel}
 
         # (c) reverse on the prefixed _httk_records target is wire-named both the
         # relationship key and the identifier type; role/label match the forward.
@@ -133,9 +133,9 @@ def test_sql_provider_forward_three_groups_and_reverse() -> None:
         assert rec_by_key["_httk_is_artifact"].entry_type == "_httk_runs"
         assert rec_by_key["_httk_is_artifact"].id == run_id
         assert rec_by_key["_httk_is_artifact"].label == "art-rec"
-        assert struct_by_key["_httk_is_input"].entry_type == "_httk_runs"
-        assert struct_by_key["_httk_is_input"].label == "in-str"
-        assert struct_by_key["_httk_is_output"].label == "out-str"
+        assert ref_by_key["_httk_is_input"].entry_type == "_httk_runs"
+        assert ref_by_key["_httk_is_input"].label == "in-ref"
+        assert ref_by_key["_httk_is_output"].label == "out-ref"
 
 
 def test_sql_federation_forward_and_reverse_pages() -> None:
@@ -276,10 +276,10 @@ def test_forward_only_run_has_no_hydrated_target_dependency() -> None:
     """A run whose edges point at unserved ids still serves its forward edges."""
     with Backend.sqlite() as database:
         store = _store(database)
-        run_id = _save(store, Run(inputs=(RunEdge("dangling", "structures", "no-such-id"),), source_id="j"))
+        run_id = _save(store, Run(inputs=(RunEdge("dangling", "references", "no-such-id"),), source_id="j"))
         forward = dict(_provider(store).relationships("_httk_runs"))[run_id]
         assert [(e.relationship, e.entry_type, e.id) for e in forward] == [
-            ("_httk_has_input", "structures", "no-such-id")
+            ("_httk_has_input", "references", "no-such-id")
         ]
 
 

@@ -76,6 +76,13 @@ target: a content-id anti-join, a `by_value` whole-parent-column anti-join with
 null-safe equality, and a sid remap that rewrites every still-buffered reference
 to the deduplicated existing sid.
 
+Serial parity finalization synchronizes durable entry identity ownership only
+for rows appended by that ingest. It keeps one allocated sid range per backing
+table; deduplicated rows create no new claims. New claims still enforce public
+and immutable identity uniqueness against all existing family owners. Parallel
+and deferred initial builds, and explicit ownership upgrades, validate every
+surviving entry row.
+
 **Returned sids are provisional.** `bulk.save()` returns an integer sid like
 `save()`, but it is provisional while the context is open: a record that
 deduplicates against a row the store already held is remapped to that existing

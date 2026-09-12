@@ -866,10 +866,22 @@ class SqlStore:
             sqlalchemy.insert(metadata).values(key=_IDENTITY_OWNERSHIP_KEY, value=_IDENTITY_OWNERSHIP_VERSION)
         )
 
-    def _sync_identity_ownership(self, connection: sqlalchemy.Connection, layout: StorageLayout) -> None:
-        """Validate durable family identities and fill missing claims, including bulk survivors."""
-        # ponytail: one set-wise family scan at bulk finalization; restrict it to
-        # appended owners if incremental bulk workloads make this scan material.
+    def _sync_identity_ownership(
+        self,
+        connection: sqlalchemy.Connection,
+        layout: StorageLayout,
+        *,
+        sid_ranges: Mapping[str, tuple[int, int]] | None = None,
+    ) -> None:
+        """Validate and claim identities, optionally for appended rows only.
+
+        ``sid_ranges`` maps physical backing tables to half-open allocated sid
+        ranges. Omitted tables are skipped; None scans every backing for upgrade
+        and initial-build validation. Even scoped claims are checked against all
+        durable owners by the ownership tables' native uniqueness constraints.
+        """
+        if sid_ranges is not None and not sid_ranges:
+            return
         present = actual_table_names(connection)
         for family in layout.families:
             if family.definition_id is None:
@@ -878,6 +890,8 @@ class SqlStore:
             for backing_name, record_type in zip(family.record_names, family.records, strict=True):
                 table_name = resolve_schema(record_type).table_name
                 if table_name not in present:
+                    continue
+                if sid_ranges is not None and table_name not in sid_ranges:
                     continue
                 table = table_for(
                     resolve_schema(record_type),
@@ -888,13 +902,15 @@ class SqlStore:
                     ("id", ALT_ID_COLUMN),
                     ("immutable_id", SID_COLUMN),
                 ):
-                    selections[field].append(
-                        sqlalchemy.select(
-                            table.c[field].label("value"),
-                            sqlalchemy.literal(backing_name).label("backing"),
-                            table.c[owner_column].label("owner"),
-                        ).distinct()
-                    )
+                    selection = sqlalchemy.select(
+                        table.c[field].label("value"),
+                        sqlalchemy.literal(backing_name).label("backing"),
+                        table.c[owner_column].label("owner"),
+                    ).distinct()
+                    if sid_ranges is not None:
+                        start, stop = sid_ranges[table_name]
+                        selection = selection.where(table.c[SID_COLUMN] >= start, table.c[SID_COLUMN] < stop)
+                    selections[field].append(selection)
             for field, selects in selections.items():
                 if not selects:
                     continue

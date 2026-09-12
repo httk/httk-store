@@ -27,51 +27,38 @@ reserve the project name before then.
 
 ## Prepare and check a release
 
-Update `project.version` in `pyproject.toml`. After making dependency changes,
-regenerate and commit the documentation lock:
+Set `project.version` in `pyproject.toml` to the version you intend to release,
+then run the complete preparation from the working tree with Python 3.12+:
 
 ```console
-make docs-lock
+make release-prepare VERSION=v2.1.0
 ```
 
-`make docs-lock` requires every internal `httk-*` dependency to be published
-and resolvable on PyPI at a version satisfying this project's dependency floors.
-`make release-check` only verifies an existing lock offline, so it remains
-hard-gated until that lock has been generated and committed. Until the
-dependencies are published, the development docs workflow uses its explicit
-bootstrap-fallback mode: it clones internal dependencies first, emits a warning,
-installs those checkouts, and then performs fresh external docs dependency
-resolution. Releases remain impossible by design until the lock can be
-generated and committed.
+`VERSION` is required and must equal `v` followed by `project.version`. A missing
+or mismatched version stops preparation before any files are changed. The command does not
+change the package version for you.
 
-Before tagging, refresh and commit the dependency inventories from the exact
-versions pinned by that lock:
+Preparation checks the current working tree in an isolated environment. It
+ensures the documentation lock is current, refreshes the committed inventories
+from published documentation, and runs CI, strict release documentation,
+distribution checks, a clean locked documentation installation, and isolated
+package checks. Internal `httk-*` dependencies and their versioned documentation
+must already be published at the required versions; preparation uses the network
+for dependency installation and inventory refreshes.
 
-```console
-make docs-inventories
-```
+After preparation passes, review and commit the verified changes, including
+any updated documentation lock and inventories. Follow the printed commands to
+tag and push that commit and create its GitHub release. Preparation itself does
+not commit, tag, push, or publish anything. If you change release inputs after a
+successful run, run the preparation again before committing and tagging.
 
-The dependency release documentation must already be published at those
-versions. `make release-check` validates lock freshness; the workflow's
-`check-release` validates the inventory headers against the lock pins. From a
-Python 3.12 environment,
-install the development tools and run the complete local check:
+`make release-check` remains the local CI/documentation/distribution gate used
+by the publication workflow. Its final output points to the full preparation
+command; it does not replace the isolated and locked-installation checks in
+`release-prepare`.
 
-```console
-python -m pip install -e ".[dev,docs,release]"
-make release-check
-```
-
-`make release-check` includes the offline documentation lock-freshness check,
-in addition to formatting, static analysis, tests, strict documentation, an
-isolated sdist/wheel build, and strict package-metadata checks. Before tagging,
-run `make docs-lock-check` for the required full clean-environment locked
-installation and strict docs build; this is a network check. The resulting
-package files are written to `dist/`.
-
-Versions on package indexes are immutable. Use a new development or release
-candidate version when repeating an upload, for example `2.1.0rc1` followed by
-`2.1.0`.
+Versions on package indexes are immutable. Use a new release candidate version
+when repeating an upload, for example `2.1.0rc1` followed by `2.1.0`.
 
 ## TestPyPI
 
@@ -99,11 +86,12 @@ real PyPI) while the package under test comes from TestPyPI.
 
 ## PyPI
 
-1. Confirm that `make release-check` succeeds on the exact commit to release.
-2. Push the commit and create a GitHub release whose tag is `v` followed by the
-   package version, for example `v2.1.0`.
-3. Publish the GitHub release and approve the protected `pypi` environment.
-4. Verify the release from a fresh environment with `pip install httk-store`.
+1. Run `make release-prepare VERSION=v2.1.0`, then review and commit the verified
+   working-tree changes.
+2. Create the matching tag, `v2.1.0`, on that commit.
+3. Push the commit and tag, then create and publish a GitHub release for that tag.
+4. Approve the protected `pypi` environment.
+5. Verify the release from a fresh environment with `pip install httk-store`.
 
 The workflow rejects a Git tag that does not match `project.version`, rebuilds
 the distributions from the tagged source, checks them, and publishes them via

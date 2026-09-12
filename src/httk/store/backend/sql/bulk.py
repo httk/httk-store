@@ -1537,7 +1537,16 @@ class BulkIngest:
         self._resync_sequences()
         self._assert_counts()
         assert self._connection is not None
-        self._store._sync_identity_ownership(self._connection, self._store.layout)
+        # Serial encoding allocates sids above each table's initial maximum.
+        # Deduplication removes provisional rows without renumbering survivors,
+        # so these ranges select only this ingest's appended rows. Track one
+        # range per table, not every sid, and skip tables with no survivors.
+        sid_ranges = {
+            name: (self._initial_next_sid.get(name, 1), self._next_sid[name])
+            for name, schema in self._parent_schema.items()
+            if schema.cls in self._store._entry_record_types and self._inserted_count.get(name, 0)
+        }
+        self._store._sync_identity_ownership(self._connection, self._store.layout, sid_ranges=sid_ranges)
 
     def _parallel_finalize(self) -> None:
         """Join the workers, merge their shards set-wise, then build indexes and verify (parallel mode)."""

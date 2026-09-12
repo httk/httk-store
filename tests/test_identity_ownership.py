@@ -6,6 +6,7 @@ from typing import Annotated, ClassVar
 
 import pytest
 import sqlalchemy
+from postgres_support import POSTGRES_PARAM, postgres_database
 from httk.core.storage import IdentitySkip, Indexed, StorageInfo, Unique
 
 from httk.store import EntryIdConflictError, EntryIdScheme
@@ -147,10 +148,10 @@ def test_bulk_claims_protect_later_writers(dialect, finalize, workers, monkeypat
         sync_calls = 0
         sync = store._sync_identity_ownership
 
-        def counted_sync(connection, layout):
+        def counted_sync(connection, layout, **kwargs):
             nonlocal sync_calls
             sync_calls += 1
-            return sync(connection, layout)
+            return sync(connection, layout, **kwargs)
 
         monkeypatch.setattr(store, "_sync_identity_ownership", counted_sync)
         with store.bulk_ingest(finalize=finalize, workers=workers) as bulk:
@@ -162,6 +163,120 @@ def test_bulk_claims_protect_later_writers(dialect, finalize, workers, monkeypat
         with pytest.raises(EntryIdConflictError):
             store.save(Second(2, "test-1-10", "test-1-10~2"))
         assert claim_counts(database) == (1, 1)
+
+
+@pytest.fixture(params=("sqlite", "duckdb", POSTGRES_PARAM))
+def append_database(request):
+    factory = postgres_database if request.param == "postgresql" else getattr(Backend, request.param)
+    with factory() as database:
+        yield database
+
+
+def test_bulk_append_submits_only_new_surviving_claims(append_database):
+    database = append_database
+    store = opened(database)
+    original = First(1)
+    sid = store.save(original)
+    public_id = store.fetch(First, sid, eager=True).id
+    store.replace(original, First(2))
+    store.save(First(3), alternative_of=public_id, alternative_kind="test")
+    store.save(Second(10))
+    assert claim_counts(database) == (2, 4)
+    submissions = []
+
+    def observe_claims(connection, statement, multiparams, params, execution_options):
+        if isinstance(statement, sqlalchemy.sql.dml.Insert) and statement.table.name in {
+            table.name for table in identity_owner_tables(sqlalchemy.MetaData())
+        }:
+            # Inspect the actual INSERT SELECT input, so this fails if future
+            # finalizers resubmit old owners even though final counts agree.
+            submissions.append((statement.table.name, connection.execute(statement.select).all()))
+
+    sqlalchemy.event.listen(database.engine, "before_execute", observe_claims)
+    try:
+        for batch in range(2):
+            with store.bulk_ingest(finalize="parity", chunk_size=1, verify_metadata=False) as bulk:
+                hit = bulk.save(original)  # Allocated then discarded, leaving a sid gap.
+                bulk.save(First(20 + batch * 2))
+                bulk.save(First(21 + batch * 2))
+            assert bulk.resolved_sid(First, hit) == sid
+            assert len(submissions) == 2
+            for _, claims in submissions:
+                assert len(claims) == 2
+                assert {row[2] for row in claims} == {"first"}
+            submissions.clear()
+        assert claim_counts(database) == (6, 8)
+        with store.bulk_ingest(finalize="parity", verify_metadata=False) as bulk:
+            bulk.save(original)
+        with store.bulk_ingest(finalize="parity"):
+            pass
+        assert submissions == []
+        assert claim_counts(database) == (6, 8)
+    finally:
+        sqlalchemy.event.remove(database.engine, "before_execute", observe_claims)
+
+
+@pytest.mark.parametrize("field", ("id", "immutable_id"))
+def test_bulk_append_durable_cross_backing_conflict_rolls_back(append_database, field, monkeypatch):
+    database = append_database
+    store = opened(database)
+    store.save(First(1, "test-1-10", "test-1-10~1"))
+    store.ensure_tables(Second)
+    # Exercise durable arbitration independently of advisory backing queries.
+    monkeypatch.setattr(store, "_entry_family_tables", lambda record_type: ())
+    values = {"id": "test-1-20", "immutable_id": "test-1-20~1"}
+    values[field] = "test-1-10" if field == "id" else "test-1-10~1"
+    with pytest.raises(EntryIdConflictError):
+        with store.bulk_ingest(finalize="parity", chunk_size=1) as bulk:
+            bulk.save(Second(2))
+            bulk.save(Second(3, **values))
+    assert claim_counts(database) == (1, 1)
+    with database.engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT count(*) FROM ownership_second").scalar_one() == 0
+    with store.bulk_ingest(finalize="parity", chunk_size=1) as bulk:
+        bulk.save(Second(2))
+        bulk.save(Second(3))
+    assert claim_counts(database) == (3, 3)
+
+
+def test_bulk_append_claims_existing_and_new_backing_tables(append_database):
+    database = append_database
+    store = opened(database)
+    store.save(First(1))
+    with store.bulk_ingest(finalize="parity", chunk_size=1) as bulk:
+        bulk.save(First(2))
+        bulk.save(Second(3))
+    assert claim_counts(database) == (3, 3)
+    with database.engine.connect() as connection:
+        for table in identity_owner_tables(sqlalchemy.MetaData()):
+            assert sorted(connection.execute(sqlalchemy.select(table.c.backing)).scalars()) == [
+                "first",
+                "first",
+                "second",
+            ]
+
+
+@pytest.mark.parametrize("field", ("id", "immutable_id"))
+def test_bulk_append_rejects_existing_owner_with_another_identity(append_database, field):
+    database = append_database
+    store = opened(database)
+    store.ensure_tables(First, Second)
+    entry, immutable = identity_owner_tables(sqlalchemy.MetaData())
+    target = entry if field == "id" else immutable
+    id_column, owner_column = ("entry_id", "logical_id") if field == "id" else ("immutable_id", "sid")
+    # Simulate an existing claim for the appended owner's sid under another id.
+    with database.engine.begin() as connection:
+        connection.execute(
+            target.insert().values(
+                family="ownership-test", backing="second", **{id_column: "reserved", owner_column: 1}
+            )
+        )
+    with pytest.raises(EntryIdConflictError):
+        with store.bulk_ingest(finalize="parity") as bulk:
+            bulk.save(Second(1))
+    assert claim_counts(database) == ((1, 0) if field == "id" else (0, 1))
+    with database.engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT count(*) FROM ownership_second").scalar_one() == 0
 
 
 @pytest.mark.parametrize("interrupted", (False, True))

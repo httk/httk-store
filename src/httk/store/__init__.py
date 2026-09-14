@@ -28,7 +28,11 @@ supplies *capabilities*:
   dataclasses (:class:`~httk.store.backend.sql.store.SqlStore` over SQLite, DuckDB,
   PostgreSQL, or ClickHouse),
   served through the provider contract by
-  :class:`~httk.store.backend.sql.entry_provider.StoreEntryProvider`.
+  :class:`~httk.store.backend.sql.entry_provider.StoreEntryProvider`; and
+
+- the **remote OPTIMADE client** (:mod:`httk.store.optimade`) — the synchronous,
+  read-only client for remote (federated) OPTIMADE services and its portable
+  query layer.
 
 The providers self-register (under ``httk.registry.entries.store``, as
 ``store-references``/``store-files``/``store-calculations``/``store-db-store``)

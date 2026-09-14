@@ -167,6 +167,11 @@ nitpick_ignore = [
     # so their annotation xrefs cannot resolve (same precedent as _Context above).
     ("py:class", "_Node"),
     ("py:class", "_SlicerStr"),
+    # The remote OPTIMADE client's public RemoteSearcher.variable() returns the
+    # module-private _RemoteVariable; the private class is deliberately
+    # undocumented, so its annotation xref cannot resolve (same precedent as
+    # _Context above).
+    ("py:class", "_RemoteVariable"),
     # AutoAPI renders ResultSetLike.one as a bare method reference in the
     # protocol and implementing result-set summaries.  There is no module-level
     # ``one`` method for Sphinx to resolve; the qualified class members remain

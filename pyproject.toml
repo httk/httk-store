@@ -40,6 +40,10 @@ Issues = "https://github.com/httk/httk-store/issues"
 
 [project.optional-dependencies]
 dev = [
+  # Remote OPTIMADE client tests exercise the atomistic binding over an ASGI transport.
+  "httk-atomistic>=2.1.0,<3",
+  "httk-serve>=2.1.0,<3",
+  "httpx>=0.27",
   "pytest>=8.0",
   "pytest-xdist>=3.6",
   "ruff>=0.16,<0.17",

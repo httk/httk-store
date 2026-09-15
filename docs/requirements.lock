@@ -77,7 +77,7 @@ sphinxcontrib-serializinghtml==2.0.0
 sqlalchemy==2.0.53
 stack-data==0.6.3
 tabulate==0.10.0
-tornado==6.5.9
+tornado==6.5.10
 traitlets==5.16.1
 typing-extensions==4.16.0
 urllib3==2.7.0

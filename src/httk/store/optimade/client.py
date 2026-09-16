@@ -275,6 +275,7 @@ class OptimadeStore:
     :param max_pages: Maximum continuation pages followed by one query.
     :param allow_cross_origin_pagination: Permit continuation links on another origin.
     :param response_fields: Default response-field selection for new searchers.
+    :param count_by_pagination: Count IDs across all pages when the service omits ``meta.data_returned``.
     :raises OptimadeVersionNegotiationError: If the service cannot select a supported version.
     :raises OptimadeDiscoveryError: If discovery documents are malformed.
     """
@@ -288,6 +289,7 @@ class OptimadeStore:
         max_pages: int = 10_000,
         allow_cross_origin_pagination: bool = False,
         response_fields: object | None = None,
+        count_by_pagination: bool = False,
     ) -> None:
         self._requested_transport_base_url = self._normalise_base_url(base_url)
         self.requested_base_url = redact_optimade_url(self._requested_transport_base_url)
@@ -303,8 +305,11 @@ class OptimadeStore:
         self.max_pages = self._positive_int(max_pages, "max_pages")
         if not isinstance(allow_cross_origin_pagination, bool):
             raise TypeError("allow_cross_origin_pagination must be a bool")
+        if not isinstance(count_by_pagination, bool):
+            raise TypeError("count_by_pagination must be a bool")
         self.allow_cross_origin_pagination = allow_cross_origin_pagination
         self.response_fields = response_fields
+        self.count_by_pagination = count_by_pagination
         self._lock = RLock()
         self._closed = False
         self._owned_client = client is None

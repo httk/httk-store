@@ -79,7 +79,7 @@ class OptimadePaginationError(OptimadeResponseError):
 
 
 class CountUnavailableError(OptimadeResponseError, NeutralCountUnavailableError):
-    """The service omitted a valid filtered ``meta.data_returned`` count."""
+    """The client could not obtain an exact filtered result count."""
 
 
 @dataclass(slots=True)
@@ -1247,7 +1247,7 @@ class RemoteSearcher:
         if not isinstance(meta, dict):
             raise OptimadeResponseError(f"OPTIMADE response from {_safe_source(source_url)!r} has no object meta")
         data_returned = meta.get("data_returned")
-        if "data_returned" in meta and (
+        if data_returned is not None and (
             not isinstance(data_returned, int) or isinstance(data_returned, bool) or data_returned < 0
         ):
             raise OptimadeResponseError(
@@ -1489,10 +1489,14 @@ class RemoteSearcher:
     def count(self) -> int:
         """Return the filtered remote count.
 
-        :return: ``meta.data_returned`` reported by the service.
-        :raises CountUnavailableError: If the service omits a valid count.
+        A valid optional ``meta.data_returned`` is the fast path. If it is
+        absent or ``null``, counting raises unless the store enables ID
+        pagination explicitly.
+
+        :return: Exact number of filtered remote results.
+        :raises CountUnavailableError: If no valid count is reported and ID pagination is disabled.
         """
-        self._require_variable()
+        descriptor, _variable = self._require_variable()
         if self._count_cache.value is not None:
             return self._count_cache.value
         url = self._request_url(
@@ -1507,8 +1511,33 @@ class RemoteSearcher:
         if not isinstance(meta, dict):
             raise CountUnavailableError("OPTIMADE count response has no object meta")
         value = meta.get("data_returned")
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise CountUnavailableError("OPTIMADE count response has no valid nonnegative meta.data_returned")
+        if value is None:
+            if not self._store.count_by_pagination:
+                raise CountUnavailableError(
+                    "OPTIMADE count response omitted meta.data_returned; pass "
+                    "count_by_pagination=True to OptimadeStore to count by fetching ID pages"
+                )
+            data = root.get("data")
+            if (
+                isinstance(data, list)
+                and meta.get("more_data_available") is False
+                and self._next_link(root, url) is None
+            ):
+                self._validate_entry_page(root, url, descriptor.name)
+                value = len(data)
+            else:
+                counter = self._clone()
+                counter._sorts = []
+                counter._outputs = []
+                counter._limit = None
+                counter.offset = 0
+                id_field = counter._fields.get("id")
+                if id_field is None:
+                    raise CountUnavailableError("OPTIMADE count fallback requires the protocol id field")
+                counter._response_transport_fields = (id_field._remote_name,)
+                value = sum(1 for _value, _resource in counter._objects())
+        elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CountUnavailableError("OPTIMADE count response has invalid nonnegative meta.data_returned")
         self._count_cache.value = value
         return value
 

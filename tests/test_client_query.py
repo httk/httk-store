@@ -153,6 +153,7 @@ def make_files(
     sortable: tuple[str, ...] = (),
     response_fields: object = None,
     response_defaults: tuple[str, ...] = (),
+    count_by_pagination: bool = False,
 ) -> tuple[OptimadeStore, QueryClient]:
     names = ("id", "type", "immutable_id", "last_modified", "url")
     client = QueryClient(
@@ -167,7 +168,12 @@ def make_files(
         query_responses,
         describedby=FILES,
     )
-    return OptimadeStore(client.base_url, client=client, response_fields=response_fields), client
+    return OptimadeStore(
+        client.base_url,
+        client=client,
+        response_fields=response_fields,
+        count_by_pagination=count_by_pagination,
+    ), client
 
 
 def make_structures(
@@ -705,13 +711,71 @@ def test_count_uses_data_returned_and_len_applies_offset_limit_and_cache() -> No
     assert params["response_fields"] == ["id"]
 
 
-@pytest.mark.parametrize("returned", [None, True, -1, "9"])
-def test_count_requires_valid_data_returned(returned: object | None) -> None:
-    store, _client = make_files([page([], returned=returned)])
+@pytest.mark.parametrize("returned", [True, -1, "9"])
+def test_count_requires_valid_data_returned(returned: object) -> None:
+    store, _client = make_files([page([resource("f-1", "renamed-files")], returned=returned)])
     searcher = store.searcher()
     searcher.variable(store.entry_types[0])
     with pytest.raises(CountUnavailableError):
         searcher.count()
+
+
+@pytest.mark.parametrize("returned", [_DEFAULT, None])
+def test_count_missing_total_requires_explicit_pagination_opt_in(returned: object) -> None:
+    count_response = (
+        response({"data": [], "meta": {"more_data_available": False}, "links": {"next": None}})
+        if returned is _DEFAULT
+        else page([], returned=returned)
+    )
+    store, client = make_files([count_response])
+    searcher = store.searcher()
+    searcher.variable(store.entry_types[0])
+
+    with pytest.raises(CountUnavailableError, match="count_by_pagination=True"):
+        searcher.count()
+    assert len(client.requests) == 3
+
+
+@pytest.mark.parametrize("returned", [_DEFAULT, None])
+def test_opt_in_count_infers_zero_from_an_exhausted_empty_response(returned: object) -> None:
+    count_response = (
+        response({"data": [], "meta": {"more_data_available": False}, "links": {"next": None}})
+        if returned is _DEFAULT
+        else page([], returned=returned)
+    )
+    store, client = make_files([count_response], count_by_pagination=True)
+    searcher = store.searcher()
+    searcher.variable(store.entry_types[0])
+
+    assert searcher.count() == 0
+    assert searcher.count() == 0
+    assert len(client.requests) == 3
+
+
+def test_count_paginates_ids_when_optional_data_returned_is_unavailable() -> None:
+    next_url = "https://example.test/v1/renamed-files?page_offset=2"
+    store, client = make_files(
+        [
+            page([resource("f-1", "renamed-files")], more=True, next_link="?page_offset=1", returned=None),
+            page(
+                [resource("f-1", "renamed-files"), resource("f-2", "renamed-files")],
+                more=True,
+                next_link=next_url,
+                returned=None,
+            ),
+            page([resource("f-3", "renamed-files")], returned=None),
+        ],
+        count_by_pagination=True,
+    )
+    searcher = store.searcher()
+    searcher.variable(store.entry_types[0])
+
+    assert searcher.count() == 3
+    assert searcher.count() == 3
+    assert len(client.requests) == 5
+    fallback = query_parameters(client, index=3)
+    assert fallback["page_limit"] == ["50"]
+    assert fallback["response_fields"] == ["id"]
 
 
 def test_count_unavailable_error_preserves_optimade_and_neutral_categories() -> None:

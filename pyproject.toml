@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "httk-store"
-version = "2.1.1"
+version = "2.1.2"
 description = "httk₂ module for data management: entry providers, property-definition validation, and database storage."
 readme = "README.md"
 license = "AGPL-3.0-or-later"

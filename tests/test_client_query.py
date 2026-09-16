@@ -1075,6 +1075,12 @@ def test_slicer_mask_filters_iterates_transport_resources_and_compiles_the_wire_
     assert len(rows) == 1
     assert isinstance(rows[0], OptimadeResource)
     assert rows[0].id == "g1"
+    assert rows[0]._anyterial_max_spin_splitting == Decimal("0.7")
+    assert rows[0]._anyterial_formula is None
+    with pytest.raises(AttributeError):
+        _value = rows[0]._ipython_canary_method_should_not_exist_
+    with pytest.raises(AttributeError):
+        _value = rows[0].__wrapped__
     rendered = query_parameters(client)["filter"][0]
     assert "_anyterial_max_spin_splitting > 0.5" in rendered
     parse_optimade_filter(rendered)

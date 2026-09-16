@@ -524,6 +524,7 @@ class _Output:
 _BOUND_STORE = "_httk_bound_store"
 _BOUND_RESOURCE = "_httk_bound_resource"
 _BOUND_LINKS = "_httk_bound_links"
+_BOUND_ATTRIBUTES = "_httk_bound_attributes"
 _MISSING = object()
 
 
@@ -534,11 +535,12 @@ def _bound_class(cls: type) -> type:
     Mirrors ``httk.store.backend.mongo.store._bound_record_class``: the
     subclass keeps the base dataclass's equality, hash, and repr semantics
     intact (a bound instance and a plain one compare and hash equal) and
-    adds only the hidden store/resource slots :func:`RemoteSearcher._wrap`
-    sets, the ``links`` descriptor, and ``__reduce_ex__`` -- so pickling,
-    copying, or :func:`dataclasses.replace` on a bound instance always
-    produces the plain base class, never one still carrying a live store
-    reference.
+    adds the hidden state :func:`RemoteSearcher._wrap` sets, the ``links``
+    descriptor, and ``__reduce_ex__`` -- so pickling, copying, or
+    :func:`dataclasses.replace` on a bound instance always produces the plain
+    base class, never one still carrying a live store reference. Generic
+    resources additionally expose advertised OPTIMADE attributes by their
+    transport names; omitted advertised values read as ``None``.
 
     :param cls: The plain backend dataclass to derive a bound subclass from.
     :return: The cached bound subclass.
@@ -572,6 +574,15 @@ def _bound_class(cls: type) -> type:
     def reduce(self: Any, _protocol: int) -> tuple[type, tuple[Any, ...]]:
         return (cls, tuple(getattr(self, name) for name in field_names))
 
+    def resource_getattr(self: OptimadeResource, name: str) -> object:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        advertised = self.__dict__.get(_BOUND_ATTRIBUTES, ())
+        if name not in advertised:
+            raise AttributeError(name)
+        attributes = self.unwrap().get("attributes")
+        return attributes.get(name) if isinstance(attributes, Mapping) else None
+
     attrs: dict[str, Any] = {
         "__module__": cls.__module__,
         "__httk_storage_record__": cls,
@@ -583,6 +594,8 @@ def _bound_class(cls: type) -> type:
         "__reduce_ex__": reduce,
         "links": _RemoteLinksDescriptor(),
     }
+    if cls is OptimadeResource:
+        attrs["__getattr__"] = resource_getattr
     bound_type = type(f"{cls.__name__}Remote", (cls,), attrs)
     return bound_type
 
@@ -1303,6 +1316,7 @@ class RemoteSearcher:
         if descriptor.backend is OptimadeResource:
             bound_cls = _bound_class(OptimadeResource)
             instance = bound_cls(resource.document, resource.data_index, resource.schema, resource.member)
+            object.__setattr__(instance, _BOUND_ATTRIBUTES, descriptor.advertised_properties)
         else:
             bound_cls = _bound_class(descriptor.backend)
             instance = cast(Callable[[OptimadeResource], object], bound_cls)(resource)

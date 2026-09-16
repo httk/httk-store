@@ -525,6 +525,7 @@ _BOUND_STORE = "_httk_bound_store"
 _BOUND_RESOURCE = "_httk_bound_resource"
 _BOUND_LINKS = "_httk_bound_links"
 _BOUND_ATTRIBUTES = "_httk_bound_attributes"
+_BOUND_ATTRIBUTE_CACHE = "_httk_bound_attribute_cache"
 _MISSING = object()
 
 
@@ -540,7 +541,8 @@ def _bound_class(cls: type) -> type:
     :func:`dataclasses.replace` on a bound instance always produces the plain
     base class, never one still carrying a live store reference. Generic
     resources additionally expose advertised OPTIMADE attributes by their
-    transport names; omitted advertised values read as ``None``.
+    transport names; omitted values are fetched once from the single-resource
+    endpoint and memoized per bound record.
 
     :param cls: The plain backend dataclass to derive a bound subclass from.
     :return: The cached bound subclass.
@@ -581,7 +583,21 @@ def _bound_class(cls: type) -> type:
         if name not in advertised:
             raise AttributeError(name)
         attributes = self.unwrap().get("attributes")
-        return attributes.get(name) if isinstance(attributes, Mapping) else None
+        if isinstance(attributes, Mapping) and name in attributes:
+            return attributes[name]
+        cached = self.__dict__.get(_BOUND_ATTRIBUTE_CACHE)
+        if isinstance(cached, Mapping) and name in cached:
+            return cached[name]
+        try:
+            store = self.__dict__[_BOUND_STORE]
+            resource = self.__dict__[_BOUND_RESOURCE]
+        except KeyError:
+            raise AttributeError(name) from None
+        value = RemoteSearcher._fetch_attribute(store, resource, name)
+        values = dict(cached) if isinstance(cached, Mapping) else {}
+        values[name] = value
+        object.__setattr__(self, _BOUND_ATTRIBUTE_CACHE, MappingProxyType(values))
+        return value
 
     attrs: dict[str, Any] = {
         "__module__": cls.__module__,
@@ -1251,12 +1267,12 @@ class RemoteSearcher:
     @staticmethod
     def _validate_resource_item(
         item: object,
-        index: int,
+        index: int | None,
         *,
         member: str,
         endpoint: str | None = None,
     ) -> Mapping[str, object]:
-        """Validate one JSON:API resource object from a response envelope array.
+        """Validate one JSON:API resource object from a response envelope.
 
         Shared by primary ``data`` page validation (``_validate_entry_page``)
         and included-member validation (``_RemoteLinksAccessor``): both apply
@@ -1266,7 +1282,7 @@ class RemoteSearcher:
         endpoint.
 
         :param item: Candidate resource object.
-        :param index: Index within the ``member`` array, for diagnostics.
+        :param index: Index within the ``member`` array, or ``None`` for a single-resource member.
         :param member: Envelope member name, for diagnostics (``"data"`` or ``"included"``).
         :param endpoint: Required resource ``type``, or ``None`` to accept any type.
         :return: The validated resource object.
@@ -1277,24 +1293,47 @@ class RemoteSearcher:
         # dicts, but included-member items (_RemoteLinksAccessor) come from
         # the frozen, already-redacted document root, whose objects are
         # immutable MappingProxyType instances rather than dicts.
+        location = member if index is None else f"{member}[{index}]"
         if not isinstance(item, Mapping):
-            raise OptimadeResponseError(f"OPTIMADE response {member}[{index}] must be an object")
+            raise OptimadeResponseError(f"OPTIMADE response {location} must be an object")
         for envelope_member in ("id", "type"):
             envelope_value = item.get(envelope_member)
             if not isinstance(envelope_value, str) or not envelope_value:
-                raise OptimadeResponseError(
-                    f"OPTIMADE response {member}[{index}].{envelope_member} must be a nonempty string"
-                )
+                raise OptimadeResponseError(f"OPTIMADE response {location}.{envelope_member} must be a nonempty string")
         if endpoint is not None and item["type"] != endpoint:
             raise OptimadeResponseError(
-                f"OPTIMADE response {member}[{index}].type does not match queried endpoint {endpoint!r}"
+                f"OPTIMADE response {location}.type does not match queried endpoint {endpoint!r}"
             )
         for sub_member in ("attributes", "relationships"):
             if sub_member in item and not isinstance(item[sub_member], Mapping):
-                raise OptimadeResponseError(
-                    f"OPTIMADE response {member}[{index}].{sub_member} must be an object when present"
-                )
+                raise OptimadeResponseError(f"OPTIMADE response {location}.{sub_member} must be an object when present")
         return item
+
+    @staticmethod
+    def _fetch_attribute(store: OptimadeStore, resource: OptimadeResource, name: str) -> object:
+        """Fetch one omitted advertised attribute from its single-resource endpoint."""
+
+        url = (
+            store._transport_base_url
+            + "/"
+            + quote(resource.type, safe="")
+            + "/"
+            + quote(resource.id, safe="")
+            + "?"
+            + urlencode({"response_fields": name})
+        )
+        text = store._get(url)
+        root = RemoteSearcher._raw_root(text, url)
+        RemoteSearcher._log_page_warnings(root)
+        item = RemoteSearcher._validate_resource_item(root.get("data"), None, member="data", endpoint=resource.type)
+        if item["id"] != resource.id:
+            raise OptimadeResponseError(
+                f"OPTIMADE single-resource response id {item['id']!r} does not match requested id {resource.id!r}"
+            )
+        document = OptimadeDocument.from_response(text, url)
+        fetched = OptimadeResource(document, 0, resource.schema)
+        attributes = fetched.unwrap().get("attributes")
+        return attributes.get(name) if isinstance(attributes, Mapping) else None
 
     @staticmethod
     def _wrap(store: OptimadeStore, descriptor: RemoteEntryType, resource: OptimadeResource) -> object:

@@ -1064,7 +1064,9 @@ def test_float_literals_render_as_shortest_round_trip_decimal_text() -> None:
 
 
 def test_slicer_mask_filters_iterates_transport_resources_and_compiles_the_wire_filter() -> None:
-    store, client = make_altermagnets([page([resource("g1", "materials", {"_anyterial_max_spin_splitting": 0.7})])])
+    store, client = make_altermagnets(
+        [page([resource("g1", "materials", {"_anyterial_formula": None, "_anyterial_max_spin_splitting": 0.7})])]
+    )
     mats = store.slicer("materials")
 
     # A list comprehension, not list(): SlicerSelection also defines __len__,
@@ -1084,6 +1086,39 @@ def test_slicer_mask_filters_iterates_transport_resources_and_compiles_the_wire_
     rendered = query_parameters(client)["filter"][0]
     assert "_anyterial_max_spin_splitting > 0.5" in rendered
     parse_optimade_filter(rendered)
+
+
+def test_generic_record_lazily_fetches_and_caches_an_omitted_advertised_attribute() -> None:
+    store, client = make_altermagnets(
+        [
+            page([resource("g1", "materials", {"_anyterial_max_spin_splitting": 0.7})]),
+            response({"data": resource("g1", "materials", {"_anyterial_formula": "Fe2O3"})}),
+        ]
+    )
+    mats = store.slicer("materials")
+    hit = next(iter(mats[mats["_anyterial_max_spin_splitting"] > 0.5]))
+    requests_before = len(client.requests)
+
+    assert hit._anyterial_formula == "Fe2O3"
+    assert hit._anyterial_formula == "Fe2O3"
+    assert len(client.requests) == requests_before + 1
+    fetch_url = client.requests[-1]
+    assert urlsplit(fetch_url).path.endswith("/materials/g1")
+    assert parse_qs(urlsplit(fetch_url).query) == {"response_fields": ["_anyterial_formula"]}
+
+
+def test_generic_record_lazy_attribute_fetch_rejects_a_different_resource_id() -> None:
+    store, _client = make_altermagnets(
+        [
+            page([resource("g1", "materials")]),
+            response({"data": resource("g2", "materials", {"_anyterial_formula": "Fe2O3"})}),
+        ]
+    )
+    mats = store.slicer("materials")
+    hit = next(iter(mats[mats["_anyterial_max_spin_splitting"] > 0.5]))
+
+    with pytest.raises(OptimadeResponseError, match="does not match requested id"):
+        _value = hit._anyterial_formula
 
 
 def test_slicer_len_issues_a_count_shaped_request() -> None:

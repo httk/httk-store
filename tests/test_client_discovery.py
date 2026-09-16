@@ -3,7 +3,7 @@
 import json
 from dataclasses import dataclass
 
-import httpx
+import httpx2
 import pytest
 from httk.core.optimade import OptimadeResource
 
@@ -203,7 +203,7 @@ def test_no_supported_advertised_major_fails_after_versions() -> None:
 def test_owned_client_is_closed_when_versions_negotiation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     requested = "https://example.test/db"
     fake = FakeClient({requested + "/versions": [FakeResponse(200, "version\n2\n")]})
-    monkeypatch.setattr(httpx, "Client", lambda: fake)
+    monkeypatch.setattr(httpx2, "Client", lambda: fake)
 
     with pytest.raises(OptimadeVersionNegotiationError):
         OptimadeStore(requested)
@@ -437,13 +437,13 @@ def test_duplicate_property_iri_is_malformed_and_owned_client_is_closed() -> Non
             ],
         }
     )
-    original = httpx.Client
-    httpx.Client = lambda: fake  # type: ignore[assignment]
+    original = httpx2.Client
+    httpx2.Client = lambda: fake  # type: ignore[assignment]
     try:
         with pytest.raises(OptimadeDiscoveryError, match="same definition IRI"):
             OptimadeStore(base_url)
     finally:
-        httpx.Client = original  # type: ignore[assignment]
+        httpx2.Client = original  # type: ignore[assignment]
     assert fake.closed
 
 

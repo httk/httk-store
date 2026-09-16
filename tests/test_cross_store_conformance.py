@@ -3,7 +3,7 @@
 The remote client is deliberately exercised through a real in-process ASGI
 application, rather than Starlette's ``TestClient``: its blocking portal is
 not reliable in this workspace.  ``AsgiSyncClient`` is a tiny synchronous
-bridge over ``httpx.ASGITransport`` and rejects every non-testserver URL, so
+bridge over ``httpx2.ASGITransport`` and rejects every non-testserver URL, so
 these tests cannot contact the network.
 """
 
@@ -14,7 +14,7 @@ from fractions import Fraction
 from typing import Annotated, Any, ClassVar, cast
 from urllib.parse import quote, urlsplit
 
-import httpx
+import httpx2
 import pytest
 from httk.atomistic import OptimadeStructure, Species, StructureEntryProvider, UnitcellStructure
 from httk.core import (
@@ -40,7 +40,7 @@ from httk.store.optimade import OptimadeStore
 
 
 class AsgiSyncClient:
-    """Minimal synchronous httpx client adapter with no network escape hatch."""
+    """Minimal synchronous httpx2 client adapter with no network escape hatch."""
 
     def __init__(self, app: Any, *, base_url: str) -> None:
         self.app = app
@@ -48,13 +48,13 @@ class AsgiSyncClient:
         self.requests: list[str] = []
         self.closed = False
 
-    def get(self, url: str) -> httpx.Response:
+    def get(self, url: str) -> httpx2.Response:
         assert urlsplit(url).netloc == urlsplit(self.base_url).netloc
         self.requests.append(url)
 
-        async def request() -> httpx.Response:
-            transport = httpx.ASGITransport(app=self.app)
-            async with httpx.AsyncClient(transport=transport) as client:
+        async def request() -> httpx2.Response:
+            transport = httpx2.ASGITransport(app=self.app)
+            async with httpx2.AsyncClient(transport=transport) as client:
                 return await client.get(url)
 
         return asyncio.run(request())

@@ -314,9 +314,9 @@ class OptimadeStore:
         self._closed = False
         self._owned_client = client is None
         if client is None:
-            import httpx
+            import httpx2
 
-            client = httpx.Client()
+            client = httpx2.Client()
         self._client = client
         self._entry_types: tuple[RemoteEntryType, ...] = ()
         self._entry_types_by_name: Mapping[str, RemoteEntryType] = MappingProxyType({})

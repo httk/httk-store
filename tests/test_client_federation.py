@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 
-import httpx
+import httpx2
 import pytest
 from httk.atomistic import OptimadeStructure
 from httk.core import EntryProvider, EntryTypeDefinition, load_entry_type_definition
@@ -30,15 +30,15 @@ class AsgiSyncClient:
         self.requests: list[str] = []
         self.closed = False
 
-    def get(self, url: str) -> httpx.Response:
+    def get(self, url: str) -> httpx2.Response:
         assert urlsplit(url).netloc == urlsplit(self.base_url).netloc
         self.requests.append(url)
         if self.fail_queries and "?" in url:
             raise RuntimeError("deliberate source-specific transport failure")
 
-        async def request() -> httpx.Response:
-            transport = httpx.ASGITransport(app=self.app)
-            async with httpx.AsyncClient(transport=transport) as client:
+        async def request() -> httpx2.Response:
+            transport = httpx2.ASGITransport(app=self.app)
+            async with httpx2.AsyncClient(transport=transport) as client:
                 return await client.get(url)
 
         return asyncio.run(request())

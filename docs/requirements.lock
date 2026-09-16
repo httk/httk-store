@@ -13,7 +13,7 @@ certifi==2026.7.22
 charset-normalizer==3.5.1
 click==8.5.0
 comm==0.2.3
-debugpy==1.8.21
+debugpy==1.8.22
 docutils==0.22.4
 executing==2.2.1
 fastjsonschema==2.22.2
@@ -74,13 +74,13 @@ sphinxcontrib-htmlhelp==2.1.0
 sphinxcontrib-jsmath==1.0.1
 sphinxcontrib-qthelp==2.0.0
 sphinxcontrib-serializinghtml==2.0.0
-sqlalchemy==2.0.53
+sqlalchemy==2.0.54
 stack-data==0.6.3
 tabulate==0.10.0
 tornado==6.5.10
 traitlets==5.16.1
 typing-extensions==4.16.0
-urllib3==2.7.0
+urllib3==2.8.0
 wcwidth==0.8.3
 wheel==0.48.0
 zipp==4.1.0

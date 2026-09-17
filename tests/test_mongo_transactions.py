@@ -8,7 +8,12 @@ import pytest
 from httk.core.register import register_entry_family, register_entry_record
 from pymongo import MongoClient, monitoring
 
-from httk.store.backend.mongo import MongoDatabase, MongoStore, TransactionsUnavailableError
+from httk.store.backend.mongo import (
+    MongoDatabase,
+    MongoStore,
+    TransactionConflictError,
+    TransactionsUnavailableError,
+)
 from httk.store.backend.mongo.mapping import collection_name_for, entry_dispatch_table_name
 from httk.store.backend.schema import resolve_schema
 
@@ -130,12 +135,22 @@ def test_degraded_transaction_is_unavailable_and_rollback_does_not_cache(mongo_t
     assert store.sid_of(record) is None
 
 
+def _second_store(mongo_test_database) -> tuple[MongoDatabase, MongoStore]:
+    """Open a warmed-up second store on its own client for the same database.
+
+    Connection setup and the DDL of a fresh store are done here so that the
+    timed part of a race test contains only the race itself.
+    """
+    database = MongoDatabase(os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name)
+    store = _store(database)
+    store.ensure_collections(TxEntry)
+    return database, store
+
+
 def test_save_race_against_an_open_transaction_converges(mongo_test_database) -> None:
     first = _store(mongo_test_database)
-    second_database = MongoDatabase(
-        os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name
-    )
-    second = _store(second_database)
+    first.ensure_collections(TxEntry)
+    second_database, second = _second_store(mongo_test_database)
     record = TxEntry("race", [])
     started = threading.Event()
     finished = threading.Event()
@@ -157,10 +172,41 @@ def test_save_race_against_an_open_transaction_converges(mongo_test_database) ->
             thread = threading.Thread(target=concurrent_save)
             thread.start()
             assert started.wait(1)
-        assert finished.wait(5)
+        # Generous: only reached on failure, and CI runners under xdist load are slow.
+        assert finished.wait(30)
         thread.join(timeout=1)
         assert not errors
         assert result == [winner]
+        assert mongo_test_database.database[collection_name_for(resolve_schema(TxEntry))].count_documents({}) == 1
+    finally:
+        second_database.dispose()
+
+
+def test_save_against_a_long_transaction_is_rejected(mongo_test_database) -> None:
+    first = _store(mongo_test_database)
+    first.ensure_collections(TxEntry)
+    second_database, second = _second_store(mongo_test_database)
+    errors: list[BaseException] = []
+    finished = threading.Event()
+
+    def concurrent_save() -> None:
+        try:
+            second.save(TxEntry("loser", []))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    try:
+        with first.transaction():
+            first.save(TxEntry("holder", []))
+            thread = threading.Thread(target=concurrent_save)
+            thread.start()
+            # Outlives the save retry budget (~0.25 s) so the save must give up.
+            assert finished.wait(30)
+        thread.join(timeout=1)
+        assert len(errors) == 1 and isinstance(errors[0], TransactionConflictError)
+        assert second.sid_of(TxEntry("loser", [])) is None
         assert mongo_test_database.database[collection_name_for(resolve_schema(TxEntry))].count_documents({}) == 1
     finally:
         second_database.dispose()

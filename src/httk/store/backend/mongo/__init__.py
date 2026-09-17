@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from httk.store.store_common import EntryReplacementError
     from httk.store.store_timestamp import StoreClockRegressionError
 
-    from .database import MongoDatabase, TransactionsUnavailableError
+    from .database import MongoDatabase, TransactionConflictError, TransactionsUnavailableError
     from .documents import RecordTooLargeError
     from .entry_provider import StoreEntryProvider, auto_definition
     from .fsck import FsckCollectionSummary, FsckSummary
@@ -46,6 +46,7 @@ __all__ = [
     "StoreClockRegressionError",
     "StoreEntryProvider",
     "StoreLockedError",
+    "TransactionConflictError",
     "TransactionsUnavailableError",
     "auto_definition",
     "clear_stale_lock",
@@ -74,6 +75,7 @@ _MONGO_EXPORTS = {
     "stored_property_mongo_plan": ".stored_properties",
     "RecordTooLargeError": ".documents",
     "StoreLockedError": ".leases",
+    "TransactionConflictError": ".database",
     "TransactionsUnavailableError": ".database",
     "clear_stale_lock": ".leases",
 }

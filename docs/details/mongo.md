@@ -70,6 +70,17 @@ failure releases its writer lease, so ordinary fsck suffices. After a process is
 killed, `store.fsck(force=True)` may clear its stale lease only after you have
 verified that the writer is no longer running. Never force past a live writer.
 
+Concurrent writers are supported but not arbitrated. Saves into one
+collection contend for its sid counter document, so a save that overlaps a
+concurrent transaction on the same collection hits a write conflict. Ordinary
+saves retry a few times over roughly a quarter of a second, which lets short
+overlaps converge on the same sid, and then raise `TransactionConflictError`
+without having written anything. A long-lived explicit `transaction()` can
+therefore cause concurrent saves in other processes to be rejected; retry them
+after the transaction has ended, or serialize writers yourself when that is
+unacceptable. Within one explicit transaction, saves are not retried at all: a
+conflict aborts the whole transaction with the driver's error.
+
 `MongoDatabase.connect()` configures PyMongo with `w="majority"`,
 `journal=True`, and `readConcernLevel="majority"`. Explicit store
 transactions also use majority read and write concern with journaling. These

@@ -13,6 +13,17 @@ class TransactionsUnavailableError(RuntimeError):
     """An explicit transaction was requested without replica-set support."""
 
 
+class TransactionConflictError(RuntimeError):
+    """A save gave up after repeated write conflicts with a concurrent transaction.
+
+    Concurrent saves into one collection contend for its sid counter document.
+    MongoStore retries briefly, so short overlaps converge; a save that keeps
+    losing against a long-lived concurrent transaction is rejected with this
+    error instead of waiting for that transaction to finish.  Nothing was
+    written; the caller may retry once the other transaction has ended.
+    """
+
+
 class MongoDatabase:
     """A named MongoDB database reached through a wrapped PyMongo client.
 

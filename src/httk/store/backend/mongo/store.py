@@ -68,7 +68,7 @@ from httk.store.store_timestamp import (
     parse_store_timestamp_state,
 )
 
-from .database import MongoDatabase, TransactionsUnavailableError
+from .database import MongoDatabase, TransactionConflictError, TransactionsUnavailableError
 from .documents import decode_record, encode_record, preflight_document
 from .fsck import FsckSummary
 from .leases import WriterLease, acquire_fsck, acquire_writer, clear_stale_lock
@@ -1106,6 +1106,7 @@ class MongoStore:
         :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing collection, or itself an alternative.
         :raises ~httk.core.storage.StorageProjectionCycleError: If the projected graph cycles.
         :raises ~httk.store.store_common.EntryMetadataConflictError: If identity-excluded metadata conflicts.
+        :raises TransactionConflictError: If the save keeps losing write conflicts against a concurrent transaction.
         """
         if (alternative_of is None) != (alternative_kind is None):
             raise ValueError("alternative_of and alternative_kind must be given together, or neither")
@@ -1346,7 +1347,10 @@ class MongoStore:
                     stack.pop()
         assert last_error is not None
         self._identity._clear_identity_caches()
-        raise last_error
+        raise TransactionConflictError(
+            f"save gave up after {_TRANSACTION_ATTEMPTS} write conflicts with a concurrent transaction; "
+            "retry once the competing transaction has ended"
+        ) from last_error
 
     @staticmethod
     def _projection_state(projection: SaveProjection) -> None:

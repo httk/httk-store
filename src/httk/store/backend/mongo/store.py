@@ -1106,7 +1106,7 @@ class MongoStore:
         :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing collection, or itself an alternative.
         :raises ~httk.core.storage.StorageProjectionCycleError: If the projected graph cycles.
         :raises ~httk.store.store_common.EntryMetadataConflictError: If identity-excluded metadata conflicts.
-        :raises TransactionConflictError: If the save keeps losing write conflicts against a concurrent transaction.
+        :raises ~httk.store.backend.mongo.database.TransactionConflictError: If the save keeps losing write conflicts against a concurrent transaction.
         """
         if (alternative_of is None) != (alternative_kind is None):
             raise ValueError("alternative_of and alternative_kind must be given together, or neither")

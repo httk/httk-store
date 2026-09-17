@@ -6,7 +6,7 @@ from typing import Any, Self
 from pymongo import MongoClient
 from pymongo.read_preferences import ReadPreference
 
-__all__ = ["MongoDatabase", "TransactionsUnavailableError"]
+__all__ = ["MongoDatabase", "TransactionConflictError", "TransactionsUnavailableError"]
 
 
 class TransactionsUnavailableError(RuntimeError):

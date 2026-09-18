@@ -96,7 +96,10 @@ def _scalar_value(value: object, generic: bool, field: "_RemoteField") -> object
 
     A bound (non-generic) backend materializes a typed object with real
     attributes matching *field*'s local name, so a plain ``getattr`` is
-    exact and unchanged here.
+    exact and unchanged here. A schema-unknown advertised name (a provider
+    extension) has no decoded typed attribute, but its bound row exposes it raw
+    by exact wire name (see :func:`_bound_class`), so the same ``getattr`` still
+    resolves it.
 
     A generic (unregistered) backend has no typed object at all: *value* is
     the raw :class:`~httk.core.optimade.OptimadeResource` itself, a
@@ -529,6 +532,41 @@ _BOUND_ATTRIBUTE_CACHE = "_httk_bound_attribute_cache"
 _MISSING = object()
 
 
+def _bound_raw_attribute(instance: Any, source: OptimadeResource, name: str) -> object:
+    """Read one advertised provider-extension attribute raw from *source*.
+
+    The single raw-lookup body shared by the generic ``OptimadeResource`` bound
+    class and every typed bound class's chained ``__getattr__``: the value is
+    taken from the source resource's ``attributes``, then this row's
+    per-instance cache, then one lazy single-resource fetch. *name* is assumed
+    already admitted (an advertised name the endpoint schema does not identify);
+    a fetch with no retained store leaves it a plain missing attribute.
+
+    :param instance: The bound row carrying the hidden store, resource, and cache state.
+    :param source: The resource whose ``attributes`` hold the raw value.
+    :param name: The advertised transport name to read.
+    :return: The raw attribute value, present or fetched.
+    :raises AttributeError: If the value is absent and no store is retained to fetch it.
+    """
+
+    attributes = source.unwrap().get("attributes")
+    if isinstance(attributes, Mapping) and name in attributes:
+        return attributes[name]
+    cached = instance.__dict__.get(_BOUND_ATTRIBUTE_CACHE)
+    if isinstance(cached, Mapping) and name in cached:
+        return cached[name]
+    try:
+        store = instance.__dict__[_BOUND_STORE]
+        resource = instance.__dict__[_BOUND_RESOURCE]
+    except KeyError:
+        raise AttributeError(name) from None
+    value = RemoteSearcher._fetch_attribute(store, resource, name)
+    values = dict(cached) if isinstance(cached, Mapping) else {}
+    values[name] = value
+    object.__setattr__(instance, _BOUND_ATTRIBUTE_CACHE, MappingProxyType(values))
+    return value
+
+
 @functools.cache
 def _bound_class(cls: type) -> type:
     """Return the cached thin per-backend subclass carrying a ``.links`` accessor.
@@ -539,10 +577,15 @@ def _bound_class(cls: type) -> type:
     adds the hidden state :func:`RemoteSearcher._wrap` sets, the ``links``
     descriptor, and ``__reduce_ex__`` -- so pickling, copying, or
     :func:`dataclasses.replace` on a bound instance always produces the plain
-    base class, never one still carrying a live store reference. Generic
-    resources additionally expose advertised OPTIMADE attributes by their
-    transport names; omitted values are fetched once from the single-resource
-    endpoint and memoized per bound record.
+    base class, never one still carrying a live store reference. Both the
+    generic ``OptimadeResource`` class and every typed class expose advertised
+    OPTIMADE attributes the endpoint schema does not identify (provider
+    extensions) by their transport names -- the generic class exposes every
+    advertised name, a typed class only the unidentified ones, so its decoded
+    typed properties always win; omitted values are fetched once from the
+    single-resource endpoint and memoized per bound record. A typed class
+    chains to the backend's own ``__getattr__`` first, preserving any
+    record-field delegation.
 
     :param cls: The plain backend dataclass to derive a bound subclass from.
     :return: The cached bound subclass.
@@ -576,28 +619,42 @@ def _bound_class(cls: type) -> type:
     def reduce(self: Any, _protocol: int) -> tuple[type, tuple[Any, ...]]:
         return (cls, tuple(getattr(self, name) for name in field_names))
 
+    # A base ``__getattr__`` to preserve when chaining on a typed bound class
+    # (e.g. an entry backend that delegates record fields); ``None`` when the
+    # backend defines none, as the OPTIMADE structure and entry backends do.
+    base_getattr = None if cls is OptimadeResource else getattr(cls, "__getattr__", None)
+
     def resource_getattr(self: OptimadeResource, name: str) -> object:
+        # The generic OptimadeResource bound class, unchanged: every advertised
+        # transport name is exposed raw, read straight off the resource itself.
         if name.startswith("__"):
             raise AttributeError(name)
         advertised = self.__dict__.get(_BOUND_ATTRIBUTES, ())
         if name not in advertised:
             raise AttributeError(name)
-        attributes = self.unwrap().get("attributes")
-        if isinstance(attributes, Mapping) and name in attributes:
-            return attributes[name]
-        cached = self.__dict__.get(_BOUND_ATTRIBUTE_CACHE)
-        if isinstance(cached, Mapping) and name in cached:
-            return cached[name]
-        try:
-            store = self.__dict__[_BOUND_STORE]
-            resource = self.__dict__[_BOUND_RESOURCE]
-        except KeyError:
-            raise AttributeError(name) from None
-        value = RemoteSearcher._fetch_attribute(store, resource, name)
-        values = dict(cached) if isinstance(cached, Mapping) else {}
-        values[name] = value
-        object.__setattr__(self, _BOUND_ATTRIBUTE_CACHE, MappingProxyType(values))
-        return value
+        return _bound_raw_attribute(self, self, name)
+
+    def typed_getattr(self: Any, name: str) -> object:
+        # A typed bound class: decoded typed properties win via normal lookup
+        # (this runs only when that fails). Chain to the backend's own
+        # ``__getattr__`` first, when it has one, so record-field delegation is
+        # preserved; then expose advertised names the schema does not identify
+        # (provider extensions) raw, read from the retained source resource, so
+        # standard-name completion never withdraws a provider field.
+        if base_getattr is not None:
+            try:
+                return base_getattr(self, name)
+            except AttributeError:
+                pass
+        if name.startswith("__"):
+            raise AttributeError(name)
+        advertised = self.__dict__.get(_BOUND_ATTRIBUTES, ())
+        if name not in advertised:
+            raise AttributeError(name)
+        source = self.__dict__.get(_BOUND_RESOURCE)
+        if source is None:
+            raise AttributeError(name)
+        return _bound_raw_attribute(self, cast(OptimadeResource, source), name)
 
     attrs: dict[str, Any] = {
         "__module__": cls.__module__,
@@ -610,8 +667,7 @@ def _bound_class(cls: type) -> type:
         "__reduce_ex__": reduce,
         "links": _RemoteLinksDescriptor(),
     }
-    if cls is OptimadeResource:
-        attrs["__getattr__"] = resource_getattr
+    attrs["__getattr__"] = resource_getattr if cls is OptimadeResource else typed_getattr
     bound_type = type(f"{cls.__name__}Remote", (cls,), attrs)
     return bound_type
 
@@ -874,6 +930,25 @@ class RemoteSearcher:
                 )
                 typed_kinds[typed_local_name] = (definition.optimade_type, item_kind)
                 typed_capabilities[typed_local_name] = portable_query_capabilities(definition)
+        # Advertised names the schema does not identify (no declared or inferred
+        # definition IRI) -- provider-prefixed extensions above all -- stay
+        # queryable and projectable under their exact wire names, exactly as a
+        # generic endpoint exposes them. Standard-name completion only adds
+        # semantic identities; it never withdraws a provider field. A name that
+        # is a standard local name of this entry type is skipped even without an
+        # identity here: it belongs to the semantic vocabulary (its typed
+        # mapping, when present, may carry a different wire name) and must never
+        # be shadowed by a same-spelled unidentified advertised field.
+        for advertised_name in descriptor.advertised_properties:
+            if (
+                advertised_name in descriptor.property_iris
+                or advertised_name in schema.properties
+                or advertised_name in typed_all_fields
+            ):
+                continue
+            typed_fields[advertised_name] = advertised_name
+            typed_all_fields[advertised_name] = advertised_name
+            typed_kinds[advertised_name] = descriptor.property_types.get(advertised_name, ("unknown", None))
         return typed_fields, typed_all_fields, typed_kinds, typed_capabilities
 
     def _select_response_fields(
@@ -937,7 +1012,15 @@ class RemoteSearcher:
             schema = load_entry_type_definition(descriptor.binding.definition_id)
             definition_ids = {name: definition.definition_id for name, definition in schema.properties.items()}
         return {
-            local_name: (definition_ids[local_name], remote_name, *kinds[local_name], capabilities.get(local_name))
+            # A schema-unknown advertised name (a provider extension exposed
+            # generically) has no schema IRI; its own transport name stands in,
+            # exactly as for a generic descriptor above.
+            local_name: (
+                definition_ids.get(local_name, descriptor.property_iris.get(local_name, local_name)),
+                remote_name,
+                *kinds[local_name],
+                capabilities.get(local_name),
+            )
             for local_name, remote_name in query_fields.items()
         }
 
@@ -1359,6 +1442,26 @@ class RemoteSearcher:
         else:
             bound_cls = _bound_class(descriptor.backend)
             instance = cast(Callable[[OptimadeResource], object], bound_cls)(resource)
+            # Advertised names the schema does not identify (provider extensions)
+            # stay reachable as raw attributes on the typed row, exactly as on a
+            # generic row. A name is excluded both when it carries a definition
+            # IRI (declared or inferred) and when it is a standard local name of
+            # this entry type -- a version-gated standard name (e.g. a files
+            # ``url`` on a 1.1.0 service) belongs to the semantic vocabulary and
+            # must never leak a raw value under a standard spelling. This mirrors
+            # the exclusion in :meth:`_typed_maps`. ``binding`` is never ``None``
+            # here, since a non-generic backend is always derived from one.
+            binding = descriptor.binding
+            schema_names = () if binding is None else load_entry_type_definition(binding.definition_id).properties
+            object.__setattr__(
+                instance,
+                _BOUND_ATTRIBUTES,
+                tuple(
+                    name
+                    for name in descriptor.advertised_properties
+                    if name not in descriptor.property_iris and name not in schema_names
+                ),
+            )
         object.__setattr__(instance, _BOUND_STORE, store)
         object.__setattr__(instance, _BOUND_RESOURCE, resource)
         return instance

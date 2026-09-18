@@ -1,0 +1,183 @@
+{
+ "meta": {
+  "api_version": "1.2.0"
+ },
+ "data": {
+  "type": "info",
+  "id": "structures",
+  "description": "OQMD crystal structures and their calculated properties.",
+  "formats": [
+   "json"
+  ],
+  "properties": {
+   "id": {
+    "description": "String identifier of the OQMD formation-energy record.",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "type": {
+    "description": "The OPTIMADE entry type; always structures.",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "last_modified": {
+    "description": "Last modification timestamp, currently unknown in OQMD.",
+    "unit": null,
+    "sortable": false,
+    "type": "timestamp"
+   },
+   "chemical_formula_reduced": {
+    "description": "Reduced chemical formula",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "chemical_formula_anonymous": {
+    "description": "Generic chemical formula",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "nelements": {
+    "description": "Number of different elements in the structure",
+    "unit": null,
+    "sortable": false,
+    "type": "integer"
+   },
+   "elements": {
+    "description": "List of unique elements in the structure",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   },
+   "nsites": {
+    "description": "Number of atomic sites in the structure",
+    "unit": null,
+    "sortable": false,
+    "type": "integer"
+   },
+   "lattice_vectors": {
+    "description": "Lattice vectors",
+    "unit": "Ao",
+    "sortable": false,
+    "type": "list"
+   },
+   "species_at_sites": {
+    "description": "Ordered list of atomic species that occupies each site in th [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   },
+   "dimension_types": {
+    "description": "To specify whether each of the three dimensions are periodic [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   },
+   "nperiodic_dimensions": {
+    "description": "Number of periodic dimensions. It is always 3 for all struct [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "integer"
+   },
+   "elements_ratios": {
+    "description": "Ratios of elements in the structure. Currently not supported [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   },
+   "structure_features": {
+    "description": "set of special features accociated with the structure. Curre [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   },
+   "chemical_formula_descriptive": {
+    "description": "Descriptive checmical formula. Currently not used in OQMD DB",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "species": {
+    "description": "Details of species occupying sites. Currently OQMD DB does n [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   },
+   "cartesian_site_positions": {
+    "description": "Ordered list of site-positions in cartesian coordinates, occ [truncated for test fixture]",
+    "unit": "Ao",
+    "sortable": false,
+    "type": "list"
+   },
+   "_oqmd_calculation_id": {
+    "description": "ID of the OQMD Calculation object. Can be used to see furthe [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "integer"
+   },
+   "_oqmd_band_gap": {
+    "description": "Electronic bandgap value of the structure",
+    "unit": "eV",
+    "sortable": false,
+    "type": "float"
+   },
+   "_oqmd_delta_e": {
+    "description": "Formation energy of the structure",
+    "unit": "eV/atom",
+    "sortable": true,
+    "type": "float"
+   },
+   "immutable_id": {
+    "description": "Optional immutable identifier; unavailable in OQMD.",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "chemical_formula_hill": {
+    "description": "Chemical formula in Hill notation; unavailable in OQMD.",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "space_group_symmetry_operations_xyz": {
+    "description": "Crystallographic symmetry operations; unavailable in OQMD.",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   },
+   "space_group_it_number": {
+    "description": "International Tables for Crystallography space-group number.",
+    "unit": null,
+    "sortable": false,
+    "type": "integer"
+   },
+   "space_group_symbol_hall": {
+    "description": "Hall space-group symbol.",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "space_group_symbol_hermann_mauguin": {
+    "description": "Hermann-Mauguin space-group symbol.",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "space_group_symbol_hermann_mauguin_extended": {
+    "description": "Extended Hermann-Mauguin space-group symbol; unavailable in  [truncated for test fixture]",
+    "unit": null,
+    "sortable": false,
+    "type": "string"
+   },
+   "assemblies": {
+    "description": "Correlated site assemblies; unavailable in OQMD.",
+    "unit": null,
+    "sortable": false,
+    "type": "list"
+   }
+  }
+ }
+}

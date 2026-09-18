@@ -18,9 +18,11 @@ from urllib.parse import parse_qsl, quote, urlsplit
 
 from httk.core import load_entry_type_definition
 from httk.core.optimade import (
+    STANDARD_NAME_EVIDENCE,
     OptimadeDocument,
     OptimadeResource,
     OptimadeSchemaSnapshot,
+    complete_standard_schema,
     redact_optimade_url,
 )
 from httk.core.register import (
@@ -165,6 +167,13 @@ class RemoteEntryType:
     :param sortable_properties: Properties accepted by remote sorting.
     :param binding: Recognized semantic binding, when available.
     :param backend: Backend class associated with the binding.
+    :param binding_evidence: Why the binding was selected -- ``"declared"`` when
+        a ``links.describedby`` IRI selected it, ``"property-ids"`` when an
+        unambiguous set of declared property definition IRIs did,
+        ``"standard-name"`` when the declared specification version's standard
+        namespace did, and ``None`` when the endpoint stays unbound.
+    :param inferred_properties: Sorted transport names whose definition IRI
+        came from standard-name completion rather than a declared ``$id``.
     """
 
     name: str
@@ -178,6 +187,8 @@ class RemoteEntryType:
     sortable_properties: tuple[str, ...]
     binding: OptimadeEntryBinding | None
     backend: type
+    binding_evidence: str | None
+    inferred_properties: tuple[str, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "property_iris", _frozen_mapping(self.property_iris))
@@ -186,6 +197,7 @@ class RemoteEntryType:
         object.__setattr__(self, "advertised_properties", tuple(self.advertised_properties))
         object.__setattr__(self, "default_response_properties", tuple(self.default_response_properties))
         object.__setattr__(self, "sortable_properties", tuple(self.sortable_properties))
+        object.__setattr__(self, "inferred_properties", tuple(self.inferred_properties))
 
 
 def _parse_json(document: OptimadeDocument, *, label: str) -> Mapping[str, Any]:
@@ -276,6 +288,7 @@ class OptimadeStore:
     :param allow_cross_origin_pagination: Permit continuation links on another origin.
     :param response_fields: Default response-field selection for new searchers.
     :param count_by_pagination: Count IDs across all pages when the service omits ``meta.data_returned``.
+    :param infer_standard_definitions: Complete unprefixed standard property names on standard endpoints from the declared specification version (the info document's ``meta.api_version``) when the service publishes no ``$id``. This governs discovery, entry-type binding, and typed query fields; set False for strict definition-only auditing, where only declared ``$id`` definitions are recognized. It does not affect an entry backend constructed directly over a raw ``OptimadeResource``, which always applies the standard-name rule.
     :raises OptimadeVersionNegotiationError: If the service cannot select a supported version.
     :raises OptimadeDiscoveryError: If discovery documents are malformed.
     """
@@ -290,6 +303,7 @@ class OptimadeStore:
         allow_cross_origin_pagination: bool = False,
         response_fields: object | None = None,
         count_by_pagination: bool = False,
+        infer_standard_definitions: bool = True,
     ) -> None:
         self._requested_transport_base_url = self._normalise_base_url(base_url)
         self.requested_base_url = redact_optimade_url(self._requested_transport_base_url)
@@ -307,9 +321,12 @@ class OptimadeStore:
             raise TypeError("allow_cross_origin_pagination must be a bool")
         if not isinstance(count_by_pagination, bool):
             raise TypeError("count_by_pagination must be a bool")
+        if not isinstance(infer_standard_definitions, bool):
+            raise TypeError("infer_standard_definitions must be a bool")
         self.allow_cross_origin_pagination = allow_cross_origin_pagination
         self.response_fields = response_fields
         self.count_by_pagination = count_by_pagination
+        self.infer_standard_definitions = infer_standard_definitions
         self._lock = RLock()
         self._closed = False
         self._owned_client = client is None
@@ -672,7 +689,31 @@ class OptimadeStore:
                     source_url=document.source_url,
                     label=f"/info/{name} links.describedby",
                 )
-        binding = self._recognise_binding(describedby, frozenset(property_names))
+        schema = OptimadeSchemaSnapshot(name, document)
+        # Standard-name completion reads the declared version from the info
+        # document's own ``meta.api_version``; the store's opt-out simply skips
+        # consuming it, leaving strict definition-only recognition.
+        completion = complete_standard_schema(schema) if self.infer_standard_definitions else None
+        standard_definition_id = completion.entry_type_definition_id if completion is not None else None
+        # Binding is decided from declared evidence only (describedby, then
+        # unambiguous declared property IRIs); the standard-namespace path is
+        # strictly lowest precedence and consumes the completion's resolved
+        # entry type. Recorded evidence names which path selected the binding.
+        binding, binding_evidence = self._recognise_binding(
+            describedby, frozenset(property_names), standard_definition_id
+        )
+        # Fill in standard-namespace identities for names the service left
+        # without a declared ``$id``. A declared identity always wins: never
+        # remap a name already carrying an IRI, nor a second name onto an IRI
+        # already claimed by a declared property.
+        inferred_names: list[str] = []
+        if completion is not None:
+            for remote_name, definition_id in completion.definitions_by_name.items():
+                if remote_name in property_iris or definition_id in property_names:
+                    continue
+                property_iris[remote_name] = definition_id
+                property_names[definition_id] = remote_name
+                inferred_names.append(remote_name)
         try:
             backend = OptimadeResource if binding is None else binding.resolve_backend()
         except Exception as exc:
@@ -683,7 +724,7 @@ class OptimadeStore:
         return RemoteEntryType(
             name=name,
             definition_id=describedby,
-            schema=OptimadeSchemaSnapshot(name, document),
+            schema=schema,
             property_iris=property_iris,
             property_names=property_names,
             property_types=property_types,
@@ -692,48 +733,84 @@ class OptimadeStore:
             sortable_properties=tuple(sortable),
             binding=binding,
             backend=backend,
+            binding_evidence=binding_evidence,
+            inferred_properties=tuple(sorted(inferred_names)),
         )
 
     @staticmethod
     def _recognise_binding(
-        describedby: str | None, remote_property_iris: frozenset[str]
-    ) -> OptimadeEntryBinding | None:
+        describedby: str | None,
+        remote_property_iris: frozenset[str],
+        standard_definition_id: str | None,
+    ) -> tuple[OptimadeEntryBinding | None, str | None]:
+        """Recognize the semantic binding for one endpoint and why it was chosen.
+
+        Three precedence tiers are tried in order: a declared
+        ``links.describedby`` IRI, an unambiguous set of declared property
+        definition IRIs, and -- strictly last, only when standard-name
+        completion resolved a standard entry type -- the standard namespace of
+        the declared specification version.
+
+        :param describedby: Declared entry-definition IRI, when advertised.
+        :param remote_property_iris: Declared property definition IRIs only.
+        :param standard_definition_id: Entry-definition IRI the completion
+            resolved for the endpoint's standard name, or ``None``.
+        :return: The recognized binding (or ``None``) and its evidence tag (or
+            ``None`` when the endpoint stays unbound).
+        """
+
         if describedby is not None:
-            return optimade_entry_binding(describedby)
+            binding = optimade_entry_binding(describedby)
+            return binding, ("declared" if binding is not None else None)
 
         binding_ids = known_optimade_entry_bindings()
-        if not binding_ids:
-            return None
-        bindings: dict[str, OptimadeEntryBinding] = {}
-        property_owners: dict[str, set[str]] = {}
-        for definition_id in binding_ids:
-            binding = optimade_entry_binding(definition_id)
-            if binding is None:
-                raise OptimadeDiscoveryError(
-                    "(local registry)", f"binding {definition_id!r} disappeared during discovery"
-                )
-            try:
-                definition = load_entry_type_definition(definition_id)
-            except Exception as exc:
-                raise OptimadeDiscoveryError(
-                    "(local registry)", f"could not load entry-type definition for binding {definition_id!r}: {exc}"
-                ) from exc
-            bindings[definition_id] = binding
-            for property_definition in definition.properties.values():
-                property_owners.setdefault(property_definition.definition_id, set()).add(definition_id)
+        if binding_ids:
+            bindings: dict[str, OptimadeEntryBinding] = {}
+            property_owners: dict[str, set[str]] = {}
+            for definition_id in binding_ids:
+                binding = optimade_entry_binding(definition_id)
+                if binding is None:
+                    raise OptimadeDiscoveryError(
+                        "(local registry)", f"binding {definition_id!r} disappeared during discovery"
+                    )
+                try:
+                    definition = load_entry_type_definition(definition_id)
+                except Exception as exc:
+                    raise OptimadeDiscoveryError(
+                        "(local registry)",
+                        f"could not load entry-type definition for binding {definition_id!r}: {exc}",
+                    ) from exc
+                bindings[definition_id] = binding
+                for property_definition in definition.properties.values():
+                    property_owners.setdefault(property_definition.definition_id, set()).add(definition_id)
 
-        candidates = set(binding_ids)
-        universal = set(binding_ids)
-        for property_iri in remote_property_iris:
-            owners = property_owners.get(property_iri, set())
-            # A locally unknown extension IRI carries no evidence about the
-            # entry type. Known non-universal IRIs do: mutually exclusive
-            # evidence still empties the candidate set and stays generic.
-            if owners and owners != universal:
-                candidates.intersection_update(owners)
-        if len(candidates) == 1:
-            return bindings[candidates.pop()]
-        return None
+            candidates = set(binding_ids)
+            universal = set(binding_ids)
+            for property_iri in remote_property_iris:
+                owners = property_owners.get(property_iri, set())
+                # A locally unknown extension IRI carries no evidence about the
+                # entry type. Known non-universal IRIs do: mutually exclusive
+                # evidence still empties the candidate set and stays generic.
+                if owners and owners != universal:
+                    candidates.intersection_update(owners)
+            if len(candidates) == 1:
+                return bindings[candidates.pop()], "property-ids"
+            if not candidates:
+                # Mutually exclusive declared property IRIs are a positive
+                # contradiction: the endpoint asserts conflicting standard
+                # identities, so it stays generic and the name tier is not
+                # consulted. An ambiguous-but-consistent set (only universal
+                # IRIs, so the set was never narrowed) still falls through.
+                return None, None
+
+        # Lowest precedence: the completion resolved a standard entry type from
+        # the endpoint's standard name and declared version. It is ``None`` when
+        # inference is disabled, so this path binds only when enabled.
+        if standard_definition_id is not None:
+            binding = optimade_entry_binding(standard_definition_id)
+            if binding is not None:
+                return binding, STANDARD_NAME_EVIDENCE
+        return None, None
 
     def refresh(self) -> None:
         """Refresh discovery state after a fully successful rediscovery.

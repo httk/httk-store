@@ -43,6 +43,7 @@ db-recovery
 db-bulk-ingestion
 db-querying
 db-serving
+db-optimade-client
 ```
 
 ## Previous section links
@@ -128,3 +129,18 @@ land here; follow the matching link to the full discussion.
 
 (serving-through-optimade)=
 - [Serving through OPTIMADE](db-serving.md#serving-through-optimade)
+
+(reading-a-remote-optimade-service)=
+- [Reading a remote OPTIMADE service](db-optimade-client.md#reading-a-remote-optimade-service)
+
+(binding-entry-types)=
+- [Binding entry types](db-optimade-client.md#binding-entry-types)
+
+(the-standard-namespace-rule)=
+- [The standard-namespace rule](db-optimade-client.md#the-standard-namespace-rule)
+
+(strict-definition-only-discovery)=
+- [Strict definition-only discovery](db-optimade-client.md#strict-definition-only-discovery)
+
+(querying-a-remote-service)=
+- [Querying a remote service](db-optimade-client.md#querying-a-remote-service)

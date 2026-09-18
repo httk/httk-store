@@ -389,6 +389,10 @@ def test_unknown_extensions_do_not_veto_unique_known_property_evidence() -> None
 def test_name_only_invalid_ids_ambiguous_contradictory_and_unknown_describedby_stay_generic() -> None:
     client = make_client(
         {
+            # These documents declare no api_version anywhere, so even the
+            # standard endpoint name ``files`` stays generic: no declared
+            # version means no standard-name binding (the namespace rule is
+            # covered in test_optimade_standard_binding).
             "files": entry({"url": property_definition(None)}),
             "empty-id": entry({"url": property_definition("")}),
             "non-string-id": entry({"url": property_definition(42)}),

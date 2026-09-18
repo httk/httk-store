@@ -1,0 +1,151 @@
+{
+ "meta": {
+  "api_version": "1.2.0"
+ },
+ "data": {
+  "id": "structures",
+  "formats": [
+   "json"
+  ],
+  "description": "Representing a structure.",
+  "properties": {
+   "id": {
+    "description": "An entry's ID as defined in section Definition of Terms.\n\n-  [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "type": {
+    "description": "The name of the type of an entry.\n\n- **Type**: string.\n\n- ** [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "immutable_id": {
+    "description": "The entry's immutable ID (e.g., an UUID). This is important  [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "last_modified": {
+    "description": "Date and time representing when the entry was last modified. [truncated for test fixture]",
+    "sortable": true,
+    "type": "timestamp"
+   },
+   "elements": {
+    "description": "The chemical symbols of the different elements present in th [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "nelements": {
+    "description": "Number of different elements in the structure as an integer. [truncated for test fixture]",
+    "sortable": true,
+    "type": "integer"
+   },
+   "elements_ratios": {
+    "description": "Relative proportions of different elements in the structure. [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "chemical_formula_descriptive": {
+    "description": "The chemical formula for a structure as a string in a form c [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "chemical_formula_reduced": {
+    "description": "The reduced chemical formula for a structure as a string wit [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "chemical_formula_hill": {
+    "description": "The chemical formula for a structure in [Hill form](https:// [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "chemical_formula_anonymous": {
+    "description": "The anonymous formula is the `chemical_formula_reduced`, but [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "dimension_types": {
+    "description": "List of three integers.\nFor each of the three directions ind [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "nperiodic_dimensions": {
+    "description": "An integer specifying the number of periodic dimensions in t [truncated for test fixture]",
+    "sortable": true,
+    "type": "integer"
+   },
+   "lattice_vectors": {
+    "description": "The three lattice vectors in Cartesian coordinates, in \u00e5ngst [truncated for test fixture]",
+    "unit": "\u00c5",
+    "sortable": true,
+    "type": "list"
+   },
+   "space_group_symmetry_operations_xyz": {
+    "description": "A list of symmetry operations given as general position x, y [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "space_group_symbol_hall": {
+    "description": "A Hall space group symbol representing the symmetry of the s [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "space_group_symbol_hermann_mauguin": {
+    "description": "A human- and machine-readable string containing the short He [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "space_group_symbol_hermann_mauguin_extended": {
+    "description": "A human- and machine-readable string containing the extended [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "space_group_it_number": {
+    "description": "Space group number which specifies the space group of the st [truncated for test fixture]",
+    "sortable": true,
+    "type": "integer"
+   },
+   "cartesian_site_positions": {
+    "description": "Cartesian positions of each site in the structure.\nA site is [truncated for test fixture]",
+    "unit": "\u00c5",
+    "sortable": true,
+    "type": "list"
+   },
+   "nsites": {
+    "description": "An integer specifying the length of the `cartesian_site_posi [truncated for test fixture]",
+    "sortable": true,
+    "type": "integer"
+   },
+   "species": {
+    "description": "A list describing the species of the sites of this structure [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "species_at_sites": {
+    "description": "Name of the species at each site (where values for sites are [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "assemblies": {
+    "description": "A description of groups of sites that are statistically corr [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "structure_features": {
+    "description": "A list of strings that flag which special features are used  [truncated for test fixture]",
+    "sortable": true,
+    "type": "list"
+   },
+   "_mp_chemical_system": {
+    "description": "Representation of the system's chemical space used by The Ma [truncated for test fixture]",
+    "sortable": true,
+    "type": "string"
+   },
+   "_mp_stability": {
+    "description": "Thermodynamics data grouped by functional type. Each funcito [truncated for test fixture]",
+    "sortable": true,
+    "type": "dictionary"
+   }
+  }
+ }
+}

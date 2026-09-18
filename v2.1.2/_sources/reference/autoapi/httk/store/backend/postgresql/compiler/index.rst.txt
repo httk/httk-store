@@ -1,0 +1,27 @@
+httk.store.backend.postgresql.compiler
+======================================
+
+.. py:module:: httk.store.backend.postgresql.compiler
+
+.. autoapi-nested-parse::
+
+   PostgreSQL-specific SQLAlchemy dialect compilation hooks.
+
+   The rest of :mod:`httk.store.backend.sql` deals in generic SQLAlchemy objects.  This
+   module is the adapter boundary that rewrites the ``httk_fraction_scaled_equal``
+   call into inline SQL for the PostgreSQL dialect, because PostgreSQL cannot host
+   the per-connection Python scalar function that SQLite and DuckDB register.
+
+   Fractions are persisted as canonical ``"p/q"`` text (reduced, positive
+   denominator), but the caller also passes integer-form factors (for example a
+   constant ``1/2`` supplied as separate value and factor) that carry no ``/q``
+   part; those take an implicit denominator of ``1``.  Exact rational equality is
+   therefore evaluated by casting each argument to text, splitting into numerator
+   and denominator, and cross-multiplying with PostgreSQL's arbitrary-precision
+   ``numeric`` type -- so, unlike ClickHouse's bounded Int256 inline, no digit
+   budget or zero-denominator guard is needed.  The only theoretical bound is
+   ``numeric``'s ~131072-integer-digit cap, the same practical ceiling ClickHouse's
+   Int256 inline already accepts; no runtime guard is warranted.
+
+
+

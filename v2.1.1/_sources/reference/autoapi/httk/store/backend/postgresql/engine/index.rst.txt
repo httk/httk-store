@@ -1,0 +1,42 @@
+httk.store.backend.postgresql.engine
+====================================
+
+.. py:module:: httk.store.backend.postgresql.engine
+
+.. autoapi-nested-parse::
+
+   PostgreSQL database construction for :class:`~httk.store.backend.sql.engine.Backend`.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.postgresql.engine.database
+
+
+Module Contents
+---------------
+
+.. py:function:: database(cls, url, *, database = None)
+
+   Build a PostgreSQL-backed backend from a ``postgresql://`` URL.
+
+   PostgreSQL is fully transactional and rides the existing ``"transactional"``
+   write profile with no special-casing. Only the psycopg 3 driver is
+   supported: a bare ``postgresql://`` URL is normalized to
+   ``postgresql+psycopg://`` (SQLAlchemy 2.0 would otherwise select psycopg2),
+   and any other explicit driver is rejected.
+
+   :param cls: The backend class to instantiate.
+   :param url: PostgreSQL SQLAlchemy URL or URL string.
+   :param database: The database name overriding the URL path, if supplied.
+   :return: The configured PostgreSQL backend wrapper.
+   :raises ImportError: If ``psycopg`` (psycopg 3) is not installed; install the
+       ``httk-store[postgresql]`` extra to use ``Backend.postgresql()``.
+   :raises ValueError: If the URL names a driver other than
+       ``postgresql+psycopg`` (psycopg 3).
+
+

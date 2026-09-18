@@ -1,0 +1,11 @@
+httk.store.backend.sql.paging
+=============================
+
+.. py:module:: httk.store.backend.sql.paging
+
+.. autoapi-nested-parse::
+
+   Compatibility shim for the neutral continuation-token codec.
+
+
+

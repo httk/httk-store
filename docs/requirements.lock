@@ -1,5 +1,5 @@
 # httk-docs-lock-schema: 1
-# input-hash: sha256:3a435ae0d5f0fc0a33362b0701b39d23ec732385563557b98844c57bff39d91d
+# input-hash: sha256:ad4117aa88f187ccb2866d444f9cdd1674aa3563092d57e12471b94c2b01c645
 # python: 3.12
 # platform: linux
 accessible-pygments==0.0.5
@@ -21,7 +21,7 @@ fastjsonschema==2.22.2
 furo==2025.12.19
 greenlet==3.5.6
 h11==0.16.0
-httk-core==2.1.0
+httk-core==2.1.1
 httpcore2==2.13.0
 httpx2==2.13.0
 idna==3.20

@@ -23,6 +23,11 @@ endpoint's transport name, its advertised property names, and — when the
 endpoint is recognized — a semantic `binding` and the `backend` class that
 `binding` resolves to (for example `OptimadeStructure`).
 
+The store creates its own HTTP client with a request timeout of 120 seconds
+(public providers routinely take several seconds per filtered query);
+`OptimadeStore(url, timeout=300)` changes it and `timeout=None` disables it.
+A borrowed `client=` keeps its own timeout configuration.
+
 ## Binding entry types
 
 An endpoint is bound to a typed backend through three tiers, tried in

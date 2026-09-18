@@ -203,7 +203,7 @@ def test_no_supported_advertised_major_fails_after_versions() -> None:
 def test_owned_client_is_closed_when_versions_negotiation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     requested = "https://example.test/db"
     fake = FakeClient({requested + "/versions": [FakeResponse(200, "version\n2\n")]})
-    monkeypatch.setattr(httpx2, "Client", lambda: fake)
+    monkeypatch.setattr(httpx2, "Client", lambda **_kwargs: fake)
 
     with pytest.raises(OptimadeVersionNegotiationError):
         OptimadeStore(requested)
@@ -442,7 +442,7 @@ def test_duplicate_property_iri_is_malformed_and_owned_client_is_closed() -> Non
         }
     )
     original = httpx2.Client
-    httpx2.Client = lambda: fake  # type: ignore[assignment]
+    httpx2.Client = lambda **_kwargs: fake  # type: ignore[assignment]
     try:
         with pytest.raises(OptimadeDiscoveryError, match="same definition IRI"):
             OptimadeStore(base_url)
@@ -508,3 +508,30 @@ def test_transport_diagnostics_redact_source_and_sentinel_is_identity_safe() -> 
     assert repr(ALL_ADVERTISED) == "ALL_ADVERTISED"
     imported_again = __import__("httk.store.optimade", fromlist=["ALL_ADVERTISED"]).ALL_ADVERTISED
     assert ALL_ADVERTISED is imported_again
+
+
+def test_owned_client_uses_the_store_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The store's own HTTP client gets a 120 s default, or the configured timeout."""
+    base = "https://example.test/v1"
+    entries = {"files": entry({"url": property_definition(FILE_URL)})}
+    created: list[object] = []
+
+    def fake_client_factory(*, timeout: object = "unset") -> FakeClient:
+        created.append(timeout)
+        return make_client(entries)
+
+    monkeypatch.setattr(httpx2, "Client", fake_client_factory)
+    OptimadeStore(base).close()
+    OptimadeStore(base, timeout=300).close()
+    OptimadeStore(base, timeout=None).close()
+    assert created == [120.0, 300, None]
+
+    borrowed = make_client(entries)
+    store = OptimadeStore(base, client=borrowed, timeout=7)
+    assert store._client is borrowed and store.timeout == 7
+    store.close()
+    assert created == [120.0, 300, None]
+
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError, match="timeout"):
+            OptimadeStore(base, timeout=bad)

@@ -297,7 +297,8 @@ class OptimadeStore:
     page count and origin.
 
     :param base_url: Absolute HTTP(S) service base URL.
-    :param client: Optional borrowed synchronous HTTP client.
+    :param client: Optional borrowed synchronous HTTP client; when given, its own timeout configuration applies and ``timeout`` is ignored.
+    :param timeout: Request timeout in seconds for the client this store creates when ``client`` is not given (default 120; public providers routinely take several seconds per filtered query). ``None`` disables the timeout.
     :param page_limit: Requested default remote page size; lowered automatically when a service rejects it with HTTP 403.
     :param max_pages: Maximum continuation pages followed by one query.
     :param allow_cross_origin_pagination: Permit continuation links on another origin.
@@ -314,6 +315,7 @@ class OptimadeStore:
         base_url: str,
         *,
         client: object | None = None,
+        timeout: float | None = 120.0,
         page_limit: int = 50,
         max_pages: int = 10_000,
         allow_cross_origin_pagination: bool = False,
@@ -336,6 +338,9 @@ class OptimadeStore:
         self.max_pages = self._positive_int(max_pages, "max_pages")
         if not isinstance(allow_cross_origin_pagination, bool):
             raise TypeError("allow_cross_origin_pagination must be a bool")
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0):
+            raise ValueError("timeout must be a positive number of seconds or None")
+        self.timeout = timeout
         if not isinstance(count_by_pagination, bool):
             raise TypeError("count_by_pagination must be a bool")
         if not isinstance(infer_standard_definitions, bool):
@@ -355,7 +360,7 @@ class OptimadeStore:
         if client is None:
             import httpx2
 
-            client = httpx2.Client()
+            client = httpx2.Client(timeout=timeout)
         self._client = client
         self._entry_types: tuple[RemoteEntryType, ...] = ()
         self._entry_types_by_name: Mapping[str, RemoteEntryType] = MappingProxyType({})

@@ -144,6 +144,21 @@ class OptimadeVersionNegotiationError(OptimadeClientError):
         super().__init__(f"OPTIMADE API version negotiation failed for {self.source_url}: {self.detail}")
 
 
+@dataclass(frozen=True)
+class ServiceDeviation:
+    """One specification deviation the client tolerated for a service.
+
+    :param kind: Deviation category -- ``"versions-endpoint"``,
+        ``"entry-info-identity"``, or ``"continuation-scheme"``.
+    :param url: Redacted URL the deviation was observed at.
+    :param detail: One factual sentence describing the applied fallback.
+    """
+
+    kind: str
+    url: str
+    detail: str
+
+
 def _frozen_mapping(values: Mapping[str, str]) -> Mapping[str, str]:
     return MappingProxyType(dict(values))
 
@@ -289,6 +304,7 @@ class OptimadeStore:
     :param response_fields: Default response-field selection for new searchers.
     :param count_by_pagination: Count IDs across all pages when the service omits ``meta.data_returned``.
     :param infer_standard_definitions: Complete unprefixed standard property names on standard endpoints from the declared specification version (the info document's ``meta.api_version``) when the service publishes no ``$id``. This governs discovery, entry-type binding, and typed query fields; set False for strict definition-only auditing, where only declared ``$id`` definitions are recognized. It does not affect an entry backend constructed directly over a raw ``OptimadeResource``, which always applies the standard-name rule.
+    :param tolerate_deviations: Apply specification-anchored fallbacks for known service deviations and record them in ``deviations``; set False to fail strictly, for conformance auditing.
     :raises OptimadeVersionNegotiationError: If the service cannot select a supported version.
     :raises OptimadeDiscoveryError: If discovery documents are malformed.
     """
@@ -304,6 +320,7 @@ class OptimadeStore:
         response_fields: object | None = None,
         count_by_pagination: bool = False,
         infer_standard_definitions: bool = True,
+        tolerate_deviations: bool = True,
     ) -> None:
         self._requested_transport_base_url = self._normalise_base_url(base_url)
         self.requested_base_url = redact_optimade_url(self._requested_transport_base_url)
@@ -323,11 +340,16 @@ class OptimadeStore:
             raise TypeError("count_by_pagination must be a bool")
         if not isinstance(infer_standard_definitions, bool):
             raise TypeError("infer_standard_definitions must be a bool")
+        if not isinstance(tolerate_deviations, bool):
+            raise TypeError("tolerate_deviations must be a bool")
         self.allow_cross_origin_pagination = allow_cross_origin_pagination
         self.response_fields = response_fields
         self.count_by_pagination = count_by_pagination
         self.infer_standard_definitions = infer_standard_definitions
+        self.tolerate_deviations = tolerate_deviations
         self._lock = RLock()
+        self._deviations: list[ServiceDeviation] = []
+        self._deviation_keys: set[tuple[str, str]] = set()
         self._closed = False
         self._owned_client = client is None
         if client is None:
@@ -353,6 +375,36 @@ class OptimadeStore:
 
     def __repr__(self) -> str:
         return f"OptimadeStore(base_url={self.base_url!r}, api_version={self.api_version!r})"
+
+    @property
+    def deviations(self) -> tuple[ServiceDeviation, ...]:
+        """Specification deviations this client tolerated, in observation order."""
+
+        with self._lock:
+            return tuple(self._deviations)
+
+    def _record_deviation(self, kind: str, url: str, detail: str) -> None:
+        """Record and warn about one tolerated deviation, once per ``(kind, url)``.
+
+        :param kind: Deviation category tag.
+        :param url: URL the deviation was observed at; redacted before storage.
+        :param detail: One factual sentence describing the applied fallback.
+        """
+
+        redacted = redact_optimade_url(url)
+        with self._lock:
+            key = (kind, redacted)
+            if key in self._deviation_keys:
+                return
+            self._deviation_keys.add(key)
+            self._deviations.append(ServiceDeviation(kind, redacted, detail))
+        logging.getLogger(__name__).warning(
+            "OPTIMADE service deviation (%s) at %s: %s",
+            kind,
+            redacted,
+            detail,
+            extra={"context": "optimade"},
+        )
 
     @staticmethod
     def _positive_int(value: int, name: str) -> int:
@@ -392,7 +444,13 @@ class OptimadeStore:
         """Select httk's first supported major from an unversioned ``/versions`` response."""
 
         versions_url = self._requested_transport_base_url + "/versions"
-        advertised_majors = self._parse_versions(self._get(versions_url), versions_url)
+        try:
+            versions_text = self._get(versions_url)
+        except OptimadeHTTPError as exc:
+            if exc.status_code != 404 or not self.tolerate_deviations:
+                raise
+            return self._negotiate_versions_fallback(versions_url, exc)
+        advertised_majors = self._parse_versions(versions_text, versions_url)
         for major in advertised_majors:
             if major in _SUPPORTED_API_MAJORS:
                 return self._requested_transport_base_url + f"/v{major}"
@@ -400,6 +458,34 @@ class OptimadeStore:
             versions_url,
             "server does not advertise a supported API major version (supported major is 1)",
         )
+
+    def _negotiate_versions_fallback(self, versions_url: str, http_error: OptimadeHTTPError) -> str:
+        """Tolerate a missing ``/versions`` endpoint by probing ``/v1/info``.
+
+        The specification places major version 1 at ``/v1``, so a 404 at the
+        unversioned ``/versions`` is resolved by confirming ``<base>/v1/info`` is
+        a valid ``/info`` document declaring a major-1 service. Any failure of
+        that probe re-raises the original 404 unchanged.
+
+        :param versions_url: The unversioned ``/versions`` URL that returned 404.
+        :param http_error: The original 404 error to re-raise if the probe fails.
+        :return: The ``<base>/v1`` transport base to use.
+        :raises OptimadeHTTPError: The original 404, if the probe does not confirm a major-1 service.
+        """
+
+        probe_url = self._requested_transport_base_url + "/v1/info"
+        try:
+            _document, _data, _attributes, api_version, _identity = self._fetch_info(probe_url)
+            if api_version is None:
+                raise OptimadeDiscoveryError(probe_url, "/v1/info does not declare a major-1 api_version")
+        except OptimadeClientError as exc:
+            raise http_error from exc
+        self._record_deviation(
+            "versions-endpoint",
+            versions_url,
+            "the versions endpoint is missing at the unversioned base; /v1/info declares a major-1 service",
+        )
+        return self._requested_transport_base_url + "/v1"
 
     @staticmethod
     def _parse_versions(text: str, source_url: str) -> tuple[int, ...]:
@@ -541,8 +627,18 @@ class OptimadeStore:
         except KeyError as exc:
             raise KeyError(f"No discovered OPTIMADE entry endpoint named {name!r}") from exc
 
-    def _discover(self) -> tuple[str | None, tuple[RemoteEntryType, ...], Mapping[str, RemoteEntryType]]:
-        info_url = self._transport_base_url + "/info"
+    def _fetch_info(
+        self, info_url: str
+    ) -> tuple[OptimadeDocument, Mapping[str, Any], Mapping[str, Any], str | None, bool]:
+        """Fetch and validate one ``/info`` document's resource identity and version.
+
+        :param info_url: Absolute URL of the ``/info`` endpoint to read.
+        :return: The document, its ``data`` and ``data.attributes`` mappings, the
+            declared ``api_version`` (or ``None``), and whether entry-info
+            documents must carry a resource ``type``.
+        :raises OptimadeDiscoveryError: If the document is malformed or declares an unsupported major version.
+        """
+
         info_document = OptimadeDocument.from_response(self._get(info_url), info_url)
         info_root = _parse_json(info_document, label="/info response")
         data = _mapping(info_root.get("data"), source_url=info_document.source_url, label="/info data")
@@ -554,6 +650,11 @@ class OptimadeStore:
         api_version, entry_info_resource_identity = self._entry_info_format(
             attributes.get("api_version"), info_document.source_url
         )
+        return info_document, data, attributes, api_version, entry_info_resource_identity
+
+    def _discover(self) -> tuple[str | None, tuple[RemoteEntryType, ...], Mapping[str, RemoteEntryType]]:
+        info_url = self._transport_base_url + "/info"
+        info_document, _data, attributes, api_version, entry_info_resource_identity = self._fetch_info(info_url)
         advertised = attributes.get("available_endpoints")
         if not isinstance(advertised, list):
             raise OptimadeDiscoveryError(info_document.source_url, "/info available_endpoints must be a JSON array")
@@ -618,7 +719,14 @@ class OptimadeStore:
         root = _parse_json(document, label=f"/info/{name} response")
         data = _mapping(root.get("data"), source_url=document.source_url, label=f"/info/{name} data")
         if require_resource_identity and data.get("type") != "info":
-            raise OptimadeDiscoveryError(document.source_url, f"/info/{name} data.type must be 'info'")
+            if self.tolerate_deviations and "type" not in data and data.get("id") == name:
+                self._record_deviation(
+                    "entry-info-identity",
+                    document.source_url,
+                    "/info/<name> data lacks the 1.2 resource 'type' member; identity established from data.id",
+                )
+            else:
+                raise OptimadeDiscoveryError(document.source_url, f"/info/{name} data.type must be 'info'")
         properties = _mapping(
             data.get("properties"), source_url=document.source_url, label=f"/info/{name} data.properties"
         )

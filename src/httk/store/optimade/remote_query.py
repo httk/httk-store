@@ -28,7 +28,7 @@ from decimal import Decimal
 from fractions import Fraction
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import quote, urlencode, urljoin, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
 
 from httk.core import load_entry_type_definition
 from httk.core.optimade import (
@@ -141,6 +141,48 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     if port is None:
         port = 443 if scheme == "https" else 80 if scheme == "http" else None
     return scheme, (split.hostname or "").casefold(), port
+
+
+def _is_scheme_only_http_upgrade(next_url: str, base_url: str) -> bool:
+    """Whether *next_url* differs from *base_url*'s origin only by ``http`` vs ``https``.
+
+    The continuation must use ``http`` where the base uses ``https``, on the
+    same casefolded host, with equal effective ports once scheme defaults are
+    applied -- so a plain ``http`` continuation (default port 80) counts as the
+    same origin as an ``https`` base (default port 443). Any other origin
+    difference, including an explicit differing port, returns ``False``.
+
+    :param next_url: The continuation link the service supplied.
+    :param base_url: The service's own transport base URL.
+    :return: Whether the sole difference is a downgraded ``http`` scheme.
+    """
+
+    next_split = urlsplit(next_url)
+    base_split = urlsplit(base_url)
+    if next_split.scheme.casefold() != "http" or base_split.scheme.casefold() != "https":
+        return False
+    if (next_split.hostname or "").casefold() != (base_split.hostname or "").casefold():
+        return False
+    next_port = next_split.port if next_split.port is not None else 80
+    base_port = base_split.port if base_split.port is not None else 443
+    return next_port == base_port or (next_port == 80 and base_port == 443)
+
+
+def _upgraded_to_https(url: str, base_url: str) -> str:
+    """Return *url* over the base's ``https`` authority, keeping path/query/fragment.
+
+    The continuation's own authority is discarded in favour of the base URL's
+    (the host matches by construction), so an explicit ``:80`` on the ``http``
+    link cannot survive as a wrong port under ``https``.
+
+    :param url: The continuation link to rewrite.
+    :param base_url: The service's transport base URL, supplying the authority.
+    :return: The continuation over the base's ``https`` authority.
+    """
+
+    split = urlsplit(url)
+    base_split = urlsplit(base_url)
+    return urlunsplit(("https", base_split.netloc, split.path, split.query, split.fragment))
 
 
 def _safe_source(url: str) -> str:
@@ -1521,12 +1563,28 @@ class RemoteSearcher:
                 split = urlsplit(next_url)
                 if split.scheme not in ("http", "https") or not split.netloc:
                     raise OptimadePaginationError("OPTIMADE pagination continuation must be an absolute HTTP(S) URL")
+                if _origin(next_url) != base_origin:
+                    # A continuation that only downgraded https to http on the
+                    # same host is upgraded back to https (the http URL is a
+                    # spec deviation and typically answers a redirect); every
+                    # other origin difference still needs cross-origin consent.
+                    # The upgrade happens before the cycle check so a service
+                    # repeating the same http link is still caught as a cycle.
+                    if self._store.tolerate_deviations and _is_scheme_only_http_upgrade(
+                        next_url, self._store._transport_base_url
+                    ):
+                        self._store._record_deviation(
+                            "continuation-scheme",
+                            self._store._transport_base_url,
+                            "continuation link downgraded scheme to http; upgraded to https for the same host",
+                        )
+                        next_url = _upgraded_to_https(next_url, self._store._transport_base_url)
+                    elif not self._store.allow_cross_origin_pagination:
+                        raise OptimadePaginationError("OPTIMADE pagination attempted a cross-origin request")
                 if next_url in seen:
                     raise OptimadePaginationError("OPTIMADE pagination cycle detected")
                 if pages >= self._store.max_pages:
                     raise OptimadePaginationError(f"OPTIMADE pagination exceeded max_pages={self._store.max_pages}")
-                if not self._store.allow_cross_origin_pagination and _origin(next_url) != base_origin:
-                    raise OptimadePaginationError("OPTIMADE pagination attempted a cross-origin request")
                 seen.add(next_url)
                 pages += 1
                 if raw_text is None:

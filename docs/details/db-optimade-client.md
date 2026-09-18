@@ -126,3 +126,53 @@ expose only their portable fields as attributes; reach the rest through the
 canonical view of the row (for example `FileView(row.file).url`). A recognized
 standard name is never exposed as a raw attribute, so it cannot leak a raw
 value under its standard spelling.
+
+## Non-conforming services
+
+Some public providers deviate from the specification in ways that would
+otherwise fail construction or paging. By default the client applies a
+specification-anchored fallback for three such deviations — each a fallback
+whose correctness follows from the specification itself, not a provider-specific
+quirk table — and records every one it applied on `store.deviations`, a tuple of
+frozen `ServiceDeviation(kind, url, detail)` records. Each newly recorded
+deviation is also emitted once, per `(kind, url)`, through the report channel as
+a `logging` warning tagged with the context `optimade`:
+
+- `"versions-endpoint"` — the unversioned base returns HTTP 404 for
+  `/versions` (which *Materials Project* does). The specification places major
+  version 1 at `/v1`, so the client probes `<base>/v1/info`; when that is a
+  valid `/info` declaring a major-1 service, it uses `/v1`. Any 404 with no
+  such confirmation, and every non-404 status, re-raises unchanged.
+- `"entry-info-identity"` — an `/info/<entry>` document omits the 1.2 resource
+  `type` member but its `data.id` equals the endpoint name (again *Materials
+  Project*). Identity is then established from `data.id`. An absent or
+  mismatching `id`, or a present-but-wrong `type`, stays an error.
+- `"continuation-scheme"` — a `links.next` continuation differs from the base
+  origin only by using `http` where the service is `https`, on the same host
+  and default ports (also *Materials Project*, whose `http` links answer a
+  redirect). The link is upgraded to `https` (over the base's authority, so an
+  explicit port on the `http` link cannot survive as a wrong one) and paging
+  continues. Schemes are never downgraded, and any other origin difference
+  still needs `allow_cross_origin_pagination`. This deviation is recorded once
+  per service, its `url` the service base URL rather than any one continuation.
+
+```python
+store = OptimadeStore("https://optimade.materialsproject.org")
+for deviation in store.deviations:
+    print(deviation.kind, deviation.url, deviation.detail)
+```
+
+Pass `tolerate_deviations=False` to switch every fallback off and restore the
+strict errors, for conformance auditing: the missing `/versions` raises
+`OptimadeHTTPError`, the identity-less `/info/<entry>` raises
+`OptimadeDiscoveryError`, and the `http` continuation raises
+`OptimadePaginationError`.
+
+```python
+store = OptimadeStore(base_url, tolerate_deviations=False)  # fail strictly
+```
+
+A fourth provider deviation — a `last_modified` timestamp served without a UTC
+offset — has no defined instant, so it is not tolerated here; the entry
+backends in *httk-core* and *httk-atomistic* decide how such a naive value
+decodes.

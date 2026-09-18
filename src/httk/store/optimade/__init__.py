@@ -15,6 +15,7 @@ from .client import (
     OptimadeTransportError,
     OptimadeVersionNegotiationError,
     RemoteEntryType,
+    ServiceDeviation,
 )
 from .remote_query import (
     CountUnavailableError,
@@ -41,4 +42,5 @@ __all__ = [
     "RemoteResultColumn",
     "RemoteResultSet",
     "RemoteSearcher",
+    "ServiceDeviation",
 ]

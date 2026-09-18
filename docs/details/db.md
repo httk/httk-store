@@ -144,3 +144,6 @@ land here; follow the matching link to the full discussion.
 
 (querying-a-remote-service)=
 - [Querying a remote service](db-optimade-client.md#querying-a-remote-service)
+
+(non-conforming-services)=
+- [Non-conforming services](db-optimade-client.md#non-conforming-services)

@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 from httk.core import load_entry_type_definition
 from httk.core.optimade import OptimadeResource
-from httk.core.register import optimade_entry_binding
 
 from httk.store import UnsupportedQueryError
 from httk.store.optimade import OptimadeStore
@@ -32,20 +31,6 @@ REFERENCE_ADDRESS = "https://schemas.optimade.org/defs/v1.2/properties/optimade/
 
 _FIXTURES = Path(__file__).parent / "data" / "optimade_info"
 _BASE = "https://example.test/v1"
-
-
-def _require_structures_table() -> None:
-    """Skip unless the installed httk-atomistic declares the structures version table.
-
-    Standard-name completion of ``structures`` is gated by the
-    ``standard_property_versions`` table that *httk-atomistic* registers on its
-    binding (httk-atomistic >= 2.1.1); an older release leaves the endpoint
-    generic, so these tests cannot run against it.
-    """
-    pytest.importorskip("httk.atomistic")
-    binding = optimade_entry_binding("https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures")
-    if binding is None or not binding.standard_property_versions:
-        pytest.skip("installed httk-atomistic declares no standard_property_versions for structures")
 
 
 def _structures_iri(name: str) -> str:
@@ -163,7 +148,7 @@ def _unprefixed(fixture_name: str) -> tuple[str, ...]:
 
 
 def test_alexandria_structures_bind_by_standard_name_without_declared_ids() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     store, _client = _build_store(
@@ -187,7 +172,7 @@ def test_alexandria_structures_bind_by_standard_name_without_declared_ids() -> N
 
 @pytest.mark.parametrize("fixture", ["materials_project_info_structures.json", "oqmd_info_structures.json"])
 def test_v12_structures_infer_space_group_names(fixture: str) -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     store, _client = _build_store({"structures": _fixture_document(fixture)}, api_version="1.2.0")
@@ -208,7 +193,7 @@ def test_v12_structures_infer_space_group_names(fixture: str) -> None:
 
 
 def test_version_gate_drops_later_names_through_the_client() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
 
     store, _client = _build_store(
         {"structures": _fixture_document("oqmd_info_structures.json", api_version="1.1.0")},
@@ -245,7 +230,7 @@ def test_inference_disabled_reproduces_generic_resource_behaviour() -> None:
 
 
 def test_declared_describedby_path_and_property_iris_unchanged() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     elements_iri = _structures_iri("elements")
@@ -264,7 +249,7 @@ def test_declared_describedby_path_and_property_iris_unchanged() -> None:
 
 
 def test_declared_property_ids_path_and_property_iris_unchanged() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     elements_iri = _structures_iri("elements")
@@ -283,7 +268,7 @@ def test_declared_property_ids_path_and_property_iris_unchanged() -> None:
 
 
 def test_declared_id_beats_inference_per_property() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
 
     nelements_iri = _structures_iri("nelements")
     elements_iri = _structures_iri("elements")
@@ -354,7 +339,7 @@ def _nacl_page() -> FakeResponse:
 
 
 def test_query_layer_accepts_typed_standard_and_prefixed_fields() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     store, _client = _build_store(
@@ -374,7 +359,7 @@ def test_query_layer_accepts_typed_standard_and_prefixed_fields() -> None:
 
 
 def test_variable_resolves_by_backend_class_only_when_bound() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     inferred_store, _inferred_client = _build_store(
@@ -393,7 +378,7 @@ def test_variable_resolves_by_backend_class_only_when_bound() -> None:
 
 
 def test_typed_row_projects_prefixed_field_raw_and_standard_field_decoded() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     store, _client = _build_store(
@@ -435,7 +420,7 @@ def test_generic_row_projection_of_prefixed_field_unchanged_when_inference_disab
 
 
 def test_end_to_end_structure_conversion_and_timestamp() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure, UnitcellStructureView
 
     store, _client = _build_store(
@@ -458,7 +443,7 @@ def test_end_to_end_structure_conversion_and_timestamp() -> None:
 
 
 def test_typed_row_attribute_access_exposes_extension_and_keeps_typed_field() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     store, _client = _build_store(
@@ -481,7 +466,7 @@ def test_typed_row_attribute_access_exposes_extension_and_keeps_typed_field() ->
 
 
 def test_slicer_iteration_reads_extension_and_id_on_typed_rows() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
 
     store, _client = _build_store(
         {"structures": _fixture_document("alexandria_pbe_info_structures.json")},
@@ -536,7 +521,7 @@ def test_reference_bound_row_keeps_typed_field_and_exposes_extension() -> None:
 
 
 def test_unidentified_advertised_name_never_shadows_a_renamed_standard_field() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     from httk.store.optimade.remote_query import RemoteSearcher
@@ -592,7 +577,7 @@ def test_contradictory_declared_property_evidence_stays_generic() -> None:
 
 
 def test_consistent_ambiguous_evidence_falls_through_to_name_tier() -> None:
-    _require_structures_table()
+    pytest.importorskip("httk.atomistic")
     from httk.atomistic import OptimadeStructure
 
     # Only a universal IRI (``id``) is declared: the candidate set is never

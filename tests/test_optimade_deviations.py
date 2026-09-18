@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from httk.core.register import optimade_entry_binding
 
 from httk.store.optimade import (
     OptimadeDiscoveryError,
@@ -33,6 +34,20 @@ _V1 = _BASE + "/v1"
 _STRUCTURES_PATH = _V1 + "/structures"
 _HTTP_NEXT = f"http://{_HOST}/v1/structures?page_offset=1"
 _HTTPS_NEXT = f"https://{_HOST}/v1/structures?page_offset=1"
+
+
+def _require_structures_table() -> None:
+    """Skip unless the installed httk-atomistic declares the structures version table.
+
+    Standard-name completion of ``structures`` is gated by the
+    ``standard_property_versions`` table that *httk-atomistic* registers on its
+    binding (httk-atomistic >= 2.1.1); an older release leaves the endpoint
+    generic, so these tests cannot run against it.
+    """
+    pytest.importorskip("httk.atomistic")
+    binding = optimade_entry_binding("https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures")
+    if binding is None or not binding.standard_property_versions:
+        pytest.skip("installed httk-atomistic declares no standard_property_versions for structures")
 
 
 @dataclass
@@ -167,7 +182,7 @@ def _materials_project_client() -> FakeClient:
 
 
 def test_materials_project_like_service_is_tolerated_and_recorded(caplog: pytest.LogCaptureFixture) -> None:
-    pytest.importorskip("httk.atomistic")
+    _require_structures_table()
     from httk.atomistic import OptimadeStructure
 
     client = _materials_project_client()
@@ -237,7 +252,7 @@ def test_strict_mode_fails_on_missing_entry_info_type() -> None:
 
 
 def test_strict_mode_fails_on_http_continuation() -> None:
-    pytest.importorskip("httk.atomistic")
+    _require_structures_table()
     from httk.atomistic import OptimadeStructure
 
     fixed = {
@@ -315,7 +330,7 @@ def _query_over(
 ) -> tuple[OptimadeStore, FakeClient, list[object]]:
     """Discover a valid ``structures`` endpoint at *base* and page once past *next_link*."""
 
-    pytest.importorskip("httk.atomistic")
+    _require_structures_table()
     from httk.atomistic import OptimadeStructure
 
     fixed = {

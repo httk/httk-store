@@ -101,6 +101,7 @@ __all__ = [
     "SqlLinks",
     "SqlReference",
     "SqlSearcher",
+    "SqlStrongLinkSet",
     "SqlVariable",
 ]
 
@@ -629,16 +630,287 @@ class SqlLinks:
     def __init__(self, variable: "SqlVariable") -> None:
         self._variable = variable
 
-    def __getattr__(self, name: str) -> "SqlLinkSet":
+    def __getattr__(self, name: str) -> "SqlLinkSet | SqlStrongLinkSet":
         if name.startswith("_"):
             raise AttributeError(name)
         for spec in self._variable._schema.links:
             if spec.name == name:
                 return SqlLinkSet(self._variable, spec)
-        declared = ", ".join(link.name for link in self._variable._schema.links) or "none"
+        strong = _resolve_strong_link(self._variable, name)
+        if strong is not None:
+            return strong
+        declared = _declared_link_names(self._variable) or "none"
         raise SchemaError(
-            f"{self._variable._cls.__name__} declares no weak link named {name!r} (declared links: {declared})"
+            f"{self._variable._cls.__name__} declares no link named {name!r} (declared links: {declared})"
         )
+
+
+def _strong_markers(cls: type) -> dict[str, Any]:
+    from httk.store.entry_providers import strong_link_markers  # lazy: entry_providers imports the store package
+
+    try:
+        return strong_link_markers(cls)
+    except TypeError:
+        return {}
+
+
+def _strong_owners(variable: "SqlVariable") -> list[type]:
+    """The record classes whose StrongLink edges may point at ``variable``: every configured backing."""
+    store = variable._searcher._store
+    owners: list[type] = []
+    for family in store.layout.families:
+        for backing in family.records:
+            if backing not in owners:
+                owners.append(backing)
+    if variable._cls not in owners:
+        owners.append(variable._cls)
+    return owners
+
+
+def _declared_link_names(variable: "SqlVariable") -> str:
+    names = [link.name for link in variable._schema.links]
+    names += [marker.relationship for marker in _strong_markers(variable._cls).values()]
+    for owner in _strong_owners(variable):
+        names += [marker.reverse for marker in _strong_markers(owner).values() if marker.reverse is not None]
+    return ", ".join(dict.fromkeys(names))
+
+
+def _resolve_strong_link(variable: "SqlVariable", name: str) -> "SqlStrongLinkSet | None":
+    """Resolve ``name`` as a forward StrongLink of the variable's class, else a reverse one pointing at it."""
+    for field_name, marker in _strong_markers(variable._cls).items():
+        if marker.relationship == name:
+            return SqlStrongLinkSet(variable, variable._cls, field_name, marker, reverse=False)
+    owners = [
+        (owner, field_name, marker)
+        for owner in _strong_owners(variable)
+        for field_name, marker in _strong_markers(owner).items()
+        if marker.reverse == name
+    ]
+    if len(owners) > 1:
+        names = ", ".join(f"{owner.__name__}.{field}" for owner, field, _ in owners)
+        raise UnsupportedQueryError(
+            f"reverse strong link {name!r} is declared by several configured record classes ({names}); "
+            f"searching one reverse name across several owners is not supported"
+        )
+    if owners:
+        owner, field_name, marker = owners[0]
+        return SqlStrongLinkSet(variable, owner, field_name, marker, reverse=True)
+    return None
+
+
+def _entry_type_name(variable: "SqlVariable", cls: type) -> str:
+    """The internal entry-type name a StrongLink edge stores for records of ``cls``."""
+    for family in variable._searcher._store.layout.families:
+        if cls in family.records:
+            internal = getattr(family.family, "type", None)
+            if isinstance(internal, str):
+                return internal
+    declared = getattr(cls, "type", None)
+    if isinstance(declared, str):
+        return declared
+    raise UnsupportedQueryError(
+        f"{cls.__name__} is not a configured entry family record in this store, so its entry-type name for "
+        f"strong-link edges is unknown"
+    )
+
+
+class SqlStrongLinkSet:
+    """One :class:`~httk.core.storage.StrongLink` traversal from a search variable, forward or reverse.
+
+    Strong links are record content: an edge field holding ``(label, entry_type, entry_id)``
+    triples, pinned to the owning record's revision and pointing at a target entry by its
+    public ``id``. Under the same ``links`` namespace as weak links, ``v.links.<relationship>``
+    traverses the edges the variable's own class declares (forward), and ``v.links.<reverse>``
+    traverses the edges of the configured owner class that point *at* the variable (reverse).
+
+    Forward: the owner's child table LEFT OUTER JOINs the variable, then the edge table. Reverse:
+    the edge table LEFT OUTER JOINs the variable on ``(entry_type, entry_id)``, then the child
+    table and the owner table, the owner restricted to its latest main revision (as the served
+    reverse relationships are). Edge rows carry no lineage of their own, so no latest filter
+    applies to them; ``as_of`` reaches a reverse owner through its ``store_timestamp``.
+
+    Identity comparisons (``== stored_object`` / ``== target_variable``, :meth:`has_any`,
+    :meth:`has_only`) compare the typed endpoint ``entry_type:entry_id`` (forward) or the
+    owner's public ``id`` (reverse) through the child-style set-derived path, so ``~`` negates
+    set-wise and a record with no edges satisfies ``has_only`` vacuously. Chaining into a target
+    field is not available: edge targets are typed per edge, so compare against a target search
+    variable instead. Edge fields themselves (``label``, ``entry_type``, ``entry_id``) chain on a
+    forward traversal only, e.g. ``record.links.product_of.label == "structure"``; edge tables
+    are shared between owners, so a reverse traversal rejects chaining.
+
+    Edges name a target by its public ``id``, which every revision of the target shares: a
+    target variable therefore matches all its revisions unless the searcher was opened with
+    ``only_latest=True`` (or filters revisions itself). A reverse traversal restricts the owner
+    to its latest main revision, while the root variable follows the searcher's own setting.
+
+    :param variable: The query variable the traversal starts from.
+    :param owner: The record class declaring the edge field.
+    :param field_name: The edge field on ``owner``.
+    :param marker: The StrongLink marker of that field.
+    :param reverse: Whether the traversal runs from a target back to the owner.
+    """
+
+    def __init__(self, variable: "SqlVariable", owner: type, field_name: str, marker: Any, *, reverse: bool) -> None:
+        self._variable = variable
+        self._searcher = variable._searcher
+        self._owner = owner
+        self._owner_schema = resolve_schema(owner)
+        self._spec = self._owner_schema.field(field_name)
+        self._marker = marker
+        self._reverse = reverse
+        self._edge_alias: sqlalchemy.FromClause | None = None
+        self._owner_alias: sqlalchemy.FromClause | None = None
+        self._name = marker.reverse if reverse else marker.relationship
+
+    def _join(self) -> sqlalchemy.FromClause:
+        """Register the traversal's LEFT OUTER JOINs and grouped mode, once; return the edge alias."""
+        if self._edge_alias is not None:
+            return self._edge_alias
+        variable = self._variable
+        searcher = self._searcher
+        store = searcher._store
+        spec = self._spec
+        assert spec.child is not None and spec.target is not None
+        child_table = store._table(spec.child.table_name)
+        edge_table = store._table(resolve_schema(spec.target).table_name)
+        child = child_table.alias()
+        edge = edge_table.alias()
+        parent_column = child.c[f"{self._owner_schema.table_name}_sid"]
+        fk_column = child.c[spec.child.element_columns[0].name]
+        if not self._reverse:
+            variable._joins.append((child, _bool_clause(parent_column == variable._alias.c[SID_COLUMN]), None))
+            variable._joins.append((edge, _bool_clause(edge.c[SID_COLUMN] == fk_column), None))
+        else:
+            entry_type = _entry_type_name(variable, variable._cls)
+            on_edge = sqlalchemy.and_(
+                _bool_clause(edge.c["entry_type"] == entry_type),
+                _bool_clause(edge.c["entry_id"] == variable._alias.c["id"]),
+            )
+            variable._joins.append((edge, _bool_clause(on_edge), None))
+            variable._joins.append((child, _bool_clause(fk_column == edge.c[SID_COLUMN]), None))
+            owner_table = store._table(self._owner_schema.table_name)
+            owner = owner_table.alias()
+            conds: list[sqlalchemy.ColumnElement[bool]] = [
+                _bool_clause(owner.c[SID_COLUMN] == parent_column),
+                _bool_clause(owner.c[ALT_KIND_COLUMN].is_(None)),
+                searcher._latest_of_lineage_in(owner_table, owner).where_clause,
+            ]
+            if searcher._as_of is not None:
+                as_of_units = ns_operand_to_store_units(searcher._as_of, cast(int, store.store_timestamp_resolution))
+                conds.append(_bool_clause(owner.c[STORE_TIMESTAMP_COLUMN] <= as_of_units))
+            variable._joins.append((owner, _bool_clause(sqlalchemy.and_(*conds)), None))
+            self._owner_alias = owner
+        searcher._grouped = True
+        self._edge_alias = edge
+        return edge
+
+    @property
+    def _target_column(self) -> "SqlColumn":
+        edge = self._join()
+        if self._reverse:
+            assert self._owner_alias is not None
+            element: sqlalchemy.ColumnElement[Any] = self._owner_alias.c["id"]
+        else:
+            element = _typed_endpoint(edge.c["entry_type"], edge.c["entry_id"])
+        return SqlColumn(self._searcher, element, from_child=True, link_path=True)
+
+    def _operand(self, value: Any) -> Any:
+        """Resolve an identity operand: a target/owner search variable or a stored object."""
+        if isinstance(value, SqlVariable):
+            if self._reverse:
+                if resolve_schema(value._cls).table_name != self._owner_schema.table_name:
+                    raise TypeError(
+                        f"reverse strong link {self._name!r} on {self._variable._cls.__name__} expects a "
+                        f"{self._owner.__name__} variable, got {value._cls.__name__}"
+                    )
+                return value._alias.c["id"]
+            return _typed_endpoint(sqlalchemy.literal(_entry_type_name(value, value._cls)), value._alias.c["id"])
+        try:
+            record_type = resolve_storage_record(value)
+        except TypeError:
+            raise TypeError(
+                f"cannot compare strong link {self._name!r} against {value!r}; compare against a stored entry "
+                f"with a public id or a search variable"
+            ) from None
+        entry_id = getattr(value, "id", None)
+        if not isinstance(entry_id, str):
+            raise TypeError(f"cannot compare strong link {self._name!r} against {value!r}: it carries no public id")
+        if self._reverse:
+            return entry_id
+        return f"{_entry_type_name(self._variable, record_type)}:{entry_id}"
+
+    def __eq__(self, other: object) -> SqlExpression:  # type: ignore[override]
+        """Match rows with an edge whose endpoint is ``other``."""
+        target_column = self._target_column
+        return target_column._plain(target_column._element == self._operand(other))
+
+    def __ne__(self, other: object) -> SqlExpression:  # type: ignore[override]
+        """Match rows with no edge whose endpoint is ``other`` (set-wise)."""
+        return ~self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def has(self, value: Any) -> SqlExpression:
+        """Match an edge endpoint equal to ``value``.
+
+        :param value: The stored entry or search variable to match.
+        :return: The matching SQL condition.
+        """
+        return self.has_any(value)
+
+    def has_any(self, *values: Any) -> SqlExpression:
+        """Match at least one edge endpoint among ``values``.
+
+        :param \\*values: The stored entries, search variables, or a lone subquery to match.
+        :return: The matching SQL condition.
+        """
+        return self._target_column.has_any(*[self._operand(value) for value in values])
+
+    def has_only(self, *values: Any) -> SqlExpression:
+        """Require every edge endpoint to be among ``values`` (a row with no edges matches).
+
+        :param \\*values: The complete set of allowed stored entries, search variables, or a lone subquery.
+        :return: The condition requiring every endpoint to match.
+        """
+        return self._target_column.has_only(*[self._operand(value) for value in values])
+
+    def __getattr__(self, name: str) -> SqlColumn:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if self._reverse:
+            # Edge classes are shared between owners and fields (every Run side and
+            # DataRecord.product_of store RunEdge rows in one table), and the reverse
+            # join reaches the edge alias before the owner/field restriction, so a
+            # chained edge column would match edges of any owner. Forward chaining is
+            # restricted by the owner's child table and stays available.
+            raise UnsupportedQueryError(
+                f"edge fields chain only on a forward strong link; {self._name!r} is the reverse direction, "
+                f"so compare it against an owner search variable or stored owner instead"
+            )
+        assert self._spec.target is not None
+        edge_schema = resolve_schema(self._spec.target)
+        try:
+            spec = edge_schema.field(name)
+        except SchemaError:
+            raise UnsupportedQueryError(
+                f"strong link {self._name!r} edges are typed per edge, so target fields cannot be chained; "
+                f"compare against a target search variable instead, or chain an edge field "
+                f"({', '.join(field.field for field in edge_schema.fields)})"
+            ) from None
+        if spec.role != "scalar":
+            raise UnsupportedQueryError(f"strong-link edge field {name!r} is not a scalar column")
+        edge = self._join()
+        return SqlColumn(self._searcher, edge.c[spec.columns[0].name], from_child=True, link_path=True, spec=spec)
+
+
+def _typed_endpoint(entry_type: Any, entry_id: Any) -> sqlalchemy.ColumnElement[Any]:
+    """``entry_type:entry_id`` as one comparable string, so typed endpoints join and set-compare as a unit."""
+    return (
+        sqlalchemy.cast(entry_type, sqlalchemy.String)
+        + sqlalchemy.literal(":")
+        + sqlalchemy.cast(entry_id, sqlalchemy.String)
+    )
 
 
 class SqlLinkSet:
@@ -1125,7 +1397,7 @@ class SqlSearcher:
         subquery = sqlalchemy.select(sqlalchemy.literal(1)).select_from(newer).where(*conds).correlate(alias)
         return _same(~subquery.exists())
 
-    def output(self, variable: "SqlVariable | SqlColumn | SqlLinkSet", name: str) -> None:
+    def output(self, variable: "SqlVariable | SqlColumn | SqlLinkSet | SqlStrongLinkSet", name: str) -> None:
         """Append an output for a reconstructed instance, a raw column value, or a link set.
 
         A weak-link-set output (a bare ``v.links.<name>``) yields a tuple of
@@ -1141,6 +1413,11 @@ class SqlSearcher:
         :raises TypeError: If ``variable`` is none of a query variable, a query column, or a link set.
         :raises httk.store.query.protocols.UnsupportedQueryError: If ``variable`` chains into a link target field.
         """
+        if isinstance(variable, SqlStrongLinkSet):
+            raise UnsupportedQueryError(
+                f"output {name!r} projects a strong-link traversal; the edges themselves are the record's own "
+                f"field, so project the variable and read that field instead"
+            )
         if isinstance(variable, SqlLinkSet):
             self._outputs.append(
                 _Output(

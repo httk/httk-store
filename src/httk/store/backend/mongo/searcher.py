@@ -726,10 +726,34 @@ class MongoLinks:
         for spec in self._variable._schema.links:
             if spec.name == name:
                 return MongoLinkSet(self._variable, spec)
+        if _is_strong_link_name(self._variable, name):
+            raise UnsupportedQueryError(
+                f"strong-link search ({self._variable._cls.__name__}.links.{name}) is not supported on MongoDB"
+            )
         declared = ", ".join(link.name for link in self._variable._schema.links) or "none"
         raise SchemaError(
             f"{self._variable._cls.__name__} declares no weak link named {name!r} (declared links: {declared})"
         )
+
+
+def _is_strong_link_name(variable: "MongoVariable", name: str) -> bool:
+    """Whether ``name`` is a forward or reverse StrongLink relationship reachable from ``variable``."""
+    from httk.store.entry_providers import strong_link_markers
+
+    classes: list[type] = [variable._cls]
+    for family in variable._searcher._store.layout.families:
+        classes.extend(backing for backing in family.records if backing not in classes)
+    for cls in classes:
+        try:
+            markers = strong_link_markers(cls)
+        except TypeError:
+            continue
+        for marker in markers.values():
+            if marker.relationship == name and cls is variable._cls:
+                return True
+            if marker.reverse == name:
+                return True
+    return False
 
 
 class MongoLinkSet:

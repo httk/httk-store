@@ -8,7 +8,9 @@ The examples use the `StructureRecord` class and `store` from
 `store.searcher()` opens a query through the backend-agnostic protocols in
 `httk.store.query`: bind classes to variables and add conditions. Freeze the
 query into the user-facing lazy result set with `results()`. Variables of the
-same class self-join; reference fields chain (`v.reference.name`),
+same class self-join; reference fields chain (`v.reference.name`); weak and
+strong links join through `v.links.<name>` (see
+[Relationships](db-relationships.md), e.g. `record.links.product_of == structure`);
 variable-length fields support the set operations (`has_any`, `has_only`), and
 `~` negates them as sets. String matching (`contains`, `startswith`,
 `endswith`) always takes **literal** text — `%` and `_` match themselves:

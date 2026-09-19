@@ -187,6 +187,59 @@ carried lineage-level on `~revs`.
 aliases), part of the served-route relationship filtering that landed this
 series.
 
+**Query DSL.** Strong links share the `links` namespace with weak links. A
+variable's own edge fields resolve by their forward `relationship` name
+(`run.links.has_output`, `record.links.product_of`); the edges of a configured
+owner class that point *at* the variable resolve by that marker's `reverse`
+name (`structure.links.is_output`, `structure.links.has_product`). Edges hold
+the target's public `id` and its internal entry-type name, so identity operands
+are a target search variable or a stored entry with a public id; a bare string
+raises `TypeError`. The same operators as weak links apply, with the
+child-style set semantics (`~` negates set-wise; a record with no edges satisfies
+`has_only` vacuously):
+
+```python
+search = store.searcher()
+structure = search.variable(UnitcellStructureRecord)
+record = search.variable(DataRecord)
+search.add(record.links.product_of == structure)          # join a record to the structure it describes
+search.add(record.links.product_of.label == "structure")  # edge fields (label/entry_type/entry_id) chain
+for row in search.results(structure=structure, record=record):
+    ...
+
+search = store.searcher()
+run = search.variable(Run)
+structure = search.variable(UnitcellStructureRecord)
+search.add(run.links.has_output == structure)             # forward
+search.add(structure.links.is_input.has_any(stored_run))  # reverse, stored-object operand
+```
+
+Differences from weak links follow from the edges being record content: the
+edge rows carry no lineage, so no latest-of-lineage filter applies to them.
+Edges name their target by its public `id`, which every revision shares, so a
+target variable matches **all** revisions of the target unless the searcher is
+opened with `only_latest=True`; a reverse traversal restricts the *owner* to its
+latest main revision (exactly as the served reverse relationships do) and
+honors `as_of` through the owner's `store_timestamp`, while the root variable
+follows the searcher's own `only_latest`. Open the searcher with
+`only_latest=True` when you want one row per current pair. Edge fields chain
+on the forward direction only (`record.links.product_of.label == ...`); the
+reverse direction rejects chaining because edge tables are shared between
+owners. Chaining into a *target* field
+(`record.links.product_of.<structure field>`) raises `UnsupportedQueryError`,
+because edge targets are typed per edge — constrain a target variable
+instead. A strong-link traversal is not a `results()` output (the edges are the
+record's own field). One reverse name declared by several configured owner
+classes is rejected as unsupported. MongoDB raises `UnsupportedQueryError` for
+strong-link names.
+
+`DataRecord.product_of` is the standard strong link from a data record to the
+entries whose product it is (reverse `has_product`), written by the workflow
+collector from the `product_of` output curation. Adding it changed the content
+identity of every `DataRecord` (an empty `product_of` is still content) and the
+`core_data_record` layout, so a store created before this change that holds
+data records must be rebuilt rather than reopened.
+
 **Mounted ids.** `StoredEntryFederation(source_inventory=...)` resolves relationship
 ids using the target family's mount in the same store. `adapter_from_stores`
 supplies this inventory automatically. Explicit `StoredEntrySource.relationship_sources`
@@ -210,5 +263,7 @@ named alternatives and stale revisions cannot satisfy the property filter.
 
 **Accepted limitations.** The cross-store reverse gap (reverse derives only
 within one source store); a backend with a custom `id_of` mapping
-gets empty reverse blocks; `product_relationships()` emits a forward-only
-`_httk_has_product` with no reverse.
+gets empty reverse blocks; the legacy `ProductLink` table's
+`product_relationships()` emits a forward-only `_httk_has_product` with no
+reverse (the `DataRecord.product_of` strong link serves both directions and is
+the searchable form).

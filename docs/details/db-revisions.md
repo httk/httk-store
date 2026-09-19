@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from httk.core.storage import Indexed
-from httk.store.backend.sql import Backend, SqlStore
+from httk.store import SqliteStore
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class Note:
     text: str
 
 
-store = SqlStore(Backend.sqlite(), entry_records={})
+store = SqliteStore(entry_records={})
 with store.transaction():
     first = Note("n", "first")
     store.save(first)

@@ -18,13 +18,41 @@ python -m pip install "httk-store[postgresql]"  # PostgreSQL backend (psycopg 3)
 python -m pip install "httk-store[clickhouse]"  # ClickHouse backend
 ```
 
-`Backend.postgresql(url)` opens a PostgreSQL store from a `postgresql://` URL.
-It is fully transactional and rides the ordinary `transactional` write profile
+## Opening a store
+
+The store class names the engine; its first argument is only the location:
+
+```python
+from httk.store import SqliteStore
+
+store = SqliteStore("results.sqlite", entry_records={})   # first open declares the store
+# reopen later with just: SqliteStore("results.sqlite"); in memory: SqliteStore(entry_records={})
+```
+
+`DuckdbStore("results.duckdb")`, `PostgresqlStore(url)`, and
+`ClickhouseStore(url)` are the sibling classes; every keyword of `SqlStore`
+(`entry_records`, `entry_ids`, `upgrade`, ...) is accepted as a keyword here. A
+store built this way owns its database connection and disposes it on
+`store.close()` or when leaving a `with SqliteStore(...) as store:` block.
+
+`PostgresqlStore(url)` opens a PostgreSQL store from a `postgresql://` URL. It
+is fully transactional and rides the ordinary `transactional` write profile
 with no special-casing, and it supports bulk ingestion (`store.bulk_ingest()`)
 with the same parity/deferred/parallel behavior as SQLite and DuckDB. Only the
 psycopg 3 driver is supported: a bare `postgresql://` URL is normalized to
 `postgresql+psycopg://` and any other explicit driver is rejected. See the
 [PostgreSQL testing guide](../postgres-testing.md) for local setup.
+
+### Advanced: `Backend` and `SqlStore`
+
+The per-dialect classes are thin subclasses of `SqlStore`. Use the two-object
+form `SqlStore(Backend.sqlite("results.sqlite"))` directly when you need a
+custom SQLAlchemy engine, one `Backend` shared across several stores or a
+`with Backend.sqlite(...) as db:` block, or `degraded=True` recovery. `Backend`
+names *where* data lives (`Backend.sqlite`, `Backend.duckdb`,
+`Backend.postgresql`, `Backend.clickhouse`) and owns the connection pool; the
+caller then owns its lifecycle, so `SqlStore.close()` leaves it open. Both names
+remain importable from `httk.store` and `httk.store.backend.sql`.
 
 Touching a SQL-backed name (such as `httk.store.backend.sql.Backend`) without the extra
 installed raises an `ImportError` naming it.

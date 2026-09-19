@@ -6,17 +6,29 @@ backend-agnostic search DSL, and serves them through the neutral `httk.core.Entr
 no SQLAlchemy types in the public API, no base class to inherit:
 
 ```python
-from httk.store.backend.sql import Backend, SqlStore
+from httk.store import SqliteStore
 
-db = Backend.sqlite("results.sqlite")
-store = SqlStore(db, entry_records={})   # first open declares the store
-# reopen later with just: SqlStore(db)
+store = SqliteStore("results.sqlite", entry_records={})   # first open declares the store
+# reopen later with just: SqliteStore("results.sqlite")
+# in memory instead: SqliteStore(entry_records={})
 
 with store.transaction():
     sid = store.save(record)             # dedups and recurses automatically
 
 same_record = store.fetch(type(record), sid)   # a lazy row; add eager=True to materialize
 ```
+
+The class names the engine and the argument is only the location:
+`DuckdbStore("results.duckdb")`, `PostgresqlStore(url)`, `ClickhouseStore(url)`.
+A store built this way owns its database connection and disposes it on
+`store.close()` or when leaving a `with SqliteStore(...) as store:` block.
+
+**Advanced: `Backend` and `SqlStore`.** Use the two-object form
+`SqlStore(Backend.sqlite("results.sqlite"))` when you need a custom SQLAlchemy
+engine, one `Backend` shared across several stores or a
+`with Backend.sqlite(...) as db:` block, or `degraded=True` recovery. There the
+caller owns the `Backend`, so `SqlStore.close()` leaves it open. Both names stay
+importable from `httk.store`.
 
 Records are content-addressed (`content_id`) as well as locally numbered
 (`sid`), and identical content saves to one row however many times it arrives.

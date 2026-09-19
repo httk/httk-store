@@ -1,6 +1,6 @@
 """The SQL store: save and fetch storable frozen dataclasses through a :class:`~httk.store.backend.sql.engine.Backend`.
 
-:class:`SqlStore` is the object-level storage API on top of the schema IR
+:class:`~httk.store.backend.sql.store.SqlStore` is the object-level storage API on top of the schema IR
 (:mod:`httk.store.backend.schema`), the value codecs (:mod:`httk.store.backend.codecs`),
 the content identity (:mod:`httk.core.storage`), and the SQLAlchemy table
 mapping (:mod:`httk.store.backend.sql.mapping`):
@@ -40,7 +40,8 @@ import time
 import typing
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Self, cast
 
 import sqlalchemy
 from httk.core import (
@@ -253,6 +254,11 @@ class SqlStore:
     # when a store is not physically empty.
     bulk_ingest_finalize_default: Literal["auto", "parity", "deferred"] = "auto"
 
+    # Set true by the per-dialect subclasses in ``stores`` (which build and own
+    # the Backend), so that :meth:`~httk.store.backend.sql.store.SqlStore.close` disposes it.  A store handed a Backend
+    # by the caller leaves this false and never disposes what it does not own.
+    _owns_database: bool = False
+
     def __init__(
         self,
         database: Backend,
@@ -272,6 +278,7 @@ class SqlStore:
             or store_timestamp_resolution <= 0
         ):
             raise ValueError("store_timestamp_resolution must be a positive integer")
+        self._owns_database = False
         self._database = database
         self._entry_ids = entry_ids
         self._upgrade = upgrade
@@ -320,7 +327,42 @@ class SqlStore:
         }
 
     def __repr__(self) -> str:
-        return f"SqlStore(database={self._database!r}, write_profile={self._write_profile!r})"
+        return f"{type(self).__name__}(database={self._database!r}, write_profile={self._write_profile!r})"
+
+    def close(self) -> None:
+        """Dispose the underlying :class:`~httk.store.backend.sql.engine.Backend`, but only when this store owns it.
+
+        A store constructed from a caller-supplied ``Backend`` does not own it,
+        so :meth:`~httk.store.backend.sql.store.SqlStore.close` is a no-op there and the caller stays responsible for
+        the connection pool.  The per-dialect subclasses build their own
+        ``Backend`` and do dispose it here.
+
+        :return: None.
+        """
+        if self._owns_database:
+            self._database.dispose()
+
+    def __enter__(self) -> Self:
+        """Enter a context whose exit closes the store.
+
+        :return: This store.
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Close the store when leaving its context.
+
+        :param exc_type: The exception class raised in the context, if any.
+        :param exc_value: The exception instance raised in the context, if any.
+        :param traceback: The traceback for the context exception, if any.
+        :return: None.
+        """
+        self.close()
 
     @staticmethod
     def _family_entry_type(family: type) -> str:

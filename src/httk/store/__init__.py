@@ -97,11 +97,12 @@ from .store_common import EntryIdConflictError, EntryIdScheme, EntryStore
 from .validation import PropertyValidationError, validate_property, validate_record
 
 __all__ = [
-    "Backend",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "CalculationEntryProvider",
+    "ClickhouseStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "ContinuationToken",
     "CountUnavailableError",
     "DataRecordEntryProvider",
+    "DuckdbStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "EntryFamilyDeclaration",
     "EntryIdConflictError",
     "EntryIdScheme",
@@ -126,6 +127,7 @@ __all__ = [
     "PageableResultSetLike",
     "PaginationCursorError",
     "PortableQueryCapabilities",
+    "PostgresqlStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "PropertyValidationError",
     "ReferenceEntryProvider",
     "ResultPage",
@@ -138,7 +140,7 @@ __all__ = [
     "SearchResult",
     "SearchVariable",
     "Searcher",
-    "SqlStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
+    "SqliteStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "Store",
     "UnsupportedQueryError",
     "check_ledger_key",
@@ -152,10 +154,16 @@ __all__ = [
 ]
 
 # The storage-backend engines are re-exported lazily: importing ``httk.store``
-# must stay free of both ``sqlalchemy`` and ``pymongo``, so ``Backend`` and
-# ``SqlStore`` load the SQL layer, and ``MongoStore`` the MongoDB layer, only on
-# first attribute access.
+# must stay free of both ``sqlalchemy`` and ``pymongo``, so the per-dialect
+# stores and the advanced ``Backend``/``SqlStore`` handles load the SQL layer,
+# and ``MongoStore`` the MongoDB layer, only on first attribute access.
+# ``Backend`` and ``SqlStore`` are intentionally absent from ``__all__`` (the
+# per-dialect stores are the beginner surface) but stay importable here.
 _LAZY_EXPORTS = {
+    "SqliteStore": "httk.store.backend.sql.stores",
+    "DuckdbStore": "httk.store.backend.sql.stores",
+    "PostgresqlStore": "httk.store.backend.sql.stores",
+    "ClickhouseStore": "httk.store.backend.sql.stores",
     "Backend": "httk.store.backend.sql.engine",
     "SqlStore": "httk.store.backend.sql.store",
     "MongoStore": "httk.store.backend.mongo",

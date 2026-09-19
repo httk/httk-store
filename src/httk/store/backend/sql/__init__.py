@@ -52,6 +52,8 @@ __all__ = [
     "BackendFacts",  # pyright: ignore[reportUnsupportedDunderAll]
     "BulkIngest",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "ClickHouseUnsupportedQueryError",  # pyright: ignore[reportUnsupportedDunderAll]
+    "ClickhouseStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
+    "DuckdbStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "DuplicateEntryIdError",  # pyright: ignore[reportUnsupportedDunderAll]
     "EntryDispatchIntegrityError",  # pyright: ignore[reportUnsupportedDunderAll]
     "EntryMetadataConflictError",  # pyright: ignore[reportUnsupportedDunderAll]
@@ -61,11 +63,13 @@ __all__ = [
     "FsckSummary",  # pyright: ignore[reportUnsupportedDunderAll]
     "MultipleResultsError",
     "NoResultError",
+    "PostgresqlStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "ResultColumn",  # pyright: ignore[reportUnsupportedDunderAll]
     "ResultRow",  # pyright: ignore[reportUnsupportedDunderAll]
     "SqlResultSet",  # pyright: ignore[reportUnsupportedDunderAll]
     "SqlSearcher",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "SqlStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
+    "SqliteStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "StaleResultError",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "StorageLayoutUpgradeRequiredError",  # pyright: ignore[reportUnsupportedDunderAll]
     "StoreClockRegressionError",  # pyright: ignore[reportUnsupportedDunderAll]
@@ -85,6 +89,10 @@ _SQL_EXPORTS = {
     "BulkIngest": ".bulk",
     "ClickHouseUnsupportedQueryError": "..clickhouse.support",
     "Backend": ".engine",
+    "SqliteStore": ".stores",
+    "DuckdbStore": ".stores",
+    "PostgresqlStore": ".stores",
+    "ClickhouseStore": ".stores",
     "EntryDispatchIntegrityError": ".store",
     "EntryMetadataConflictError": ".store",
     "EntryReplacementError": "...store_common",

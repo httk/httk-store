@@ -62,8 +62,8 @@ Against records `NaCl`, `CaTiO3` and `NaTiO2`, `has_any` matches `NaCl` and
 
 | httk v1 | *httk₂* |
 | --- | --- |
-| `httk.db.backend.Sqlite(path)` then `httk.db.store.SqlStore(backend)` | `Backend.sqlite(path)` then `SqlStore(database, entry_records={})` for first use, `SqlStore(database)` when reopening |
-| `httk.db.backend.Duckdb(path)` | `Backend.duckdb(path)` |
+| `httk.db.backend.Sqlite(path)` then `httk.db.store.SqlStore(backend)` | `SqliteStore(path, entry_records={})` for first use, `SqliteStore(path)` when reopening |
+| `httk.db.backend.Duckdb(path)` | `DuckdbStore(path)` |
 | `store.delay_commit()` … `store.commit()` | `with store.transaction():` |
 | subclass `httk.HttkObject`, `@httk.httk_typed_init({...}, index=[...], skip=[...])` | plain frozen dataclass with `Annotated` markers (`Indexed`, `Unique`, `Skip`, `Shape`, `Related`) and an optional `__httk_storage__: ClassVar[StorageInfo]` |
 | `@httk_typed_property(t)` | `@stored_property` (value type read from the return annotation) |
@@ -124,7 +124,7 @@ from dataclasses import dataclass
 from typing import Annotated, ClassVar
 
 from httk.core.storage import Indexed, StorageInfo
-from httk.store.backend.sql import Backend, SqlStore
+from httk.store import SqliteStore
 
 
 @dataclass(frozen=True)
@@ -142,7 +142,7 @@ class StructureTag:
     value: str
 
 
-store = SqlStore(Backend.sqlite("example.sqlite"), entry_records={})
+store = SqliteStore("example.sqlite", entry_records={})
 
 tablesalt = Structure("NaCl", ("Na", "Cl"))
 arsenic = Structure("As", ("As",))
@@ -210,7 +210,7 @@ from dataclasses import dataclass
 from typing import Annotated, ClassVar
 
 from httk.core.storage import Indexed, StorageInfo, stored_property
-from httk.store.backend.sql import Backend, SqlStore
+from httk.store import SqliteStore
 
 
 @dataclass(frozen=True)
@@ -238,7 +238,7 @@ class TotalEnergyResult:
     total_energy: float
 
 
-store = SqlStore(Backend.sqlite("results.sqlite"), entry_records={})
+store = SqliteStore("results.sqlite", entry_records={})
 
 vasp = Computation("VASP", "5.4.4")
 runs = [

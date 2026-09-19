@@ -61,11 +61,11 @@ instances. Saving deduplicates per the class's `StorageInfo.dedup` policy
 operations into one database transaction:
 
 ```python
-from httk.store.backend.sql import Backend, SqlStore
+from httk.store import SqliteStore
 
-db = Backend.sqlite("example.sqlite")  # or Backend.sqlite() in memory,
-store = SqlStore(db, entry_records={})  # first-time custom-record store
-# Reopen an initialized database with: SqlStore(db)
+# or SqliteStore(entry_records={}) in memory
+store = SqliteStore("example.sqlite", entry_records={})  # first-time custom-record store
+# Reopen an initialized database with: SqliteStore("example.sqlite")
 
 with store.transaction():
     sid = store.save(record)  # returns the integer sid; dedups; recurses

@@ -286,8 +286,8 @@ def test_searcher_and_history(backend: Backend) -> None:
 
     def values(only_main_alt: bool) -> set[int]:
         searcher = store.searcher(only_main_alt=only_main_alt)
-        searcher.output(searcher.variable(AltRecord), "rec")
-        return {item[0][0].value for item in searcher}
+        variable = searcher.variable(AltRecord)
+        return {row.rec.value for row in searcher.results(rec=variable)}
 
     assert values(only_main_alt=True) == {1}
     assert values(only_main_alt=False) == {1, 2, 3}

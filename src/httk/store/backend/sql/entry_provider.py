@@ -356,9 +356,9 @@ class StoreEntryProvider(EntryProvider):
         searcher = self._store.searcher(only_latest=self._only_latest)
         variable = searcher.variable(cls)
         sid_column = SqlColumn(searcher, variable._alias.c[SID_COLUMN])
-        searcher.output(variable, "obj")
-        searcher.output(sid_column, "sid")
-        matches: Iterator[tuple[Any, Any]] = ((obj, sid) for (obj, sid), _names in searcher)
+        searcher._output(variable, "obj")
+        searcher._output(sid_column, "sid")
+        matches: Iterator[tuple[Any, Any]] = ((obj, sid) for (obj, sid), _names in searcher._matches())
         for obj, sid in matches:
             row: dict[str, Any] = {
                 ID_FIELD: self._id_of(entry_type, int(sid), obj),

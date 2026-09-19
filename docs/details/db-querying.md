@@ -7,7 +7,10 @@ The examples use the `StructureRecord` class and `store` from
 
 `store.searcher()` opens a query through the backend-agnostic protocols in
 `httk.store.query`: bind classes to variables and add conditions. Freeze the
-query into the user-facing lazy result set with `results()`. Variables of the
+query into the user-facing lazy result set with `results()`. The query runs
+when the result set is first consumed (iteration, `len()`, `first()`,
+`one()`), not when `results()` is called, and the frozen set does not see
+conditions added afterwards. Variables of the
 same class self-join; reference fields chain (`v.reference.name`); weak and
 strong links join through `v.links.<name>` (see
 [Relationships](db-relationships.md), e.g. `record.links.product_of == structure`);
@@ -54,7 +57,7 @@ when `results()` is declared; reference-path projections are supported.
 
 `search.slicer(cls)` wraps this same DSL in a `[]` indexing surface that reads
 like pandas. It is pure sugar — it compiles bracket indexing into the
-`variable`/`add`/`output`/`results` calls above and adds no query capability of
+`variable`/`add`/`results` calls above and adds no query capability of
 its own:
 
 ```python
@@ -143,20 +146,15 @@ expiry. Components already filled into a view before advancing remain
 readable on that view, but later component fills raise
 `ExpiredCursorRowError`.
 
-### Low-level portable protocol
+### Portable protocol
 
-The backend-neutral protocol form remains useful for code that must run on
-any `Searcher` implementation. Declare outputs and iterate its plain
-`SearchResult` values directly:
+`results()` itself is the backend-neutral protocol form: it works on any
+`Searcher` implementation, not only `SqlStore`.
 
 ```python
-search.output(s, "structure")
-for (structure,), names in search:
-    print(names, structure.formula)
+for row in search.results(structure=s):
+    print(row.structure.formula)
 ```
-
-This is the low-level/portable layer; SQL consumers should generally use
-`results()`.
 
 ### Neutral portable Store profile
 

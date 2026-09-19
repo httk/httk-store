@@ -44,15 +44,13 @@ def test_mongo_timestamp_save_dedup_query_and_sort(mongo_test_database):
 
     query = store.searcher()
     variable = query.variable(MongoTimestampRecord)
-    query.output(variable, "record")
     query.add(variable.store_timestamp <= 1_000_499)
     query.add_sort(variable.store_timestamp)
-    assert [row[0][0].value for row in query] == [1]
+    assert [row[0].value for row in query.results(record=variable)] == [1]
 
     scalar = store.searcher()
     scalar_variable = scalar.variable(MongoTimestampRecord)
-    scalar.output(scalar_variable.store_timestamp, "stamp")
-    assert [row[0][0] for row in scalar] == [1_000_000, 2_000_000]
+    assert [row[0] for row in scalar.results(stamp=scalar_variable.store_timestamp)] == [1_000_000, 2_000_000]
 
     for operand in (
         1_000_499,
@@ -61,9 +59,8 @@ def test_mongo_timestamp_save_dedup_query_and_sort(mongo_test_database):
     ):
         candidate = store.searcher()
         item = candidate.variable(MongoTimestampRecord)
-        candidate.output(item, "record")
         candidate.add(item.store_timestamp <= operand)
-        assert list(candidate)
+        assert list(candidate.results(record=item))
     with pytest.raises(ValueError, match="timezone-aware"):
         _ = variable.store_timestamp <= datetime.datetime(1970, 1, 1)  # noqa: DTZ001
 
@@ -85,10 +82,9 @@ def test_mongo_as_of_reference_lookup_and_pagination(mongo_test_database):
     searcher.add_sort(branch.label)
     searcher.set_limit(1)
     searcher.add_offset(1)
-    searcher.output(branch, "record")
 
     assert searcher.count() == 2
-    assert [row[0][0].label for row in searcher] == ["old-2"]
+    assert [row[0].label for row in searcher.results(record=branch)] == ["old-2"]
 
 
 def test_mongo_timestamp_layout_guard_and_clock_regression(mongo_test_database):

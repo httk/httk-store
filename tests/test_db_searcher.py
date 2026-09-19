@@ -133,25 +133,25 @@ def store(request):
         yield sql_store
 
 
-def formulas(searcher) -> set[str]:
-    return {item[0][0].formula for item in searcher}
+def formulas(searcher, variable=None) -> set[str]:
+    rows = searcher.results(rec=variable) if variable is not None else searcher.results()
+    return {row[0].formula for row in rows}
 
 
 def rec_searcher(store):
     searcher = store.searcher()
     variable = searcher.variable(Rec)
-    searcher.output(variable, "rec")
     return searcher, variable
 
 
-def texts(searcher) -> set[str]:
-    return {item[0][0].text for item in searcher}
+def texts(searcher, variable=None) -> set[str]:
+    rows = searcher.results(label=variable) if variable is not None else searcher.results()
+    return {row[0].text for row in rows}
 
 
 def label_searcher(store):
     searcher = store.searcher()
     variable = searcher.variable(Label)
-    searcher.output(variable, "label")
     return searcher, variable
 
 
@@ -190,7 +190,7 @@ def test_reference_chain_shares_one_join(store):
     searcher.add(v.ref.title == "Beta")
     assert len(v._joins) == 1  # both conditions hit the same joined alias
     assert len(v._reference_variables) == 1
-    assert formulas(searcher) == {"MgO", "SrCaTiO"}
+    assert formulas(searcher, v) == {"MgO", "SrCaTiO"}
 
 
 # --------------------------------------------------------------------- child set operations
@@ -205,7 +205,7 @@ def test_repeated_child_access_makes_fresh_joins(store):
     assert len(v._joins) == 2  # a fresh child alias per attribute access
     assert first._element is not second._element
     searcher.add(first.has_any("Ti"))
-    assert formulas(searcher) == {"CaTiO3", "SrCaTiO"}
+    assert formulas(searcher, v) == {"CaTiO3", "SrCaTiO"}
 
 
 def test_has_all_pattern_via_anded_has_any(store):
@@ -214,13 +214,13 @@ def test_has_all_pattern_via_anded_has_any(store):
     # aliases above (on one shared alias it would be unsatisfiable).
     searcher, v = rec_searcher(store)
     searcher.add(v.symbols.has_any("Ca") & v.symbols.has_any("Ti"))
-    assert formulas(searcher) == {"CaTiO3", "SrCaTiO"}
+    assert formulas(searcher, v) == {"CaTiO3", "SrCaTiO"}
 
 
 def test_has_all_pattern_no_false_positives(store):
     searcher, v = rec_searcher(store)
     searcher.add(v.symbols.has_any("Na") & v.symbols.has_any("Ti"))
-    assert formulas(searcher) == set()
+    assert formulas(searcher, v) == set()
 
 
 # ------------------------------------------------- grouping of HAVING-referenced columns
@@ -231,8 +231,8 @@ def test_mixed_scalar_and_set_filter(store):
     searcher, v = rec_searcher(store)
     searcher.add(v.formula == "CaTiO3")
     searcher.add(~v.symbols.has_any("Na", "Cl"))
-    assert formulas(searcher) == {"CaTiO3"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == {"CaTiO3"}
+    assert searcher.count() == len(searcher.results(rec=v))
 
 
 def test_for_all_with_scalar_filter(store):
@@ -241,8 +241,8 @@ def test_for_all_with_scalar_filter(store):
     # grouped by (a BinderException on DuckDB before the grouping fix).
     searcher, v = rec_searcher(store)
     searcher.add((v.spacegroup == 225) & v.symbols.has_only("Na", "Cl"))
-    assert formulas(searcher) == {"NaCl"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == {"NaCl"}
+    assert searcher.count() == len(searcher.results(rec=v))
 
 
 def test_sort_under_grouped_mode(store):
@@ -251,16 +251,16 @@ def test_sort_under_grouped_mode(store):
     searcher, v = rec_searcher(store)
     searcher.add(v.symbols.has_any("O"))
     searcher.add_sort(v.formula, False)
-    assert [item[0][0].formula for item in searcher] == ["CaO", "CaTiO3", "MgO", "SrCaTiO"]
-    assert searcher.count() == len(list(searcher))
+    assert [row.rec.formula for row in searcher.results(rec=v)] == ["CaO", "CaTiO3", "MgO", "SrCaTiO"]
+    assert searcher.count() == len(searcher.results(rec=v))
 
 
 def test_reference_comparison_under_grouped_mode(store):
     # A foreign-key comparison in HAVING position groups by the foreign key.
     searcher, v = rec_searcher(store)
     searcher.add((v.ref == REF_B) & ~v.symbols.has_any("Na"))
-    assert formulas(searcher) == {"MgO", "SrCaTiO"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == {"MgO", "SrCaTiO"}
+    assert searcher.count() == len(searcher.results(rec=v))
 
 
 # ------------------------------------------------------------- constant expressions
@@ -269,12 +269,12 @@ def test_reference_comparison_under_grouped_mode(store):
 def test_always_true_and_always_false_are_constants(store):
     searcher, v = label_searcher(store)
     searcher.add(v.always_true())
-    assert texts(searcher) == ALL_LABELS
+    assert texts(searcher, v) == ALL_LABELS
     assert searcher.count() == len(ALL_LABELS)
 
     searcher, v = label_searcher(store)
     searcher.add(v.always_false())
-    assert texts(searcher) == set()
+    assert texts(searcher, v) == set()
     assert searcher.count() == 0
 
 
@@ -284,30 +284,30 @@ def test_always_true_is_null_safe_where_column_self_comparison_was_not(store):
     # — for a NULL column, and so silently dropped exactly these rows.
     searcher, v = label_searcher(store)
     searcher.add(v.always_true())
-    assert texts(searcher) == ALL_LABELS
+    assert texts(searcher, v) == ALL_LABELS
 
     searcher, v = label_searcher(store)
     searcher.add(v.note == v.note)
-    assert texts(searcher) == set()
+    assert texts(searcher, v) == set()
 
 
 def test_scalar_membership_handles_nulls_without_sql_three_valued_leaks(store):
     """``is_in`` treats NULL as an explicit member, including under ``~``."""
     searcher, v = label_searcher(store)
     searcher.add(v.note.is_in(None, "present"))
-    assert texts(searcher) == ALL_LABELS
+    assert texts(searcher, v) == ALL_LABELS
 
     searcher, v = label_searcher(store)
     searcher.add(~v.note.is_in(None, "present"))
-    assert texts(searcher) == set()
+    assert texts(searcher, v) == set()
 
     searcher, v = label_searcher(store)
     searcher.add(v.note.is_in("present"))
-    assert texts(searcher) == set()
+    assert texts(searcher, v) == set()
 
     searcher, v = label_searcher(store)
     searcher.add(~v.note.is_in("present"))
-    assert texts(searcher) == ALL_LABELS
+    assert texts(searcher, v) == ALL_LABELS
 
 
 def test_true_handler_filter_matches_rows_with_a_null_scalar(store):
@@ -332,22 +332,20 @@ def test_true_handler_filter_matches_rows_with_a_null_scalar(store):
 def test_iteration_shape_and_lazy_object_equality(store):
     searcher = store.searcher()
     v = searcher.variable(Rec)
-    searcher.output(v, "rec")
-    searcher.output(v.formula, "formula")
     searcher.add(v.formula == "NaCl")
-    items = list(searcher)
+    items = list(searcher.results(rec=v, formula=v.formula))
     assert len(items) == 1
-    values, names = items[0]
-    assert names == ("rec", "formula")
-    assert values[0] == RECORDS[1]  # search rows bypass the identity cache
-    assert values[1] == "NaCl"
-    assert items[0][0][0] is values[0]  # item[0][0] is the matched object
+    row = items[0]
+    assert row.names == ("rec", "formula")
+    assert row.values[0] == RECORDS[1]  # search rows bypass the identity cache
+    assert row.values[1] == "NaCl"
+    assert row[0] is row.values[0]  # row[0] is the matched object
 
 
 def test_field_output_carries_exact_projection_ir(store):
     searcher = store.searcher()
     variable = searcher.variable(Rec)
-    searcher.output(variable.energy, "energy")
+    searcher._output(variable.energy, "energy")
     projection = searcher._outputs[0]
     assert projection.variable is variable
     assert projection.spec is variable._schema.field("energy")
@@ -360,10 +358,10 @@ def test_field_output_carries_exact_projection_ir(store):
 def test_search_result_is_a_named_two_tuple(store):
     searcher = store.searcher()
     v = searcher.variable(Label)
-    searcher.output(v, "label")
-    searcher.output(v.text, "text")
+    searcher._output(v, "label")
+    searcher._output(v.text, "text")
     searcher.add(v.text == "a_b")
-    (result,) = list(searcher)
+    (result,) = list(searcher._matches())
     values, names = result  # unpacks as the plain 2-tuple it always was
     assert len(result) == 2
     assert names == ("label", "text")
@@ -376,17 +374,15 @@ def test_search_result_is_a_named_two_tuple(store):
 def test_iteration_without_outputs_raises(store):
     searcher = store.searcher()
     searcher.variable(Rec)
-    with pytest.raises(ValueError, match="output"):
-        iter(searcher)
+    with pytest.raises(ValueError, match="no outputs are declared; use results"):
+        searcher._matches()
 
 
 def test_output_column_alongside_object_in_grouped_mode(store):
     searcher = store.searcher()
     v = searcher.variable(Rec)
-    searcher.output(v, "rec")
-    searcher.output(v.spacegroup, "spacegroup")
     searcher.add(v.symbols.has_only("O", "Ca", "Ti"))
-    results = {(item[0][0].formula, item[0][1]) for item in searcher}
+    results = {(row.rec.formula, row.spacegroup) for row in searcher.results(rec=v, spacegroup=v.spacegroup)}
     assert results == {("CaTiO3", 221), ("CaO", 225), ("X", 1)}
 
 
@@ -396,23 +392,23 @@ def test_output_column_alongside_object_in_grouped_mode(store):
 def test_sort_ascending_on_fraction_float_companion(store):
     searcher, v = rec_searcher(store)
     searcher.add_sort(v.energy, False)
-    assert [item[0][0].formula for item in searcher] == ["MgO", "CaTiO3", "CaO", "NaCl", "X", "SrCaTiO"]
+    assert [row.rec.formula for row in searcher.results(rec=v)] == ["MgO", "CaTiO3", "CaO", "NaCl", "X", "SrCaTiO"]
 
 
 def test_sort_descending_with_secondary_key(store):
     searcher, v = rec_searcher(store)
     searcher.add_sort(v.spacegroup, True)
     searcher.add_sort(v.formula, False)
-    assert [item[0][0].formula for item in searcher] == ["CaO", "MgO", "NaCl", "CaTiO3", "SrCaTiO", "X"]
+    assert [row.rec.formula for row in searcher.results(rec=v)] == ["CaO", "MgO", "NaCl", "CaTiO3", "SrCaTiO", "X"]
 
 
 def test_set_limit_and_clearing(store):
     searcher, v = rec_searcher(store)
     searcher.add_sort(v.formula, False)
     searcher.set_limit(2)
-    assert [item[0][0].formula for item in searcher] == ["CaO", "CaTiO3"]
+    assert [row.rec.formula for row in searcher.results(rec=v)] == ["CaO", "CaTiO3"]
     searcher.set_limit(-1)
-    assert len(list(searcher)) == 6
+    assert len(searcher.results(rec=v)) == 6
 
 
 def test_add_offset_and_mutable_offset_attribute(store):
@@ -421,11 +417,11 @@ def test_add_offset_and_mutable_offset_attribute(store):
     assert searcher.offset == 0
     searcher.add_offset(2)
     assert searcher.offset == 2
-    assert [item[0][0].formula for item in searcher] == ["MgO", "NaCl", "SrCaTiO", "X"]
+    assert [row.rec.formula for row in searcher.results(rec=v)] == ["MgO", "NaCl", "SrCaTiO", "X"]
     searcher.add_offset(2)
     assert searcher.offset == 4
     searcher.offset = 5  # the attribute is directly writable (execution.py contract)
-    assert [item[0][0].formula for item in searcher] == ["X"]
+    assert [row.rec.formula for row in searcher.results(rec=v)] == ["X"]
 
 
 def test_offset_without_limit_after_clearing(store):
@@ -434,7 +430,7 @@ def test_offset_without_limit_after_clearing(store):
     searcher.add_sort(v.formula, False)
     searcher.set_limit(-1)
     searcher.add_offset(4)
-    assert [item[0][0].formula for item in searcher] == ["SrCaTiO", "X"]
+    assert [row.rec.formula for row in searcher.results(rec=v)] == ["SrCaTiO", "X"]
 
 
 def test_count_ungrouped(store):
@@ -448,7 +444,7 @@ def test_count_ignores_limit_and_offset(store):
     searcher.set_limit(1)
     searcher.add_offset(1)
     assert searcher.count() == 3
-    assert len(list(searcher)) == 1
+    assert len(searcher.results(rec=v)) == 1
 
 
 def test_count_grouped(store):
@@ -571,15 +567,13 @@ def test_parity_with_in_memory_store(store):
     for program in PARITY_PROGRAMS:
         memory_searcher = memory_store.searcher()
         memory_variable = memory_searcher.variable("recs")
-        memory_searcher.output(memory_variable, "rec")
         program(memory_searcher, memory_variable)
-        memory_ids = {item[0][0]["formula"] for item in memory_searcher}
+        memory_ids = {row.rec["formula"] for row in memory_searcher.results(rec=memory_variable)}
 
         sql_searcher = store.searcher()
         sql_variable = sql_searcher.variable(Rec)
-        sql_searcher.output(sql_variable, "rec")
         program(sql_searcher, sql_variable)
-        sql_ids = {item[0][0].formula for item in sql_searcher}
+        sql_ids = {row.rec.formula for row in sql_searcher.results(rec=sql_variable)}
 
         assert sql_ids == memory_ids, program.__name__
         assert sql_searcher.count() == memory_searcher.count(), program.__name__
@@ -594,13 +588,12 @@ def test_literal_string_matching_parity_with_in_memory_store(store):
     for build, expected in LITERAL_MATCH_CASES:
         memory_searcher = memory_store.searcher()
         memory_variable = memory_searcher.variable("labels")
-        memory_searcher.output(memory_variable, "label")
         memory_searcher.add(build(memory_variable))
-        memory_texts = {item[0][0]["text"] for item in memory_searcher}
+        memory_texts = {row.label["text"] for row in memory_searcher.results(label=memory_variable)}
 
         sql_searcher, sql_variable = label_searcher(store)
         sql_searcher.add(build(sql_variable))
-        sql_texts = texts(sql_searcher)
+        sql_texts = texts(sql_searcher, sql_variable)
 
         assert sql_texts == memory_texts == expected
         assert sql_searcher.count() == memory_searcher.count()
@@ -617,13 +610,12 @@ def test_constant_expression_parity_with_in_memory_store(store):
     ]:
         memory_searcher = memory_store.searcher()
         memory_variable = memory_searcher.variable("labels")
-        memory_searcher.output(memory_variable, "label")
         memory_searcher.add(build(memory_variable))
-        memory_texts = {item[0][0]["text"] for item in memory_searcher}
+        memory_texts = {row.label["text"] for row in memory_searcher.results(label=memory_variable)}
 
         sql_searcher, sql_variable = label_searcher(store)
         sql_searcher.add(build(sql_variable))
-        assert texts(sql_searcher) == memory_texts == expected
+        assert texts(sql_searcher, sql_variable) == memory_texts == expected
 
 
 def test_search_result_names_parity_with_in_memory_store(store):
@@ -635,16 +627,16 @@ def test_search_result_names_parity_with_in_memory_store(store):
     memory_store = InMemoryStore({"labels": [{"text": label.text, "note": label.note} for label in LABELS]})
     memory_searcher = memory_store.searcher()
     memory_variable = memory_searcher.variable("labels")
-    memory_searcher.output(memory_variable, "label")
-    memory_searcher.output(memory_variable.text, "text")
+    memory_searcher._output(memory_variable, "label")
+    memory_searcher._output(memory_variable.text, "text")
 
     sql_searcher = store.searcher()
     sql_variable = sql_searcher.variable(Label)
-    sql_searcher.output(sql_variable, "label")
-    sql_searcher.output(sql_variable.text, "text")
+    sql_searcher._output(sql_variable, "label")
+    sql_searcher._output(sql_variable.text, "text")
 
-    memory_results = list(memory_searcher)
-    sql_results = list(sql_searcher)
+    memory_results = list(memory_searcher._matches())
+    sql_results = list(sql_searcher._matches())
     assert {result.names for result in memory_results} == {("label", "text")}
     assert {result.names for result in sql_results} == {("label", "text")}
     assert {result[0][1] for result in memory_results} == {result[0][1] for result in sql_results} == ALL_LABELS
@@ -668,7 +660,7 @@ def test_object_outputs_survive_reconstruction_on_every_row(store):
         ) as isolated_store:
             searcher, variable = rec_searcher(isolated_store)
             searcher.add(variable.formula.startswith("Throwaway"))
-            assert formulas(searcher) == {f"Throwaway{index}" for index in range(4)}
+            assert formulas(searcher, variable) == {f"Throwaway{index}" for index in range(4)}
             assert searcher.count() == 4
         return
     if dialect == "postgresql":
@@ -686,7 +678,7 @@ def test_object_outputs_survive_reconstruction_on_every_row(store):
 
         searcher, variable = rec_searcher(isolated_store)
         searcher.add(variable.formula.startswith("Throwaway"))
-        matched = formulas(searcher)
+        matched = formulas(searcher, variable)
         assert matched == {f"Throwaway{index}" for index in range(4)}
         assert searcher.count() == 4
 
@@ -700,12 +692,12 @@ def test_negated_child_comparison_means_no_row_matches(store):
     searcher.add(~(v.symbols == "O"))
     # Records containing O must be excluded even though they hold other symbols
     # too; the childless record matches (it has no symbol equal to O).
-    assert formulas(searcher) == {"NaCl", "X"}
+    assert formulas(searcher, v) == {"NaCl", "X"}
 
     # ... which is exactly what the equivalent set operation yields.
     reference, rv = rec_searcher(store)
     reference.add(~rv.symbols.has_any("O"))
-    assert formulas(reference) == {"NaCl", "X"}
+    assert formulas(reference, rv) == {"NaCl", "X"}
 
 
 def test_plain_child_comparison_keeps_existential_meaning(store):
@@ -714,13 +706,13 @@ def test_plain_child_comparison_keeps_existential_meaning(store):
     expression = v.symbols == "O"
     assert expression.post is False  # no grouped mode forced for a plain filter
     searcher.add(expression)
-    assert formulas(searcher) == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
+    assert formulas(searcher, v) == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
 
 
 def test_negated_child_string_predicate_means_no_row_matches(store):
     searcher, v = rec_searcher(store)
     searcher.add(~v.symbols.contains("O"))
-    assert formulas(searcher) == {"NaCl", "X"}
+    assert formulas(searcher, v) == {"NaCl", "X"}
 
 
 def test_child_comparison_composed_with_for_all_reaches_having(store):
@@ -734,7 +726,7 @@ def test_child_comparison_composed_with_for_all_reaches_having(store):
     searcher, v = rec_searcher(store)
     searcher.add(v.symbols.has_only("Ca", "O") | (v.symbols == "Na"))
     # has_only({Ca,O}): CaO and the empty-symbol record; == "Na": NaCl.
-    assert formulas(searcher) == {"CaO", "X", "NaCl"}
+    assert formulas(searcher, v) == {"CaO", "X", "NaCl"}
     assert searcher.count() == 3
 
 
@@ -745,7 +737,7 @@ def test_is_in_is_set_derived_only_on_child_fields(store):
     assert (root_expression.set_derived, root_expression.post) == (False, False)
     root_searcher.add(root_expression)
     assert root_searcher._grouped is False  # no needless grouping
-    assert formulas(root_searcher) == ALL_FORMULAS - {"NaCl", "MgO"}
+    assert formulas(root_searcher, rv) == ALL_FORMULAS - {"NaCl", "MgO"}
 
     child_searcher, cv = rec_searcher(store)
     child_expression = ~cv.symbols.is_in("Ca", "O")
@@ -753,4 +745,4 @@ def test_is_in_is_set_derived_only_on_child_fields(store):
     child_searcher.add(child_expression)
     # is_in on a child field is the for-all reading, so its negation is
     # "not every symbol is in {Ca,O}".
-    assert formulas(child_searcher) == {"CaTiO3", "NaCl", "MgO", "SrCaTiO"}
+    assert formulas(child_searcher, cv) == {"CaTiO3", "NaCl", "MgO", "SrCaTiO"}

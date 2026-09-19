@@ -146,7 +146,7 @@ ROCKSALT = Measurement(
 def row_count(store: SqlStore, cls: type) -> int:
     """The number of stored rows of ``cls``, via the query DSL (never raw SQL)."""
     searcher = store.searcher()
-    searcher.output(searcher.variable(cls), "obj")
+    searcher.variable(cls)
     return searcher.count()
 
 

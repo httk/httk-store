@@ -15,9 +15,9 @@ from httk.store import (
     FederatedTarget,
     MultipleResultsError,
     NoResultError,
-    SearchResult,
     UnsupportedQueryError,
 )
+from httk.store.query.protocols import SearchResult
 
 
 class ProbeSearcher:
@@ -333,7 +333,7 @@ class QueryProbeSearcher:
         self.calls.append(("variable", target))
         return QueryProbeVariable(self)
 
-    def output(self, value: object, name: str) -> None:
+    def _output(self, value: object, name: str) -> None:
         if any(existing_name == name for _existing_value, existing_name in self.outputs):
             raise UnsupportedQueryError(f"duplicate child output name: {name!r}")
         self.outputs.append((value, name))
@@ -472,7 +472,7 @@ def test_fields_expressions_and_outputs_cannot_cross_federated_searchers() -> No
         first_searcher.add(foreign_expression)
     for value in (second, second.name, second_searcher.origin):
         with pytest.raises(UnsupportedQueryError, match="this federated searcher"):
-            first_searcher.output(value, "foreign")
+            first_searcher._output(value, "foreign")
         with pytest.raises(UnsupportedQueryError, match="this federated searcher"):
             first_searcher._plan({"foreign": value})
 
@@ -492,9 +492,9 @@ def test_concrete_child_field_is_rejected_without_dynamic_instance_lookup() -> N
 def test_output_and_results_planning_record_scalars_and_origin_without_execution() -> None:
     searcher, first, second = _query_searcher()
     variable = searcher.variable("records")
-    searcher.output(variable, "record")
-    searcher.output(variable.ref.identifier, "identifier")
-    searcher.output(searcher.origin, "origin")
+    searcher._output(variable, "record")
+    searcher._output(variable.ref.identifier, "identifier")
+    searcher._output(searcher.origin, "origin")
 
     plan = searcher._plan()
 
@@ -515,7 +515,7 @@ def test_output_and_results_planning_record_scalars_and_origin_without_execution
 def test_results_projection_validation_is_idempotent_and_replaces_retained_outputs() -> None:
     searcher, first, second = _query_searcher()
     variable = searcher.variable("records")
-    searcher.output(variable.name, "retained")
+    searcher._output(variable.name, "retained")
 
     for _ in range(2):
         assert searcher.results(record=variable, origin=searcher.origin).names == ("record", "origin")
@@ -535,10 +535,10 @@ def test_results_planning_requires_at_least_one_output() -> None:
 def test_duplicate_output_names_foreign_results_and_global_sort_are_rejected() -> None:
     searcher, _first, _second = _query_searcher()
     variable = searcher.variable("records")
-    searcher.output(variable, "record")
+    searcher._output(variable, "record")
 
     with pytest.raises(ValueError, match="duplicate output name"):
-        searcher.output(variable.name, "record")
+        searcher._output(variable.name, "record")
     with pytest.raises(UnsupportedQueryError, match="add_sort"):
         searcher.add_sort(variable.name)
     other_searcher, _third, _fourth = _query_searcher()
@@ -564,10 +564,10 @@ class ExecutionSearcher(QueryProbeSearcher):
             raise self._execution_store.error
         super().add(expression)
 
-    def output(self, value: object, name: str) -> None:
+    def _output(self, value: object, name: str) -> None:
         if self._runtime_failure and self._execution_store.failure == "output declaration":
             raise self._execution_store.error
-        super().output(value, name)
+        super()._output(value, name)
 
     def set_limit(self, limit: int) -> None:
         if self._runtime_failure and self._execution_store.failure == "limit pushdown":
@@ -582,7 +582,8 @@ class ExecutionSearcher(QueryProbeSearcher):
         if self._runtime_failure and self._execution_store.failure == "count":
             raise self._execution_store.error
         return sum(
-            all(self._matches(expression, row) for expression in self.added) for row in self._execution_store.rows
+            all(self._expression_matches(expression, row) for expression in self.added)
+            for row in self._execution_store.rows
         )
 
     @staticmethod
@@ -593,27 +594,27 @@ class ExecutionSearcher(QueryProbeSearcher):
             value = value[name]
         return value
 
-    def _matches(self, expression: QueryProbeExpression, row: dict[str, object]) -> bool:
+    def _expression_matches(self, expression: QueryProbeExpression, row: dict[str, object]) -> bool:
         tree = expression.tree
         if tree[0] == "constant":
             return tree[1]
         if tree[0] == "AND":
-            return self._matches(QueryProbeExpression(self, tree[1]), row) and self._matches(
+            return self._expression_matches(QueryProbeExpression(self, tree[1]), row) and self._expression_matches(
                 QueryProbeExpression(self, tree[2]), row
             )
         if tree[0] == "OR":
-            return self._matches(QueryProbeExpression(self, tree[1]), row) or self._matches(
+            return self._expression_matches(QueryProbeExpression(self, tree[1]), row) or self._expression_matches(
                 QueryProbeExpression(self, tree[2]), row
             )
         if tree[0] == "NOT":
-            return not self._matches(QueryProbeExpression(self, tree[1]), row)
+            return not self._expression_matches(QueryProbeExpression(self, tree[1]), row)
         operation, path, arguments = tree
         value = self._value(row, path)
         if operation == "__eq__":
             return value == arguments[0]
         raise AssertionError(f"test fake does not evaluate {operation}")
 
-    def __iter__(self) -> Any:
+    def _matches(self) -> Any:
         self.executed = True
         self._execution_store.execution_calls += 1
         if self._runtime_failure and self._execution_store.failure == "iteration":
@@ -621,7 +622,7 @@ class ExecutionSearcher(QueryProbeSearcher):
         rows = [
             row
             for row in self._execution_store.rows
-            if all(self._matches(expression, row) for expression in self.added)
+            if all(self._expression_matches(expression, row) for expression in self.added)
         ]
         if self.limit is not None:
             rows = rows[: self.limit]
@@ -736,9 +737,9 @@ def test_limit_zero_contacts_no_child_and_origin_only_uses_hidden_record_output(
 def test_direct_searcher_iteration_yields_search_results() -> None:
     searcher, _first, _second = _execution_searcher([{"id": "1", "value": "a"}], [{"id": "2", "value": "b"}])
     variable = searcher.variable("records")
-    searcher.output(variable.value, "value")
+    searcher._output(variable.value, "value")
 
-    results = list(searcher)
+    results = list(searcher._matches())
 
     assert all(isinstance(result, SearchResult) for result in results)
     assert [result.values for result in results] == [("a",), ("b",)]

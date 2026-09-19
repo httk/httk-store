@@ -7,7 +7,6 @@ import pytest
 from httk.core.optimade import parse_optimade_filter
 from httk.core.report import collect_reports
 
-from httk.store.query import SearchResult
 from httk.store.query.optimade_filters import (
     FilterTranslationError,
     filter_searcher,
@@ -17,6 +16,7 @@ from httk.store.query.optimade_filters import (
     simple_property_handlers,
     translate_filter_ast,
 )
+from httk.store.query.protocols import ResultRow, SearchResult
 
 # ---------------------------------------------------------------------- a minimal fake store
 
@@ -122,7 +122,7 @@ class FakeSearcher:
         self.variables.append(variable)
         return variable
 
-    def output(self, variable: Any, name: str) -> None:
+    def _output(self, variable: Any, name: str) -> None:
         self.outputs.append((variable, name))
 
     def add(self, expression: FakeExpression) -> None:
@@ -140,9 +140,14 @@ class FakeSearcher:
     def add_sort(self, field: FakeField, descending: bool) -> None:
         pass
 
-    def __iter__(self) -> Iterator[SearchResult]:
+    def _matches(self) -> Iterator[SearchResult]:
         names = tuple(name for _output, name in self.outputs)
         return iter([SearchResult((row,), names) for row in self.rows])
+
+    def results(self, **outputs: Any) -> list[ResultRow]:
+        for name, variable in outputs.items():
+            self._output(variable, name)
+        return [ResultRow(result.values, result.names) for result in self._matches()]
 
 
 class FakeStore:
@@ -679,7 +684,7 @@ def test_filter_searcher_end_to_end_with_filter_string():
     # One add() carrying the whole filter: the expression itself tells the
     # backend whether it also needs post-filter (HAS ONLY) evaluation.
     assert [expression.tree for expression in searcher.expressions] == [expected]
-    assert [item[0][0] for item in searcher] == rows
+    assert [item[0] for item in searcher.results()] == rows
 
 
 def test_filter_searcher_accepts_parsed_ast_and_default_property_keys():

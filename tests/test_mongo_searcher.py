@@ -47,12 +47,11 @@ def _query(mongo_test_database):
         store.save(record)
     searcher = MongoSearcher(store)
     variable = searcher.variable(MongoQueryRecord)
-    searcher.output(variable, "record")
     return store, searcher, variable
 
 
-def _labels(searcher):
-    return [result.values[0].label for result in searcher]
+def _labels(searcher, variable):
+    return [result.values[0].label for result in searcher.results(record=variable)]
 
 
 def _paging_results(store):
@@ -65,29 +64,29 @@ def _paging_results(store):
 def test_scalar_comparisons_are_three_valued(mongo_test_database):
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add(variable.rank > 1)
-    assert _labels(searcher) == ["5012 Mg", "axb"]
+    assert _labels(searcher, variable) == ["5012 Mg", "axb"]
 
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add(variable.note == variable.note)
-    assert _labels(searcher) == ["5012 Mg", "axb"]
+    assert _labels(searcher, variable) == ["5012 Mg", "axb"]
 
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add(~(variable.note == "present"))
-    assert _labels(searcher) == ["axb"]
+    assert _labels(searcher, variable) == ["axb"]
 
 
 def test_scalar_is_in_none_contract_and_negation(mongo_test_database):
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add(variable.note.is_in(None, "present"))
-    assert set(_labels(searcher)) == {"50% Mg", "5012 Mg", "a_b"}
+    assert set(_labels(searcher, variable)) == {"50% Mg", "5012 Mg", "a_b"}
 
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add(~variable.note.is_in(None, "present"))
-    assert _labels(searcher) == ["axb"]
+    assert _labels(searcher, variable) == ["axb"]
 
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add(~variable.note.is_in("present"))
-    assert set(_labels(searcher)) == {"axb"}
+    assert set(_labels(searcher, variable)) == {"axb"}
 
 
 @pytest.mark.parametrize(
@@ -98,21 +97,21 @@ def test_string_matching_is_literal_and_case_sensitive(mongo_test_database, mode
     _store, searcher, variable = _query(mongo_test_database)
     expression = getattr(variable.label, mode)(text)
     searcher.add(expression)
-    assert set(_labels(searcher)) == expected
+    assert set(_labels(searcher, variable)) == expected
 
 
 def test_sort_null_rank_limit_offset_count_and_scalar_results(mongo_test_database):
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add_sort(variable.rank, nulls="first")
-    assert _labels(searcher) == ["50% Mg", "a_b", "5012 Mg", "axb"]
+    assert _labels(searcher, variable) == ["50% Mg", "a_b", "5012 Mg", "axb"]
 
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add_sort(variable.rank, descending=True, nulls="first")
-    assert _labels(searcher) == ["50% Mg", "axb", "5012 Mg", "a_b"]
+    assert _labels(searcher, variable) == ["50% Mg", "axb", "5012 Mg", "a_b"]
     assert searcher.count() == 4
     searcher.set_limit(2)
     searcher.add_offset(1)
-    assert _labels(searcher) == ["axb", "5012 Mg"]
+    assert _labels(searcher, variable) == ["axb", "5012 Mg"]
     assert searcher.count() == 4
 
     _store, searcher, variable = _query(mongo_test_database)
@@ -136,9 +135,8 @@ def test_result_set_edges_and_disconnected_variables(mongo_test_database):
         result.one()
 
     other = searcher.variable(MongoQueryRecord)
-    searcher.output(other, "other")
     with pytest.raises(UnsupportedQueryError, match="disconnected cartesian"):
-        list(searcher)
+        list(searcher.results(record=variable, other=other))
 
 
 @dataclass(frozen=True)
@@ -174,18 +172,15 @@ def test_deep_reference_chain_missing_links_and_reference_join(mongo_test_databa
 
     searcher = store.searcher()
     root = searcher.variable(MongoRoot)
-    searcher.output(root, "root")
     searcher.add(root.branch.leaf.code == "present")
-    assert [row.values[0].name for row in searcher] == ["present"]
-    assert searcher.count() == len(list(searcher))
+    assert [row.values[0].name for row in searcher.results(root=root)] == ["present"]
+    assert searcher.count() == len(list(searcher.results(root=root)))
 
     searcher = store.searcher()
     root = searcher.variable(MongoRoot)
     joined_branch = searcher.variable(MongoBranch)
     searcher.add(root.branch == joined_branch)
-    searcher.output(root, "root")
-    searcher.output(joined_branch, "branch")
-    rows = list(searcher)
+    rows = list(searcher.results(root=root, branch=joined_branch))
     assert [(row.values[0].name, row.values[1]) for row in rows] == [
         ("present", branch),
         ("missing-deep", missing_leaf),
@@ -214,9 +209,8 @@ def test_negated_composed_child_sets_with_null_elements(mongo_test_database):
 
     searcher = store.searcher()
     root = searcher.variable(MongoRoot)
-    searcher.output(root, "root")
     searcher.add(~(root.tags.has_any("allowed") & root.tags.has_only("allowed")))
-    rows = list(searcher)
+    rows = list(searcher.results(root=root))
     assert {row.values[0].name for row in rows} == {"null-element", "empty"}
     assert searcher.count() == len(rows)
 
@@ -246,9 +240,8 @@ def _child_comparison_store(mongo_test_database):
 def _child_comparison_names(store, build):
     searcher = store.searcher()
     variable = searcher.variable(MongoChildComparisonRecord)
-    searcher.output(variable, "record")
     searcher.add(build(variable))
-    rows = list(searcher)
+    rows = list(searcher.results(record=variable))
     assert searcher.count() == len(rows)
     return {row.values[0].name for row in rows}
 
@@ -302,9 +295,8 @@ def test_join_predicates_below_not_or_or_are_rejected(mongo_test_database):
         root = searcher.variable(MongoRoot)
         other = searcher.variable(MongoBranch)
         searcher.add(build(root, other))
-        searcher.output(root, "root")
         with pytest.raises(UnsupportedQueryError, match="disconnected cartesian"):
-            list(searcher)
+            list(searcher.results(root=root))
 
 
 def test_paging_rejects_sql_tokens_in_both_directions(mongo_test_database):
@@ -383,7 +375,7 @@ def test_verifier_is_authoritative_for_all_result_consumers(mongo_test_database)
     store, searcher, variable = _query(mongo_test_database)
     verifier = lambda document: str(document["f"].get("label", "")).endswith("Mg")
     searcher.set_row_verifier(verifier, "label-suffix/Mg/v1")
-    assert _labels(searcher) == ["50% Mg", "5012 Mg"]
+    assert _labels(searcher, variable) == ["50% Mg", "5012 Mg"]
     assert searcher.count() == 2
 
     result = searcher.results(label=variable.label, rank=variable.rank)

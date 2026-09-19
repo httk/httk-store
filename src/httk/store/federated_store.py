@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import cast
 
 from .query import (
+    BackendSearcher,
     CountUnavailableError,
     MultipleResultsError,
     NoResultError,
@@ -19,12 +20,12 @@ from .query import (
     Searcher,
     SearchExpression,
     SearchField,
-    SearchResult,
     SearchVariable,
     Slicer,
     Store,
     UnsupportedQueryError,
 )
+from .query.protocols import SearchResult
 
 __all__ = [
     "FederatedExpression",
@@ -171,13 +172,15 @@ def _source_error(source: str, operation: str, exc: Exception) -> FederatedSourc
     return FederatedSourceError(source, operation)
 
 
-def _child_searcher(store: Store, as_of: object, only_latest: bool = False) -> Searcher:
+def _child_searcher(store: Store, as_of: object, only_latest: bool = False) -> BackendSearcher:
     kwargs: dict[str, object] = {}
     if as_of is not None:
         kwargs["as_of"] = as_of
     if only_latest:
         kwargs["only_latest"] = only_latest
-    return store.searcher(**kwargs)
+    # Every federated source is a real backend store, whose searcher carries the
+    # backend-internal raw query surface the executor and validators build on.
+    return cast(BackendSearcher, store.searcher(**kwargs))
 
 
 _SEARCH_FIELD_SURFACE = (
@@ -291,12 +294,12 @@ def _execute_plan(
         try:
             for output in child_outputs:
                 if isinstance(output, _RecordOutput):
-                    child_searcher.output(child_variable, output.name)
+                    child_searcher._output(child_variable, output.name)
                 else:
                     assert isinstance(output, _FieldOutput)
-                    child_searcher.output(_child_field(child_variable, output.path), output.name)
+                    child_searcher._output(_child_field(child_variable, output.path), output.name)
             if hidden_output:
-                child_searcher.output(child_variable, "__httk_federated_hidden_record__")
+                child_searcher._output(child_variable, "__httk_federated_hidden_record__")
         except Exception as exc:
             raise _source_error(source, "output declaration", exc) from exc
         if child_limit is not None:
@@ -305,7 +308,7 @@ def _execute_plan(
             except Exception as exc:
                 raise _source_error(source, "limit pushdown", exc) from exc
         try:
-            child_results = iter(child_searcher)
+            child_results = child_searcher._matches()
         except Exception as exc:
             raise _source_error(source, "iteration", exc) from exc
         while True:
@@ -890,7 +893,7 @@ class FederatedSearcher:
         # now a different unpaged query and must obtain a fresh exact total.
         self._count_cache = _FederatedCountCache()
 
-    def _output(self, value: object, name: str, *, retain: bool) -> _FederatedOutput:
+    def _build_output(self, value: object, name: str, *, retain: bool) -> _FederatedOutput:
         variable = self._require_variable()
         if not isinstance(name, str) or not name:
             raise ValueError("output name must be a nonempty string")
@@ -921,12 +924,12 @@ class FederatedSearcher:
                     if field_path is None
                     else _child_field(cast(SearchVariable, child_variable), field_path)
                 )
-                child_searcher.output(child_value, name)
+                child_searcher._output(child_value, name)
             except Exception as exc:
                 raise _source_error(source, "output", exc) from exc
         return output
 
-    def output(self, value: object, name: str) -> None:
+    def _output(self, value: object, name: str) -> None:
         """Declare a record, scalar field, or origin output for a future plan.
 
         :param value: The root variable, field, or ``origin`` sentinel to project.
@@ -937,7 +940,7 @@ class FederatedSearcher:
         :raises FederatedSourceError: If a source rejects the output.
         """
 
-        self._outputs.append(self._output(value, name, retain=True))
+        self._outputs.append(self._build_output(value, name, retain=True))
 
     def add_sort(self, field: object, descending: bool = False) -> None:
         """Reject global sorting until a portable sort-semantics contract exists.
@@ -955,12 +958,12 @@ class FederatedSearcher:
 
         variable = self._require_variable()
         planned_outputs = (
-            tuple(self._output(value, name, retain=False) for name, value in outputs.items())
+            tuple(self._build_output(value, name, retain=False) for name, value in outputs.items())
             if outputs
             else tuple(self._outputs)
         )
         if require_outputs and not planned_outputs:
-            raise ValueError("this federated result plan has no outputs; call output() or pass results() projections")
+            raise ValueError("this federated result plan has no outputs; pass results(name=variable) projections")
         sources = tuple(_FederatedSourcePlan(source, target) for source, target in variable._targets.items())
         return _FederatedPlan(
             sources,
@@ -1010,7 +1013,7 @@ class FederatedSearcher:
             raise ValueError("offset must be nonnegative")
         self.offset += offset
 
-    def __iter__(self) -> Iterator[SearchResult]:
+    def _matches(self) -> Iterator[SearchResult]:
         """Execute the retained-output plan directly as ``SearchResult`` values."""
 
         return _execute_plan(self._store, self._plan())

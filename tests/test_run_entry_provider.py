@@ -233,12 +233,11 @@ def test_sql_store_round_trips_provenance_records_and_stored_number() -> None:
         searcher = store.searcher()
         variable = searcher.variable(DataRecord)
         searcher.add(variable.value_number == 3.5)
-        searcher.output(variable, "record")
-        assert [row[0][0].value for row in searcher] == [3.5]
+        assert [row[0].value for row in searcher.results(record=variable)] == [3.5]
 
 
 def _plan_records(searchers) -> list:
-    return [result[0][0] for searcher in searchers for result in searcher]
+    return [result[0] for searcher in searchers for result in searcher.results()]
 
 
 def test_run_stored_property_plan_serves_prefixed_properties() -> None:

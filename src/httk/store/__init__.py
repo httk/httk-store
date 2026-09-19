@@ -80,7 +80,6 @@ from .query import (
     Searcher,
     SearchExpression,
     SearchField,
-    SearchResult,
     SearchVariable,
     Store,
     UnsupportedQueryError,
@@ -137,7 +136,6 @@ __all__ = [
     "RunEntryProvider",
     "SearchExpression",
     "SearchField",
-    "SearchResult",
     "SearchVariable",
     "Searcher",
     "SqliteStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)

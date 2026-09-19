@@ -466,9 +466,8 @@ def test_reference_comparison_uses_declared_record_target():
         searcher = store.searcher()
         reference = searcher.variable(SummaryReference)
         searcher.add(reference.target == source)
-        searcher.output(reference, "reference")
 
-        assert [row[0][0].value for row in searcher] == ["match"]
+        assert [row.reference.value for row in searcher.results(reference=reference)] == ["match"]
 
 
 def test_alternate_record_sids_are_cached_per_record_type():
@@ -524,8 +523,7 @@ def test_lazy_row_alternate_sid_uses_requested_record_target():
         store.save(LazySourceRecord(8), as_record=LazyAlternateRecord)
         searcher = store.searcher()
         source = searcher.variable(LazySourceRecord)
-        searcher.output(source, "source")
-        row = next(iter(searcher))[0][0]
+        row = next(iter(searcher.results(source=source))).source
         alternate_sid = store.save(row, as_record=LazyAlternateRecord)
 
         assert source_sid != alternate_sid

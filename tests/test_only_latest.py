@@ -60,8 +60,7 @@ def _skip_non_sql(store: object) -> None:
 
 
 def _values(searcher, variable) -> list[int]:
-    searcher.output(variable, "record")
-    return sorted(row[0][0].value for row in searcher)
+    return sorted(row[0].value for row in searcher.results(record=variable))
 
 
 def test_only_latest_returns_only_the_latest_of_a_lineage(store_factory) -> None:
@@ -158,17 +157,15 @@ def test_only_latest_does_not_filter_reference_variables(store_factory) -> None:
 
     searcher = store.searcher(only_latest=True)
     holder = searcher.variable(LatestHolder)
-    searcher.output(holder.note.text, "note_text")
     # The holder is the latest of its own lineage, and its reference join is
     # UNFILTERED, so it resolves the replaced (old) note.
-    assert [row[0][0] for row in searcher] == ["first"]
+    assert [row[0] for row in searcher.results(note_text=holder.note.text)] == ["first"]
 
     # A predicate over the reference likewise still matches the replaced row.
     filtered = store.searcher(only_latest=True)
     holder = filtered.variable(LatestHolder)
     filtered.add(holder.note.text == "first")
-    filtered.output(holder, "record")
-    assert [row[0][0].label for row in filtered] == ["h"]
+    assert [row[0].label for row in filtered.results(record=holder)] == ["h"]
 
 
 def test_variable_logical_id_in_filter_and_output(store_factory) -> None:
@@ -182,9 +179,7 @@ def test_variable_logical_id_in_filter_and_output(store_factory) -> None:
     searcher = store.searcher()
     variable = searcher.variable(LatestWidget)
     searcher.add(variable.logical_id == lineage)
-    searcher.output(variable.value, "value")
-    searcher.output(variable.logical_id, "lid")
-    rows = [(row[0][0], row[0][1]) for row in searcher]
+    rows = [(row.value, row.lid) for row in searcher.results(value=variable.value, lid=variable.logical_id)]
     assert sorted(value for value, _lid in rows) == [1, 2]
     assert {lid for _value, lid in rows} == {lineage}
 

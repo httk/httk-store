@@ -20,12 +20,15 @@ marked *httk₂* are the ones to copy.
 ## What stays the same
 
 `store.searcher()` still opens a query; `search.variable(Cls)` still binds a
-class to a variable; `search.add(...)` still adds a condition; `search.output(
-variable, name)` still declares an output; iterating still runs the query.
-Attribute access on a variable still builds the joins for you, two variables of
-the same class still self-join, comparing a reference field against another
-variable (`result.structure == structure`) is still how you write a join
-condition, and `set_limit` / `add_offset` / `count()` are unchanged.
+class to a variable; `search.add(...)` still adds a condition. *httk₂* declares
+outputs and consumes them in one step: `search.results(name=variable)`
+replaces v1's `search.output(variable, name)` followed by `for match, header
+in search` — that two-step declare-then-iterate form has no v2 equivalent; it
+was retired. Attribute access on a variable still builds the joins for you,
+two variables of the same class still self-join, comparing a reference field
+against another variable (`result.structure == structure`) is still how you
+write a join condition, and `set_limit` / `add_offset` / `count()` are
+unchanged.
 
 ## First: `add` versus `add_all`
 
@@ -72,7 +75,7 @@ Against records `NaCl`, `CaTiO3` and `NaTiO2`, `has_any` matches `NaCl` and
 | `col.has_inv_any(...)`, `col.has_inv_only(...)` | `~col.has_any(...)`, `~col.has_only(...)` |
 | `col.like('%x%')` with raw SQL wildcards | `col.contains("x")`, `col.startswith(...)`, `col.endswith(...)`, matching **literal** text (`%` and `_` match themselves) |
 | `add_sort(expr, direction='ASC')` | `add_sort(field, descending=False)` |
-| `for match, header in search:` then `match[0]` | iteration yields a `SearchResult`; use `result.values` / `result.names` — `result[0][0]` still works |
+| `search.output(variable, name)` then `for match, header in search:`, `match[0]` | retired; declare and consume outputs in one step with `search.results(name=variable)`, then `row.name` |
 | `obj.db.sid` | `store.sid_of(obj)` |
 | `hexhash` deduplication | content-id deduplication; look a record up with `store.fetch_by_content_id(cls, key)` |
 | `struct.get_tags()`, `struct.get_refs()` (lazy codependent fetch) | explicit `store.referring(TagCls, field="structure", to=struct)`, the reverse lookup; and `fetch()` is itself lazy by default now — fields decode on access, `eager=True` materializes |
@@ -154,9 +157,8 @@ with store.transaction():
 search = store.searcher()
 s = search.variable(Structure)
 search.add(s.symbols.has_any("Na"))
-search.output(s, "structure")
-for result in search:
-    structure = result.values[0]
+for row in search.results(structure=s):
+    structure = row.structure
     tags = store.referring(StructureTag, field="structure", to=structure)
     print("Found structure", structure.formula, [f"{tag.tag}={tag.value}" for tag in tags])
 ```
@@ -164,8 +166,8 @@ for result in search:
 Point by point: `add(... .is_in('Na'))` became `add(... .has_any("Na"))`;
 `delay_commit`/`commit` became `transaction()`; `add_tag`/`get_tags` became a
 stored join class and `store.referring`; and `for match, header in list(search)`
-became a plain loop over `SearchResult` objects, of which `result.values[0]` is
-the first declared output. Note that `symbols` is a `tuple`, not a `list`: an
+then `match[0]` became `for row in search.results(structure=s)`, reading
+`row.structure` directly. Note that `symbols` is a `tuple`, not a `list`: an
 instance with a list field is unhashable, and the store's object→sid cache
 (which `store.referring` and `store.sid_of` consult) is equality-keyed.
 
@@ -256,14 +258,12 @@ structure = search.variable(Structure)
 search.add(result.structure == structure)                        # the join condition, as in v1
 search.add(structure.symbols.has_only("O", "Ca", "Ti"))          # was add_all(... .is_in(...))
 search.add_sort(result.total_energy, descending=False)           # was direction='ASC'
-search.output(result, "total_energy_result")
 
 structures = []
 energies = []
-for match in search:
-    total_energy_result = match.values[0]
-    structures.append(total_energy_result.structure)
-    energies.append(total_energy_result.total_energy)
+for row in search.results(total_energy_result=result):
+    structures.append(row.total_energy_result.structure)
+    energies.append(row.total_energy_result.total_energy)
 ```
 
 This prints `['CaTiO3', 'TiO2']` and `[-39.2, -26.5]`: `NaCl` is excluded by the

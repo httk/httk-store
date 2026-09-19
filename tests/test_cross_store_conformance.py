@@ -318,11 +318,20 @@ def test_same_portable_structure_query_across_memory_sql_and_real_asgi_remote(di
             searcher = target.store.searcher()  # type: ignore[union-attr]
             variable = searcher.variable(target.target)
             searcher.add(variable.id == "nacl")
-            searcher.output(variable, "record")
-            searcher.output(variable.id, "identifier")
-            (result,) = list(searcher)
+            searcher._output(variable, "record")
+            searcher._output(variable.id, "identifier")
+            (result,) = list(searcher._matches())
             assert result.names == ("record", "identifier"), target.name
             assert result.values[1] == "nacl", target.name
+
+        # The same multi-output shape, through the public results() form.
+        for target in targets:
+            searcher = target.store.searcher()  # type: ignore[union-attr]
+            variable = searcher.variable(target.target)
+            searcher.add(variable.id == "nacl")
+            rows = list(searcher.results(record=variable, identifier=variable.id))
+            assert rows[0].names == ("record", "identifier"), target.name
+            assert [row.identifier for row in rows] == ["nacl"], target.name
 
     assert client.requests
     assert all(urlsplit(url).netloc == "testserver" for url in client.requests)

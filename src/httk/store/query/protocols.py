@@ -14,6 +14,7 @@ from typing import Any, Final, Literal, NamedTuple, Protocol, Self
 
 __all__ = [
     "ID_FIELD",
+    "BackendSearcher",
     "ContinuationToken",
     "CountUnavailableError",
     "MultipleResultsError",
@@ -27,7 +28,6 @@ __all__ = [
     "ResultSetLike",
     "SearchExpression",
     "SearchField",
-    "SearchResult",
     "SearchVariable",
     "Searcher",
     "Store",
@@ -62,8 +62,8 @@ class PaginationCursorError(ValueError):
 class PageOrder:
     """Order a continuation page by one named scalar result projection.
 
-    ``name`` identifies the name supplied to ``results()`` (or
-    :meth:`Searcher.output`), never a backend column object.  The result-set
+    ``name`` identifies the name supplied to ``results()``, never a backend
+    column object.  The result-set
     implementation validates that it is a root scalar projection before it
     generates SQL.
 
@@ -266,6 +266,10 @@ class ResultRowLike(Protocol):
         """Return a row value by index or output name."""
         ...
 
+    def __getattr__(self, name: str) -> Any:
+        """Return the output declared under ``name``."""
+        ...
+
 
 class ResultSetLike(Protocol):
     """Require the common operations of a materialized result set."""
@@ -387,7 +391,8 @@ class SearchVariable(Protocol):
 
     ``links.<name>`` is a reserved relationship namespace: usable as a
     predicate root (``v.links.p == other``, field chaining, set operations)
-    and, on its own, as a set-valued :meth:`Searcher.output`.
+    and, on its own, as a set-valued output declared through
+    :meth:`Searcher.results`.
     """
 
     def always_true(self) -> SearchExpression:
@@ -406,7 +411,7 @@ class SearchVariable(Protocol):
 class SearchResult(NamedTuple):
     """Represent one match with declared output values and names.
 
-    ``values`` holds one entry per :meth:`Searcher.output` call in declaration
+    ``values`` holds one entry per ``_output`` declaration in declaration
     order; it is a tuple, so ``values, names = result`` and ``result[0][0]``
     both work. A relationship-namespace output yields a tuple of related
     records for that entry, rather than a single value.
@@ -417,10 +422,8 @@ class SearchResult(NamedTuple):
 
 
 class Searcher(Protocol):
-    """Build one query and iterate its results.
+    """Build one query; consume it through :meth:`Searcher.results`.
 
-    Iteration yields one :class:`SearchResult` per match, so ``item[0][0]`` is
-    the first declared output of the match (typically the matched row object).
     The expressions received by ``add`` are always ones produced by this same
     backend's search variables, so implementations may type them as their own
     expression class; a backend that needs a second (post-filter) evaluation
@@ -431,15 +434,6 @@ class Searcher(Protocol):
 
     def variable(self, target: Any) -> Any:
         """Bind a query variable to ``target``."""
-        ...
-
-    def output(self, variable: Any, name: str) -> None:
-        """Declare ``variable`` as a named result output.
-
-        A relationship-namespace value (``v.links.<name>``, not chained
-        further) is a set-valued output: it yields a tuple of related records
-        per row, resolved after the query, rather than a single value.
-        """
         ...
 
     def add(self, expression: Any) -> None:
@@ -462,12 +456,34 @@ class Searcher(Protocol):
         """Add a field sort to the query."""
         ...
 
-    def __iter__(self) -> Iterator[SearchResult]:
-        """Iterate over the query's matches."""
-        ...
-
     def results(self, **outputs: Any) -> ResultSetLike:
         """Return a result set for the requested named outputs."""
+        ...
+
+
+class BackendSearcher(Searcher, Protocol):
+    """A searcher plus its private, backend-internal raw query surface.
+
+    Result sets, the federated store, stored-property streaming and entry
+    providers build a query and consume its matches through the raw path below;
+    user code consumes a query through :meth:`Searcher.results` instead.
+    """
+
+    def _output(self, variable: Any, name: str) -> None:
+        """Declare ``variable`` as a named result output.
+
+        A relationship-namespace value (``v.links.<name>``, not chained
+        further) is a set-valued output: it yields a tuple of related records
+        per row, resolved after the query, rather than a single value.
+        """
+        ...
+
+    def _matches(self) -> Iterator[SearchResult]:
+        """Run the query and yield one ``SearchResult`` per match, in declared output order.
+
+        Backend-internal: result sets, the federated store and entry providers
+        consume this; user code uses :meth:`Searcher.results`.
+        """
         ...
 
 

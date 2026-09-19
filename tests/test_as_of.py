@@ -23,8 +23,7 @@ class AsOfPair:
 
 
 def _values(searcher, variable):
-    searcher.output(variable, "record")
-    return [row[0][0].value for row in searcher]
+    return [row.record.value for row in searcher.results(record=variable)]
 
 
 def test_searcher_as_of_forms_and_boundary(store_factory) -> None:
@@ -143,7 +142,7 @@ def test_stored_property_cutoff_is_per_query_not_plan_state() -> None:
 
         plan = store.stored_property_plan(FederatedCalculation)
         historic = plan.filter_searchers('immutable_id = "httk.test-1-1~1"', as_of=2_000_000)
-        assert [row[0][0].label for row in historic[0]] == ["old"]
+        assert [row.record.label for row in historic[0].results()] == ["old"]
         assert plan.records().__next__().get("immutable_id") == "httk.test-1-1~1"
         current = plan.candidate_searchers(as_of=None)[0]
         assert current.searcher.count() == 2

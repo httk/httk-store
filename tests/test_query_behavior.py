@@ -55,33 +55,31 @@ def clickhouse_query_store():
 def test_clickhouse_bulk_query_behavior(clickhouse_query_store):
     searcher, variable = rec_searcher(clickhouse_query_store)
     searcher.add(variable.formula.contains("a"))
-    assert formulas(searcher) == {"CaTiO3", "NaCl", "CaO", "SrCaTiO"}
+    assert formulas(searcher, variable) == {"CaTiO3", "NaCl", "CaO", "SrCaTiO"}
 
     labels_searcher, label = label_searcher(clickhouse_query_store)
     labels_searcher.add(label.text.contains("50%"))
-    assert texts(labels_searcher) == {"50% Mg", "Mg 50%"}
+    assert texts(labels_searcher, label) == {"50% Mg", "Mg 50%"}
 
 
 def rec_searcher(store):
     searcher = store.searcher()
     variable = searcher.variable(Rec)
-    searcher.output(variable, "rec")
     return searcher, variable
 
 
-def formulas(searcher) -> set[str]:
-    return {item[0][0].formula for item in searcher}
+def formulas(searcher, variable) -> set[str]:
+    return {row[0].formula for row in searcher.results(rec=variable)}
 
 
 def label_searcher(store):
     searcher = store.searcher()
     variable = searcher.variable(type(LABELS[0]))
-    searcher.output(variable, "label")
     return searcher, variable
 
 
-def texts(searcher) -> set[str]:
-    return {item[0][0].text for item in searcher}
+def texts(searcher, variable) -> set[str]:
+    return {row[0].text for row in searcher.results(label=variable)}
 
 
 def stored_property_plan(store, family):
@@ -120,21 +118,21 @@ def stored_property_plan(store, family):
 def test_operator_results(query_store, build, expected):
     searcher, variable = rec_searcher(query_store)
     searcher.add(build(variable))
-    assert formulas(searcher) == expected
+    assert formulas(searcher, variable) == expected
 
 
 def test_boolean_combinators_and_counts(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add((v.spacegroup == 225) & v.formula.startswith("M"))
-    assert formulas(searcher) == {"MgO"}
+    assert formulas(searcher, v) == {"MgO"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add((v.formula == "X") | (v.formula == "NaCl"))
-    assert formulas(searcher) == {"X", "NaCl"}
+    assert formulas(searcher, v) == {"X", "NaCl"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(~(v.spacegroup == 225))
-    assert formulas(searcher) == {"CaTiO3", "SrCaTiO", "X"}
+    assert formulas(searcher, v) == {"CaTiO3", "SrCaTiO", "X"}
     assert searcher.count() == 3
 
 
@@ -152,30 +150,30 @@ def test_boolean_combinators_and_counts(query_store):
 def test_literal_string_matching_is_literal(query_store, build, expected):
     searcher, variable = label_searcher(query_store)
     searcher.add(build(variable))
-    assert texts(searcher) == expected
+    assert texts(searcher, variable) == expected
     assert searcher.count() == len(expected)
 
 
 def test_reference_chain_filters(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(v.ref.doi == "10.1/a")
-    assert formulas(searcher) == {"CaTiO3", "NaCl"}
+    assert formulas(searcher, v) == {"CaTiO3", "NaCl"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.ref.title == "Beta")
-    assert formulas(searcher) == {"MgO", "SrCaTiO"}
+    assert formulas(searcher, v) == {"MgO", "SrCaTiO"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.ref == None)
-    assert formulas(searcher) == {"CaO", "X"}
+    assert formulas(searcher, v) == {"CaO", "X"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.ref != None)
-    assert formulas(searcher) == ALL_FORMULAS - {"CaO", "X"}
+    assert formulas(searcher, v) == ALL_FORMULAS - {"CaO", "X"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.ref == REF_A)
-    assert formulas(searcher) == {"CaTiO3", "NaCl"}
+    assert formulas(searcher, v) == {"CaTiO3", "NaCl"}
 
     with pytest.raises(ValueError, match="has not been stored"):
         rec_searcher(query_store)[1].ref == Reference("10.9/z", "Zeta")  # noqa: B015
@@ -187,9 +185,10 @@ def test_reference_join_and_self_join_results(query_store):
     record = searcher.variable(Rec)
     searcher.add(tag.rec == record)
     searcher.add(tag.tag == "quality")
-    searcher.output(record, "rec")
-    searcher.output(tag.value, "value")
-    assert {(item[0][0].formula, item[0][1]) for item in searcher} == {("CaTiO3", "good"), ("MgO", "bad")}
+    assert {(row.rec.formula, row.value) for row in searcher.results(rec=record, value=tag.value)} == {
+        ("CaTiO3", "good"),
+        ("MgO", "bad"),
+    }
 
     searcher = query_store.searcher()
     first = searcher.variable(Rec)
@@ -197,8 +196,7 @@ def test_reference_join_and_self_join_results(query_store):
     searcher.add(first.formula == "NaCl")
     searcher.add(first.spacegroup == second.spacegroup)
     searcher.add(second.formula != "NaCl")
-    searcher.output(second, "rec")
-    assert formulas(searcher) == {"MgO", "CaO"}
+    assert formulas(searcher, second) == {"MgO", "CaO"}
 
 
 @pytest.mark.parametrize(
@@ -230,7 +228,6 @@ def test_optional_child_set_operation_truth_table(store_factory, operation, fiel
     store.save(OptionalSetRecord("target", field_value))
     searcher = store.searcher()
     variable = searcher.variable(OptionalSetRecord)
-    searcher.output(variable, "record")
     values = ("allowed",)
     if operation == "has":
         expression = variable.children.has(values[0])
@@ -241,7 +238,7 @@ def test_optional_child_set_operation_truth_table(store_factory, operation, fiel
     else:
         expression = variable.children.is_in(*values)
     searcher.add(expression)
-    assert bool(list(searcher)) is expected
+    assert bool(list(searcher.results(record=variable))) is expected
 
 
 @pytest.mark.parametrize("operation", ["has", "has_any", "has_only", "is_in"])
@@ -268,49 +265,49 @@ def test_child_set_operations_reject_none_at_build_time(store_factory, operation
 def test_scalar_is_in_none_contract_is_unchanged(query_store):
     searcher, v = label_searcher(query_store)
     searcher.add(v.note.is_in(None, "present"))
-    assert texts(searcher) == ALL_LABELS
+    assert texts(searcher, v) == ALL_LABELS
 
     searcher, v = label_searcher(query_store)
     searcher.add(~v.note.is_in(None, "present"))
-    assert texts(searcher) == set()
+    assert texts(searcher, v) == set()
 
     searcher, v = label_searcher(query_store)
     searcher.add(v.note.is_in("present"))
-    assert texts(searcher) == set()
+    assert texts(searcher, v) == set()
 
 
 def test_set_operations_and_negation_have_canonical_results(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(v.symbols.has_any("O"))
-    assert formulas(searcher) == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
+    assert formulas(searcher, v) == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.symbols.has_only("O", "Ca", "Ti"))
-    assert formulas(searcher) == {"CaTiO3", "CaO", "X"}
+    assert formulas(searcher, v) == {"CaTiO3", "CaO", "X"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.symbols.is_in("O", "Ca", "Ti"))
-    assert formulas(searcher) == {"CaTiO3", "CaO", "X"}
+    assert formulas(searcher, v) == {"CaTiO3", "CaO", "X"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(~v.symbols.has_any("Ca", "Ti"))
-    assert formulas(searcher) == {"NaCl", "MgO", "X"}
+    assert formulas(searcher, v) == {"NaCl", "MgO", "X"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(~v.symbols.has_only("O", "Ca", "Ti"))
-    assert formulas(searcher) == {"NaCl", "MgO", "SrCaTiO"}
+    assert formulas(searcher, v) == {"NaCl", "MgO", "SrCaTiO"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.symbols.has_any("Ca") & v.symbols.has_any("Ti"))
-    assert formulas(searcher) == {"CaTiO3", "SrCaTiO"}
+    assert formulas(searcher, v) == {"CaTiO3", "SrCaTiO"}
 
 
 def test_multi_member_has_any_does_not_duplicate_parents(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(v.symbols.has_any("O", "Ca"))
-    results = list(searcher)
+    results = list(searcher.results(rec=v))
     assert len(results) == 4
-    assert {item[0][0].formula for item in results} == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
+    assert {row[0].formula for row in results} == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
 
 
 def test_set_operation_count_matches_iteration(query_store):
@@ -322,67 +319,67 @@ def test_set_operation_count_matches_iteration(query_store):
     ):
         searcher, variable = rec_searcher(query_store)
         searcher.add(build(variable))
-        assert searcher.count() == len(list(searcher))
+        assert searcher.count() == len(list(searcher.results(rec=variable)))
 
 
 def test_not_has_all_is_negation_of_anded_has_any(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(~(v.symbols.has_any("Ca") & v.symbols.has_any("Ti")))
-    assert formulas(searcher) == ALL_FORMULAS - {"CaTiO3", "SrCaTiO"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == ALL_FORMULAS - {"CaTiO3", "SrCaTiO"}
+    assert searcher.count() == len(list(searcher.results(rec=v)))
 
 
 def test_double_not_round_trips(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(~~v.symbols.has_any("Ca", "Ti"))
-    assert formulas(searcher) == {"CaTiO3", "CaO", "SrCaTiO"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == {"CaTiO3", "CaO", "SrCaTiO"}
+    assert searcher.count() == len(list(searcher.results(rec=v)))
 
 
 def test_not_inside_and_with_a_scalar(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add((v.spacegroup == 225) & ~v.symbols.has_any("Ca"))
-    assert formulas(searcher) == {"NaCl", "MgO"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == {"NaCl", "MgO"}
+    assert searcher.count() == len(list(searcher.results(rec=v)))
 
 
 def test_not_over_a_mixed_conjunction(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(~((v.spacegroup == 225) & v.symbols.has_any("Ca")))
-    assert formulas(searcher) == ALL_FORMULAS - {"CaO"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == ALL_FORMULAS - {"CaO"}
+    assert searcher.count() == len(list(searcher.results(rec=v)))
 
 
 def test_not_over_a_mixed_disjunction(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(~((v.spacegroup == 225) | v.symbols.has_any("Ti")))
-    assert formulas(searcher) == {"X"}
-    assert searcher.count() == len(list(searcher))
+    assert formulas(searcher, v) == {"X"}
+    assert searcher.count() == len(list(searcher.results(rec=v)))
 
 
 def test_child_comparison_and_mixed_predicate_results(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add(~(v.symbols == "O"))
-    assert formulas(searcher) == {"NaCl", "X"}
+    assert formulas(searcher, v) == {"NaCl", "X"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.symbols == "O")
-    assert formulas(searcher) == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
+    assert formulas(searcher, v) == {"CaTiO3", "MgO", "CaO", "SrCaTiO"}
 
     searcher, v = rec_searcher(query_store)
     searcher.add(v.symbols.has_only("Ca", "O") | (v.symbols == "Na"))
-    assert formulas(searcher) == {"CaO", "X", "NaCl"}
+    assert formulas(searcher, v) == {"CaO", "X", "NaCl"}
 
 
 def test_query_order_offset_limit_and_count(query_store):
     searcher, v = rec_searcher(query_store)
     searcher.add_sort(v.formula)
-    assert [item[0][0].formula for item in searcher] == ["CaO", "CaTiO3", "MgO", "NaCl", "SrCaTiO", "X"]
+    assert [row[0].formula for row in searcher.results(rec=v)] == ["CaO", "CaTiO3", "MgO", "NaCl", "SrCaTiO", "X"]
     searcher.set_limit(2)
-    assert [item[0][0].formula for item in searcher] == ["CaO", "CaTiO3"]
+    assert [row[0].formula for row in searcher.results(rec=v)] == ["CaO", "CaTiO3"]
     searcher.set_limit(-1)
     searcher.add_offset(2)
-    assert [item[0][0].formula for item in searcher] == ["MgO", "NaCl", "SrCaTiO", "X"]
+    assert [row[0].formula for row in searcher.results(rec=v)] == ["MgO", "NaCl", "SrCaTiO", "X"]
     assert searcher.count() == 6
 
 
@@ -401,15 +398,13 @@ def test_stored_property_predicate_preserves_three_valued_results(store_factory)
         store.save(StoredValueRecord(value))
     searcher = store.searcher()
     variable = searcher.variable(StoredValueRecord)
-    searcher.output(variable, "record")
     searcher.add(variable.doubled == 2)
-    assert [item[0][0].value for item in searcher] == [1]
+    assert [row[0].value for row in searcher.results(record=variable)] == [1]
 
     searcher = store.searcher()
     variable = searcher.variable(StoredValueRecord)
-    searcher.output(variable, "record")
     searcher.add(~(variable.doubled == 2))
-    assert {item[0][0].value for item in searcher} == {2}
+    assert {row[0].value for row in searcher.results(record=variable)} == {2}
 
 
 def test_scaled_exact_equal_stored_property_result(store_factory):
@@ -422,4 +417,4 @@ def test_scaled_exact_equal_stored_property_result(store_factory):
     store.save(SECOND)
     plan = stored_property_plan(store, CalculationEntry)
     searchers = plan.filter_searchers('_httk_selector = "composition"')
-    assert [result[0][0].label for searcher in searchers for result in searcher] == ["first"]
+    assert [result[0].label for searcher in searchers for result in searcher.results()] == ["first"]

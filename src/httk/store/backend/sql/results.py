@@ -72,6 +72,7 @@ class _CursorProxy:
         object.__setattr__(self, "_sid", None)
         object.__setattr__(self, "_bound_generation", -1)
         object.__setattr__(self, "_access_generation", -1)
+        object.__setattr__(self, "_held_row", None)
 
     def _bind(self, sid: int) -> None:
         object.__setattr__(self, "_sid", int(sid))
@@ -94,7 +95,14 @@ class _CursorProxy:
 
     def _field(self, name: str) -> Any:
         sid = self._check()
-        return getattr(self._hydrator.row(sid), name)
+        row = self._hydrator.row(sid)
+        # ponytail: one-slot hold, O(one 500-row chunk) resident. Keep the current
+        # row's hydrated proxy (and thus its weakly-cached chunk) alive until the
+        # next access replaces it, so a `for row in results.cursor(): row.record...`
+        # walk queries each chunk once instead of per row. Does not change the
+        # "proxies expire on advance" contract (that guards the *previous* row).
+        object.__setattr__(self, "_held_row", row)
+        return getattr(row, name)
 
     def __getattribute__(self, name: str) -> Any:
         if not name.startswith("_"):
@@ -205,7 +213,7 @@ class SqlResultSet:
         self._plan._outputs = []
         if outputs:
             for name, value in outputs.items():
-                self._plan.output(value, name)
+                self._plan._output(value, name)
         else:
             self._plan._outputs = list(searcher._outputs)
         for output in self._plan._outputs:
@@ -224,6 +232,7 @@ class SqlResultSet:
         self._positions: tuple[int, ...] = ()
         self._rows: tuple[tuple[Any, ...], ...] | None = None
         self._hydrators: dict[int, RowHydrator] = {}
+        self._last_proxy: dict[int, Any] = {}
         self._object_index: array | None = None
         self._proxies: dict[int, _CursorProxy] = {}
         self._proxy_classes: dict[int, type] = {}
@@ -307,6 +316,7 @@ class SqlResultSet:
         self._positions = tuple(range(len(rows)))
         self._hydrators = {}
         object_indices = [index for index, output in enumerate(self._plan._outputs) if output.target is not None]
+        self._last_proxy = {}
         for index in object_indices:
             target = cast(type, self._plan._outputs[index].target)
             sids = [int(row[index]) for row in rows if row[index] is not None]
@@ -370,7 +380,17 @@ class SqlResultSet:
         if output.target is not None:
             if value is None:
                 return None
-            return state._hydrators[index].row(int(value))
+            proxy = state._hydrators[index].row(int(value))
+            # ponytail: one-slot pin, O(one 500-row chunk) resident. Holding only
+            # the most-recent proxy per object output keeps its weakly-cached chunk
+            # alive across sequential iteration (each chunk queried once) without
+            # retaining the whole hydrated table; random re-access of an earlier
+            # row re-queries its chunk (the old _matches() path never batched that
+            # either). Upgrade: a bounded LRU of chunks if random access matters.
+            # Kept lazy (not pinned at execution) so hydration, and staleness,
+            # still surface at access.
+            state._last_proxy[index] = proxy
+            return proxy
         if output.spec is None or output.spec.role == "scalar":
             return output.presentation_converter(value) if output.presentation_converter is not None else value
         offset = len(state._names) + state._extra_offsets[index]

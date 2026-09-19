@@ -77,8 +77,7 @@ def _count(database, cls: type) -> int:
 def _search_values(store: MongoStore, cls: type, **searcher_kwargs) -> list[int]:
     searcher = store.searcher(**searcher_kwargs)
     variable = searcher.variable(cls)
-    searcher.output(variable, "record")
-    return sorted(row[0][0].value for row in searcher)
+    return sorted(row[0].value for row in searcher.results(record=variable))
 
 
 def test_fresh_save_logical_id_equals_own_sid(mongo_test_database) -> None:
@@ -221,8 +220,7 @@ def test_only_latest_leaves_referenced_records_unfiltered(mongo_test_database) -
 
     searcher = store.searcher(only_latest=True)
     variable = searcher.variable(WidgetRef)
-    searcher.output(variable, "record")
-    records = [row[0][0] for row in searcher]
+    records = [row[0] for row in searcher.results(record=variable)]
     assert len(records) == 1
     # The root WidgetRef is latest-filtered, but its pinned reference still
     # resolves the replaced widget rather than the lineage's latest row.
@@ -239,9 +237,9 @@ def test_variable_logical_id_filters_and_outputs(mongo_test_database) -> None:
     # logical_id is projectable as an output (a top-level document field).
     searcher = store.searcher()
     variable = searcher.variable(Widget)
-    searcher.output(variable.sid, "sid")
-    searcher.output(variable.logical_id, "logical_id")
-    lineage = {int(row[0][0]): int(row[0][1]) for row in searcher}
+    lineage = {
+        int(row.sid): int(row.logical_id) for row in searcher.results(sid=variable.sid, logical_id=variable.logical_id)
+    }
     assert lineage[a] == a
     assert lineage[b] == a
 
@@ -249,8 +247,7 @@ def test_variable_logical_id_filters_and_outputs(mongo_test_database) -> None:
     filtered = store.searcher()
     filtered_variable = filtered.variable(Widget)
     filtered.add(filtered_variable.logical_id == a)
-    filtered.output(filtered_variable, "record")
-    assert sorted(row[0][0].value for row in filtered) == [1, 2]
+    assert sorted(row[0].value for row in filtered.results(record=filtered_variable)) == [1, 2]
 
 
 def test_evaluator_resolves_logical_id_without_a_database() -> None:
@@ -290,11 +287,11 @@ def test_stored_property_plan_serves_filters_and_sorts_logical_id(mongo_test_dat
     # Filtering by _httk_logical_id selects the whole lineage (resolved through
     # the evaluator's logical_id resolver over each candidate document).
     searchers = plan.filter_searchers(f"_httk_logical_id = {a}")
-    assert sorted(result[0][0].label for searcher in searchers for result in searcher) == ["first", "second"]
+    assert sorted(result[0].label for searcher in searchers for result in searcher.results()) == ["first", "second"]
 
     # Sorting by _httk_logical_id resolves the native document field.
     streams = plan.candidate_searchers(None, sort=(("_httk_logical_id", False),))
-    assert sum(1 for stream in streams for _row in stream.searcher) == 3
+    assert sum(1 for stream in streams for _row in stream.searcher.results()) == 3
 
 
 def test_stored_property_plan_threads_only_latest(mongo_test_database) -> None:
@@ -311,7 +308,7 @@ def test_stored_property_plan_threads_only_latest(mongo_test_database) -> None:
 
     def _candidate_count(**kwargs) -> int:
         streams = plan.candidate_searchers(None, **kwargs)
-        return sum(1 for stream in streams for _row in stream.searcher)
+        return sum(1 for stream in streams for _row in stream.searcher.results())
 
     assert _candidate_count() == 2
     assert _candidate_count(only_latest=True) == 1

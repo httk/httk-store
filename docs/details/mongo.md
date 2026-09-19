@@ -203,7 +203,6 @@ historic query returns rows present at `T`:
 ```python
 searcher = store.searcher()
 record = searcher.variable(StructureRecord)
-searcher.output(record, "record")
 searcher.add(record.store_timestamp <= "2026-01-01T00:00:00Z")
 rows = searcher.results(record=record)
 ```
@@ -294,8 +293,7 @@ raise `KeyError`, and sids are never reused.
 
 `MongoStore.searcher()` follows the same neutral query protocols and expression
 vocabulary as `SqlStore`: bind variables with `variable()`, add conditions
-with `add()`, declare outputs, and consume either portable `SearchResult`
-values or a named `results()` set. Reference paths, child set operations,
+with `add()`, and consume a named `results()` set. Reference paths, child set operations,
 stored-property plans, scalar projections, sorting, offsets, limits, and
 OPTIMADE filter wiring use the shared concepts documented in
 [Searching](db-querying.md#searching) and [Neutral portable Store profile](db-querying.md#neutral-portable-store-profile).

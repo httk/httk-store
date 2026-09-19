@@ -1117,7 +1117,7 @@ class RemoteSearcher:
         self._expressions.append(expression)
         self._invalidate_count()
 
-    def output(self, variable: object, name: str) -> None:
+    def _output(self, variable: object, name: str) -> None:
         """Declare a whole-record, scalar, or set-valued relationship output.
 
         A relationship namespace (``variable.links.<name>``) is a set-valued
@@ -1623,7 +1623,7 @@ class RemoteSearcher:
 
     def _search_results(self, *, maximum: int | None = None) -> Iterator[SearchResult]:
         if not self._outputs:
-            raise ValueError("this search has no outputs; call output() before iterating")
+            raise ValueError("no outputs are declared; use results(name=variable)")
         descriptor, _variable = self._require_variable()
         generic = descriptor.backend is OptimadeResource
         names = tuple(output.name for output in self._outputs)
@@ -1642,7 +1642,7 @@ class RemoteSearcher:
             )
             yield SearchResult(values, names)
 
-    def __iter__(self) -> Iterator[SearchResult]:
+    def _matches(self) -> Iterator[SearchResult]:
         """Yield remote search results in output order."""
 
         return self._search_results()
@@ -1770,15 +1770,15 @@ class RemoteResultSet:
             self._plan._outputs = []
             for name, value in outputs.items():
                 if value is searcher._variable:
-                    self._plan.output(self._plan._variable, name)
+                    self._plan._output(self._plan._variable, name)
                 elif isinstance(value, _RemoteField) and value._searcher is searcher:
                     if searcher._fields.get(value._local_name) is not value:
                         raise _unsupported("related fields as outputs or sort keys")
-                    self._plan.output(self._plan._fields[value._local_name], name)
+                    self._plan._output(self._plan._fields[value._local_name], name)
                 elif isinstance(value, _RemoteLinkSet) and value._searcher is searcher:
                     if value._variable is not searcher._variable:
                         raise _unsupported("link sets from another backend or searcher")
-                    self._plan.output(
+                    self._plan._output(
                         _RemoteLinkSet(
                             self._plan, cast(_RemoteVariable, self._plan._variable), value._name, value._descriptor
                         ),

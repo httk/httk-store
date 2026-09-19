@@ -749,12 +749,12 @@ class StoredPropertySqlPlan:
                 related_property_resolver,
                 relationship_source_map,
             )
-            searcher.output(SqlColumn(searcher, variable._alias.c[SID_COLUMN]), "sid")
-            searcher.output(SqlColumn(searcher, variable._alias.c["id"]), "id")
-            searcher.output(SqlColumn(searcher, variable._alias.c["immutable_id"]), "immutable_id")
-            searcher.output(SqlColumn(searcher, variable._alias.c[ALT_KIND_COLUMN]), "alt_kind")
+            searcher._output(SqlColumn(searcher, variable._alias.c[SID_COLUMN]), "sid")
+            searcher._output(SqlColumn(searcher, variable._alias.c["id"]), "id")
+            searcher._output(SqlColumn(searcher, variable._alias.c["immutable_id"]), "immutable_id")
+            searcher._output(SqlColumn(searcher, variable._alias.c[ALT_KIND_COLUMN]), "alt_kind")
             for index, value in enumerate(sort_values):
-                searcher.output(
+                searcher._output(
                     SqlColumn(
                         searcher,
                         value.element,
@@ -764,7 +764,7 @@ class StoredPropertySqlPlan:
                 )
             timestamp_output = self.store.store_timestamps
             if timestamp_output:
-                searcher.output(cast(SqlColumn, variable.store_timestamp), "store_timestamp")
+                searcher._output(cast(SqlColumn, variable.store_timestamp), "store_timestamp")
             streams.append(
                 StoredPropertySqlCandidateStream(
                     backing.backing,
@@ -872,8 +872,8 @@ class StoredPropertySqlPlan:
         searcher = self.store.searcher(only_latest=only_latest)
         variable = searcher.variable(backing.backing)
         sid = SqlColumn(searcher, variable._alias.c[SID_COLUMN])
-        searcher.output(sid, "sid")
-        sids = tuple(int(values[0]) for values, _names in searcher)
+        searcher._output(sid, "sid")
+        sids = tuple(int(values[0]) for values, _names in searcher._matches())
         hydrator = RowHydrator(self.store, backing.backing, sids)
         for record in hydrator.materialize_many():
             yield self.response_row(backing.backing, record)
@@ -893,7 +893,7 @@ class StoredPropertySqlPlan:
         searcher, variable, _sort_values = self._candidate_searcher(
             backing, ast, sort, public_id_prefix, as_of, only_latest, revisions, alternatives, related_property_resolver
         )
-        searcher.output(variable, "record")
+        searcher._output(variable, "record")
         return searcher
 
     def _candidate_searcher(

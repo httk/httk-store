@@ -10,11 +10,11 @@ from httk.store import (
     Searcher,
     SearchExpression,
     SearchField,
-    SearchResult,
     SearchVariable,
     Store,
     UnsupportedQueryError,
 )
+from httk.store.query.protocols import BackendSearcher, SearchResult
 
 
 class FakeExpression:
@@ -77,7 +77,7 @@ class FakeSearcher:
     def variable(self, target: Any) -> Any:
         return FakeVariable()
 
-    def output(self, variable: Any, name: str) -> None:
+    def _output(self, variable: Any, name: str) -> None:
         self.names += (name,)
 
     def add(self, expression: Any) -> None:
@@ -95,8 +95,13 @@ class FakeSearcher:
     def add_sort(self, field: Any, descending: bool) -> None:
         pass
 
-    def __iter__(self) -> Iterator[SearchResult]:
+    def _matches(self) -> Iterator[SearchResult]:
         return iter(())
+
+    def results(self, **outputs: Any) -> tuple[SearchResult, ...]:
+        for name, variable in outputs.items():
+            self._output(variable, name)
+        return ()
 
 
 class FakeStore:
@@ -109,6 +114,7 @@ def test_fakes_conform_to_the_protocols():
     # mypy/pyright verify each fake structurally satisfies its protocol.
     store: Store = FakeStore()
     searcher: Searcher = store.searcher()
+    backend_searcher: BackendSearcher = store.searcher()
     variable: SearchVariable = searcher.variable(object)
     field: SearchField = variable.anything
     expression: SearchExpression = field.has(1)
@@ -123,12 +129,24 @@ def test_fakes_conform_to_the_protocols():
     searcher.add(field.endswith("a"))
     searcher.add(variable.always_true())
     searcher.add(variable.always_false())
-    searcher.output(variable, "out")
+    backend_searcher._output(variable, "out")
     searcher.add_sort(field, descending=True)
     searcher.set_limit(-1)
     searcher.add_offset(0)
     assert searcher.count() == 0
-    assert list(searcher) == []
+    assert list(backend_searcher._matches()) == []
+    assert list(searcher.results(out=variable)) == []
+
+
+def test_searcher_protocol_has_no_output_or_iter() -> None:
+    assert not hasattr(Searcher, "output")
+    assert not hasattr(Searcher, "__iter__")
+    assert hasattr(Searcher, "results")
+
+
+def test_backend_searcher_protocol_exposes_the_raw_path() -> None:
+    assert hasattr(BackendSearcher, "_output")
+    assert hasattr(BackendSearcher, "_matches")
 
 
 def test_search_result_is_a_two_tuple_of_values_and_names():

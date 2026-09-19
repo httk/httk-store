@@ -348,9 +348,8 @@ def test_fresh_store_reads_are_empty_and_do_not_create_record_tables(database: B
     assert store.sid_of(LayoutSingle("missing")) is None
     searcher = store.searcher()
     variable = searcher.variable(LayoutSingle)
-    searcher.output(variable, "record")
     assert searcher.count() == 0
-    assert list(searcher) == []
+    assert list(searcher.results(record=variable)) == []
 
     with database.engine.connect() as connection:
         assert actual_table_names(connection) == before

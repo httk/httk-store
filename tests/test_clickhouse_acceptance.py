@@ -96,14 +96,11 @@ def test_results_rows_projection_and_paging_surface(clickhouse_corpus: SqlStore)
 def test_live_literal_like_and_scalar_binary_projection(clickhouse_corpus: SqlStore) -> None:
     searcher = clickhouse_corpus.searcher()
     label = searcher.variable(Label)
-    searcher.output(label, "label")
     searcher.add(label.text.contains(LITERAL_LABEL.text))
-    assert [row[0][0].text for row in searcher] == [LITERAL_LABEL.text]
+    assert [row.label.text for row in searcher.results(label=label)] == [LITERAL_LABEL.text]
 
     binary_search = clickhouse_corpus.searcher()
     record = binary_search.variable(ReadRecord)
-    binary_search.output(record.title, "title")
-    binary_search.output(record.payload, "payload")
     rows = list(
         binary_search.results(title=record.title, payload=record.payload)
         .page(size=2, order_by=(PageOrder("title"),))
@@ -114,7 +111,7 @@ def test_live_literal_like_and_scalar_binary_projection(clickhouse_corpus: SqlSt
 
 def test_stored_properties_reject_only_returned_nested_correlation(clickhouse_corpus: SqlStore) -> None:
     plan = stored_property_sql_plan(clickhouse_corpus, CalculationEntry)
-    assert [row[0][0].label for row in plan.filter_searchers('_httk_selector = "one-third"')[0]] == ["first"]
+    assert [row.record.label for row in plan.filter_searchers('_httk_selector = "one-third"')[0].results()] == ["first"]
     for literal in (
         "nested",
         "filtered-count-nested",
@@ -125,7 +122,7 @@ def test_stored_properties_reject_only_returned_nested_correlation(clickhouse_co
     ):
         with pytest.raises(ClickHouseUnsupportedQueryError, match="beyond one immediate scope"):
             plan.filter_searchers(f'_httk_selector = "{literal}"')
-    assert list(plan.filter_searchers('_httk_selector = "filtered-count-single"')[0])
+    assert list(plan.filter_searchers('_httk_selector = "filtered-count-single"')[0].results())
     plan.filter_searchers('_httk_selector = "unused-nested"')
 
     def nested_sort(context):
@@ -185,9 +182,8 @@ def test_federation_surface_is_bulk_populated(clickhouse_federation: StoredEntry
 def test_query_behavior_surface_handles_synthetic_nulls(clickhouse_corpus: SqlStore) -> None:
     searcher = clickhouse_corpus.searcher()
     record = searcher.variable(Rec)
-    searcher.output(record, "record")
     searcher.add(~record.symbols.has_any("missing"))
-    assert {row[0][0].formula for row in searcher} == {item.formula for item in RECORDS}
+    assert {row.record.formula for row in searcher.results(record=record)} == {item.formula for item in RECORDS}
 
 
 @pytest.mark.parametrize("operation", ("save", "transaction", "ensure_tables"))

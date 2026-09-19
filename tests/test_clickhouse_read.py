@@ -64,19 +64,18 @@ def clickhouse_read_store():
 def _read_search(store: SqlStore):
     searcher = store.searcher()
     record = searcher.variable(ReadRecord)
-    searcher.output(record, "record")
     return searcher, record
 
 
 def test_clickhouse_search_rows_bytes_and_synthetic_null_semantics(clickhouse_read_store: SqlStore) -> None:
     searcher, record = _read_search(clickhouse_read_store)
     searcher.add(record.title.contains("50%"))
-    assert [item[0][0].payload for item in searcher] == [b"\x00\xff"]
+    assert [row.record.payload for row in searcher.results(record=record)] == [b"\x00\xff"]
 
     empty_search, empty_record = _read_search(clickhouse_read_store)
     empty_search.add(empty_record.reference == None)  # query DSL NULL predicate
     empty_search.add(~empty_record.tags.has_any("missing"))
-    assert {item[0][0].title for item in empty_search} == {"empty"}
+    assert {row.record.title for row in empty_search.results(record=empty_record)} == {"empty"}
 
 
 def test_clickhouse_results_paging_and_reopen_are_stable(clickhouse_read_store: SqlStore) -> None:
@@ -109,10 +108,10 @@ def test_clickhouse_store_timestamp_column_is_populated_and_integral(clickhouse_
 
 def test_clickhouse_optimade_and_stored_property_read_paths(clickhouse_read_store: SqlStore) -> None:
     optimade = optimade_filter_searcher(clickhouse_read_store, ReadRecord, '_httk_custom_title CONTAINS "50%"')
-    assert [item[0][0].title for item in optimade] == ["50% Mg"]
+    assert [row[0].title for row in optimade.results()] == ["50% Mg"]
 
     plan = stored_property_sql_plan(clickhouse_read_store, CalculationEntry)
-    assert [item[0][0].label for item in plan.filter_searchers('_httk_selector = "one-third"')[0]] == ["first"]
+    assert [row.record.label for row in plan.filter_searchers('_httk_selector = "one-third"')[0].results()] == ["first"]
     with pytest.raises(ClickHouseUnsupportedQueryError, match="beyond one immediate scope"):
         plan.filter_searchers('_httk_selector = "nested"')
     with pytest.raises(UnsupportedQueryError):
@@ -228,14 +227,13 @@ def test_clickhouse_only_latest_correlated_subquery_is_a_server_side_no_op(click
     """``only_latest`` emits a correlated ``NOT EXISTS``; on a bulk-fenced store it
     must execute without server error and return exactly the plain result set
     (every row is a lineage root, so none are filtered)."""
-    plain, _ = _read_search(clickhouse_read_store)
-    plain_titles = sorted(item[0][0].title for item in plain)
+    plain, plain_record = _read_search(clickhouse_read_store)
+    plain_titles = sorted(row.record.title for row in plain.results(record=plain_record))
     assert plain_titles
 
     latest = clickhouse_read_store.searcher(only_latest=True)
     record = latest.variable(ReadRecord)
-    latest.output(record, "record")
-    assert sorted(item[0][0].title for item in latest) == plain_titles
+    assert sorted(row.record.title for row in latest.results(record=record)) == plain_titles
 
 
 def test_clickhouse_variable_logical_id_filter_selects_exactly_that_row(clickhouse_read_store: SqlStore) -> None:
@@ -245,9 +243,9 @@ def test_clickhouse_variable_logical_id_filter_selects_exactly_that_row(clickhou
     searcher = clickhouse_read_store.searcher()
     record = searcher.variable(ReadRecord)
     searcher.add(record.logical_id == int(sid))
-    searcher.output(record.title, "title")
-    searcher.output(record.logical_id, "lid")
-    assert [(item[0][0], item[0][1]) for item in searcher] == [(title, int(sid))]
+    assert [(row.title, row.lid) for row in searcher.results(title=record.title, lid=record.logical_id)] == [
+        (title, int(sid))
+    ]
 
 
 def test_clickhouse_only_latest_with_as_of_composes_over_root_rows(clickhouse_read_store: SqlStore) -> None:
@@ -255,5 +253,4 @@ def test_clickhouse_only_latest_with_as_of_composes_over_root_rows(clickhouse_re
     fixture: a far-future cutoff admits every bulk root through both rewrites."""
     searcher = clickhouse_read_store.searcher(as_of=4_000_000_000_000_000_000, only_latest=True)
     record = searcher.variable(ReadRecord)
-    searcher.output(record, "record")
-    assert sorted(item[0][0].title for item in searcher) == ["50% Mg", "empty"]
+    assert sorted(row.record.title for row in searcher.results(record=record)) == ["50% Mg", "empty"]

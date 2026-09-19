@@ -23,7 +23,6 @@ rows present at `T`:
 ```python
 searcher = store.searcher()
 record = searcher.variable(StructureRecord)
-searcher.output(record, "record")
 searcher.add(record.store_timestamp <= "2026-01-01T00:00:00Z")
 rows = searcher.results(record=record)
 ```

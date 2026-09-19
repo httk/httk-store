@@ -2,7 +2,7 @@
 
 The :class:`Slicer` compiles bracket indexing into the ordinary
 :class:`~httk.store.query.protocols.Searcher` surface — ``variable``, ``add``,
-``output``, ``results`` and ``count`` — and adds no query capability of its own.
+``results`` and ``count`` — and adds no query capability of its own.
 It is a thin convenience: ``note = store.searcher().slicer(Note)`` gives an
 object where ``note['title']`` iterates one field, ``note[note['value'] > 10]``
 iterates the matching records, and ``len(note[mask])`` counts them.

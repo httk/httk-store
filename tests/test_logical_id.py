@@ -173,8 +173,7 @@ def test_replace_shares_lineage_history_and_leaves_both_rows(store_factory):
     assert store.fetch(Widget, b).value == 2
     searcher = store.searcher()
     variable = searcher.variable(Widget)
-    searcher.output(variable, "record")
-    assert sorted(row[0][0].value for row in searcher) == [1, 2]
+    assert sorted(row[0].value for row in searcher.results(record=variable)) == [1, 2]
 
     # history is the lineage in sid order, from either member.
     assert tuple(w.value for w in store.history(store.fetch(Widget, b))) == (1, 2)
@@ -289,9 +288,9 @@ def test_logical_id_searcher_output_filter_and_sort(store_factory):
     # logical_id is projectable as a scalar output (the served value channel).
     exposed = store.searcher()
     variable = exposed.variable(Widget)
-    exposed.output(variable.sid, "sid")
-    exposed.output(variable.logical_id, "logical_id")
-    lineage = {int(row[0][0]): int(row[0][1]) for row in exposed}
+    lineage = {
+        int(row.sid): int(row.logical_id) for row in exposed.results(sid=variable.sid, logical_id=variable.logical_id)
+    }
     assert lineage[a] == a
     assert lineage[b] == a
 
@@ -299,15 +298,13 @@ def test_logical_id_searcher_output_filter_and_sort(store_factory):
     filtered = store.searcher()
     filtered_variable = filtered.variable(Widget)
     filtered.add(filtered_variable.logical_id == a)
-    filtered.output(filtered_variable, "record")
-    assert sorted(row[0][0].value for row in filtered) == [1, 2]
+    assert sorted(row[0].value for row in filtered.results(record=filtered_variable)) == [1, 2]
 
     # logical_id is sortable; the independent, higher-sid lineage sorts last.
     ascending = store.searcher()
     asc = ascending.variable(Widget)
-    ascending.output(asc, "record")
     ascending.add_sort(asc.logical_id)
-    assert [row[0][0].value for row in ascending][-1] == 100
+    assert [row[0].value for row in ascending.results(record=asc)][-1] == 100
 
 
 def test_optimade_filter_searcher_selects_lineage_by_logical_id(store_factory):
@@ -319,7 +316,7 @@ def test_optimade_filter_searcher_selects_lineage_by_logical_id(store_factory):
     store.save(Widget(100))  # an independent lineage
 
     searcher = optimade_filter_searcher(store, Widget, f"_httk_logical_id = {a}")
-    assert {item[0][0].value for item in searcher} == {1, 2}
+    assert {row[0].value for row in searcher.results()} == {1, 2}
 
 
 def test_stored_property_plan_serves_filters_and_sorts_logical_id(store_factory):
@@ -340,8 +337,8 @@ def test_stored_property_plan_serves_filters_and_sorts_logical_id(store_factory)
 
     # Filtering by _httk_logical_id selects the whole lineage.
     searchers = plan.filter_searchers(f"_httk_logical_id = {a}")
-    assert sorted(result[0][0].label for searcher in searchers for result in searcher) == ["first", "second"]
+    assert sorted(result[0].label for searcher in searchers for result in searcher.results()) == ["first", "second"]
 
     # Sorting by _httk_logical_id compiles and orders by the lineage id.
     ordered = plan.filter_searchers("_httk_logical_id >= 0", sort=(("_httk_logical_id", False),))
-    assert [result[0][0].label for searcher in ordered for result in searcher][-1] == "independent"
+    assert [result[0].label for searcher in ordered for result in searcher.results()][-1] == "independent"

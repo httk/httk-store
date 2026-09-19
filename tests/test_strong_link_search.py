@@ -184,7 +184,7 @@ def test_unknown_names_and_unsupported_forms(store_factory):
     with pytest.raises(UnsupportedQueryError, match="forward strong link"):
         _ = structure.links.has_product.label  # reverse chaining would read every owner's edges
     with pytest.raises(UnsupportedQueryError, match="projects a strong-link traversal"):
-        search.output(record.links.product_of, "p")
+        search.results(p=record.links.product_of)
     with pytest.raises(TypeError, match="expects a DataRecord variable"):
         _ = structure.links.has_product == search.variable(Run)
     with pytest.raises(TypeError, match="compare against a stored entry"):

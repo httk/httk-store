@@ -63,8 +63,7 @@ def _names(objects):
 
 
 def _query_labels(searcher, variable):
-    searcher.output(variable, "r")
-    return sorted(row.values[0].label for row in searcher)
+    return sorted(row.values[0].label for row in searcher.results(r=variable))
 
 
 def _link_count(store):
@@ -599,7 +598,7 @@ def test_link_path_projection_is_rejected(mongo_test_database):
     searcher = store.searcher()
     v = searcher.variable(Result)
     with pytest.raises(UnsupportedQueryError, match="weak-link path"):
-        searcher.output(v.links.projects.name, "pname")
+        searcher._output(v.links.projects.name, "pname")
     with pytest.raises(UnsupportedQueryError, match="weak-link path"):
         searcher.results(pname=v.links.projects.name)
 
@@ -768,7 +767,7 @@ def test_output_only_link_set_registers_no_lookup(mongo_test_database):
 
     searcher = store.searcher()
     v = searcher.variable(Result)
-    searcher.output(v.links.projects, "projects")
+    searcher._output(v.links.projects, "projects")
     assert searcher._link_lookups == []
 
 

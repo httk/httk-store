@@ -7,7 +7,7 @@ layer implements and that other stores — including *httk-serve*'s in-memory
 reference store — implement identically, so the same query program runs
 unchanged against either.
 
-A search is built, not written. Four calls do everything:
+A search is built, not written. Three calls do everything:
 
 `variable(cls)`
 : Bind a class to a query variable. Two variables of the same class self-join,
@@ -17,13 +17,11 @@ A search is built, not written. Four calls do everything:
 : Add a condition. Expressions come from comparing a variable's fields;
   `&`, `|` and `~` combine them. Several `add()` calls are ANDed.
 
-`output(variable_or_field, name)`
-: Declare what a match yields — the whole reconstructed object, one field, or a
-  weak-link set (see below). Declaration order is result order.
-
-iteration / `count()`
-: Run it. Iterating yields one `SearchResult` per match; `count()` returns how
-  many there are, ignoring `set_limit`/`add_offset`.
+`results(name=variable_or_field, ...)` / `count()`
+: Run it. `results()` declares what each match yields — the whole
+  reconstructed object, one field, or a weak-link set (see below), keyword
+  order is result order — and returns named rows; `count()` returns how many
+  matches there are, ignoring `set_limit`/`add_offset`.
 
 ## What the fields give you
 
@@ -71,12 +69,11 @@ The full weak-link contract is in the versioned database guide.
 
 ## Results
 
-The low-level protocol yields `SearchResult`, a named 2-tuple of `values` (one
-per `output()`, in declaration order) and `names`. The canonical `results()`
-API yields named lazy rows; use the portable protocol form
-`for (structure,), _names in search:` when needed. Result rows bypass the
-identity cache; `fetch()` returns lazy rows too (`eager=True` materializes),
-and repeated default fetches of one live sid return the same object.
+`results()` yields named lazy rows: `row.name`, `row["name"]` or `row[0]`
+address a declared output, and `row.names`/`row.values` give the full tuple.
+Result rows bypass the identity cache; `fetch()` returns lazy rows too
+(`eager=True` materializes), and repeated default fetches of one live sid
+return the same object.
 
 Sorting on a rational field runs on its float companion column, so it is
 documented-approximate; the values themselves are still exact.
@@ -151,23 +148,22 @@ def populate() -> SqlStore:
 
 
 def structure_search(store: SqlStore) -> tuple[Searcher, SearchVariable]:
-    """A searcher over `Structure`, outputting the whole object."""
+    """A searcher over `Structure`, ready to output the whole object."""
     searcher = store.searcher()
     variable = searcher.variable(Structure)
-    searcher.output(variable, "structure")
     return searcher, variable
 
 
-def matched(searcher: Searcher) -> list[str]:
+def matched(searcher: Searcher, variable: SearchVariable) -> list[str]:
     """The formulas of the matched structures, in the order the search yields them."""
-    return [structure.formula for structure in searcher.results().scalars()]
+    return [row.structure.formula for row in searcher.results(structure=variable)]
 
 
 def show(store: SqlStore, label: str, build: Any) -> None:
     """Run one condition against `Structure` and print what it matched."""
     searcher, variable = structure_search(store)
     searcher.add(build(variable))
-    print(f"  {label:<48} -> {sorted(matched(searcher))}")
+    print(f"  {label:<48} -> {sorted(matched(searcher, variable))}")
 
 
 def show_comparisons(store: SqlStore) -> None:
@@ -200,7 +196,7 @@ def show_references(store: SqlStore) -> None:
     searcher, v = structure_search(store)
     searcher.add(v.ref.doi == "10.1/beta")
     searcher.add(v.ref.title == "Beta")
-    print(f"  ref.doi == '10.1/beta' AND ref.title == 'Beta'      -> {sorted(matched(searcher))}")
+    print(f"  ref.doi == '10.1/beta' AND ref.title == 'Beta'      -> {sorted(matched(searcher, v))}")
     print()
 
     print("== Joining two variables ==")
@@ -210,8 +206,7 @@ def show_references(store: SqlStore) -> None:
     searcher.add(tag.structure == structure)  # the join condition
     searcher.add(tag.name == "quality")
     searcher.add(tag.value == "good")
-    searcher.output(structure, "structure")
-    print(f"  structures tagged quality=good                   -> {sorted(matched(searcher))}")
+    print(f"  structures tagged quality=good                   -> {sorted(matched(searcher, structure))}")
 
     print("  ... and a self-join: other structures sharing NaCl's spacegroup")
     searcher = store.searcher()
@@ -220,8 +215,7 @@ def show_references(store: SqlStore) -> None:
     searcher.add(a.formula == "NaCl")
     searcher.add(a.spacegroup == b.spacegroup)
     searcher.add(b.formula != "NaCl")
-    searcher.output(b, "structure")
-    print(f"                                                   -> {sorted(matched(searcher))}")
+    print(f"                                                   -> {sorted(matched(searcher, b))}")
     print()
 
 
@@ -246,25 +240,25 @@ def show_ordering_and_paging(store: SqlStore) -> None:
     print("== Sorting, limit, offset, count ==")
     searcher, v = structure_search(store)
     searcher.add_sort(v.energy, False)  # False = ascending
-    print(f"  by energy ascending:            {matched(searcher)}")
+    print(f"  by energy ascending:            {matched(searcher, v)}")
 
     searcher, v = structure_search(store)
     searcher.add_sort(v.spacegroup, True)  # True = descending
     searcher.add_sort(v.formula, False)  # secondary key
-    print(f"  by spacegroup desc, formula asc: {matched(searcher)}")
+    print(f"  by spacegroup desc, formula asc: {matched(searcher, v)}")
 
     searcher, v = structure_search(store)
     searcher.add_sort(v.formula, False)
     searcher.set_limit(2)
-    print(f"  first two by formula:            {matched(searcher)}")
+    print(f"  first two by formula:            {matched(searcher, v)}")
     searcher.set_limit(-1)  # -1 means "no bound"
     searcher.add_offset(4)
-    print(f"  skipping the first four:         {matched(searcher)}")
+    print(f"  skipping the first four:         {matched(searcher, v)}")
 
     searcher, v = structure_search(store)
     searcher.add(v.spacegroup == 225)
     searcher.set_limit(1)
-    print(f"  count() ignores limit/offset:    {searcher.count()} match, {len(list(searcher))} returned")
+    print(f"  count() ignores limit/offset:    {searcher.count()} match, {len(searcher.results(structure=v))} returned")
     print()
 
 
@@ -291,12 +285,12 @@ def show_results(store: SqlStore) -> None:
     # Cursor rows are valid until the cursor advances; copy the value if needed.
     next(cursor)
 
-    print("  Low-level portable protocol form:")
+    print("  A single-output results() query:")
     searcher, v = structure_search(store)
     searcher.add(v.formula == "MgO")
-    for (structure,), names in searcher:
-        print(f"    {names} -> {structure.formula}")
-        print(f"    equal to the saved instance: {structure == STRUCTURES[2]}")
+    for row in searcher.results(structure=v):
+        print(f"    {row.names} -> {row.structure.formula}")
+        print(f"    equal to the saved instance: {row.structure == STRUCTURES[2]}")
 
 
 def main() -> None:

@@ -46,7 +46,7 @@ def store(request):
 
 
 def matches(store, filter_string):
-    return [item[0][0] for item in optimade_filter_searcher(store, Doc, filter_string)]
+    return [item[0] for item in optimade_filter_searcher(store, Doc, filter_string).results()]
 
 
 def test_equality_matches_value_with_embedded_double_quote(store):

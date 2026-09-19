@@ -130,7 +130,7 @@ def related_property_resolver_factory(
                 for stream in plan.candidate_searchers(sub_ast, only_latest=True, public_id_prefix=prefix):
                     if source_map is not None and stream.backing not in source_map.backing_prefixes:
                         continue
-                    for values, _names in stream.searcher:
+                    for values, _names in stream.searcher._matches():
                         matched.setdefault(prefix + str(values[1]))
             return tuple(matched)
 
@@ -1489,7 +1489,7 @@ class _BatchedCandidateIterator:
 
 
 def _candidates(stream: _Stream) -> Iterator[_Candidate]:
-    for values, _names in stream.candidate_stream.searcher:
+    for values, _names in stream.candidate_stream.searcher._matches():
         expected_width = 4 + stream.candidate_stream.sort_count + int(stream.candidate_stream.timestamp_output)
         if len(values) != expected_width:
             raise RuntimeError(

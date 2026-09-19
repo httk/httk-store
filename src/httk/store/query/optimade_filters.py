@@ -44,11 +44,11 @@ import logging
 import operator
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
 from httk.core.optimade import FilterAst, parse_optimade_filter
 
-from httk.store.query import ID_FIELD, Searcher, SearchExpression, SearchVariable, Store
+from httk.store.query import ID_FIELD, BackendSearcher, Searcher, SearchExpression, SearchVariable, Store
 from httk.store.validation import _is_rfc3339_datetime
 
 _LOGGER = logging.getLogger(__name__)
@@ -976,9 +976,9 @@ def filter_searcher(
         if property_keys is None:
             property_keys = {name: name for name in property_fulltypes}
         handlers = simple_property_handlers(entry_type, property_keys, property_fulltypes)
-    searcher = store.searcher()
+    searcher = cast(BackendSearcher, store.searcher())
     search_variable = searcher.variable(target)
-    searcher.output(search_variable, entry_type)
+    searcher._output(search_variable, entry_type)
     searcher.add(
         translate_filter_ast(
             filter_ast,

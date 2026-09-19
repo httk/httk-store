@@ -30,12 +30,12 @@ from httk.core.storage import (
 )
 
 from httk.store.backend.schema import FieldSpec, SchemaError, resolve_schema
-from httk.store.query import SearchResult
 from httk.store.query.optimade_filters import (
     FilterTranslationError,
     HandlerTable,
     translate_filter_ast,
 )
+from httk.store.query.protocols import SearchResult
 from httk.store.store_timestamp import ns_operand_to_store_units
 
 from .evaluator import (
@@ -296,8 +296,8 @@ class _ConstantSortSearcher:
     def set_limit(self, limit: int) -> None:
         self._searcher.set_limit(limit)
 
-    def __iter__(self) -> Iterator[SearchResult]:
-        for result in self._searcher:
+    def _matches(self) -> Iterator[SearchResult]:
+        for result in self._searcher._matches():
             # Four fixed outputs precede the sort values: sid, id, immutable_id, alt_kind.
             values = iter(result.values[4:])
             sort_values = tuple(
@@ -364,8 +364,8 @@ class MongoStoredPropertyPlan:
         for backing in self._backings:
             searcher = self.store.searcher(only_latest=False)
             variable = searcher.variable(backing.backing)
-            searcher.output(variable, "record")
-            for result in searcher:
+            searcher._output(variable, "record")
+            for result in searcher._matches():
                 yield self.response_row(backing.backing, result[0][0])
 
     def filter_searchers(
@@ -420,17 +420,17 @@ class MongoStoredPropertyPlan:
                 revisions=revisions,
                 alternatives=alternatives,
             )
-            searcher.output(variable.sid, "sid")
-            searcher.output(self._public_id_field(variable, ""), "id")
-            searcher.output(self._immutable_id_field(variable), "immutable_id")
+            searcher._output(variable.sid, "sid")
+            searcher._output(self._public_id_field(variable, ""), "id")
+            searcher._output(self._immutable_id_field(variable), "immutable_id")
             # A fourth fixed output carries the raw alt_kind (absent -> None for
             # mains) so a federation can render composite alternative ids.
-            searcher.output(self._alt_kind_field(variable), "alt_kind")
+            searcher._output(self._alt_kind_field(variable), "alt_kind")
             for index, value in enumerate(sorts):
-                searcher.output(value, f"sort_{index}")
+                searcher._output(value, f"sort_{index}")
             timestamp_output = self.store.store_timestamps
             if timestamp_output:
-                searcher.output(cast(MongoField, variable.store_timestamp), "store_timestamp")
+                searcher._output(cast(MongoField, variable.store_timestamp), "store_timestamp")
             candidate_searcher: Any = (
                 _ConstantSortSearcher(searcher, sort, self.entry_type)
                 if any(sort_name == "type" for sort_name, _descending in sort)
@@ -654,7 +654,7 @@ class MongoStoredPropertyPlan:
                 searcher.add_sort(variable.sid, False)
             sort_fields.append(field)
         if not candidate:
-            searcher.output(variable, "record")
+            searcher._output(variable, "record")
         return searcher, variable, tuple(sort_fields)
 
     def _handlers(

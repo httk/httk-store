@@ -62,7 +62,7 @@ def store():
 
 
 def results(searcher):
-    return [item[0][0] for item in searcher]
+    return [row[0] for row in searcher.results()]
 
 
 def test_numeric_comparison_on_fraction_field(store):

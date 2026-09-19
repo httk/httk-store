@@ -357,8 +357,7 @@ def test_reopen_new_referenced_table_reads_preexisting_rows() -> None:
         # row no longer reads as absent; its new reference defaults to None.
         assert upgraded.fetch(RecRefNew, old_sid) == RecRefNew("base", None)
         searcher = upgraded.searcher()
-        variable = searcher.variable(RecRefNew)
-        searcher.output(variable, "record")
+        searcher.variable(RecRefNew)
         assert searcher.count() == 1
         # A fresh row that touches the new child table still writes and reads.
         sid = upgraded.save(RecRefNew("with-child", UpgradeRefChild("t")))

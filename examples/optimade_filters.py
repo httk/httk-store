@@ -7,7 +7,7 @@ between the text a user (or a remote client) writes and the search DSL of the
 *searching* example: the filter is parsed by httk-core's OPTIMADE grammar,
 translated by `httk.store.query.optimade_filters` against a handler table derived from
 the class's storage schema, and executed as an ordinary search. Each match
-is available as the friendly `searcher.results().scalars()` stream.
+is available as a row of the `searcher.results()` stream.
 
 This is useful well before you serve anything: it lets a filter string be
 evaluated against a local database with no HTTP server, no adapter and no
@@ -150,7 +150,7 @@ def populate() -> SqlStore:
 
 def names(searcher: Searcher) -> list[str]:
     """The `name` of every matched material."""
-    return [material.name for material in searcher.results().scalars()]
+    return [row[0].name for row in searcher.results()]
 
 
 def show_plain_filters(store: SqlStore) -> None:

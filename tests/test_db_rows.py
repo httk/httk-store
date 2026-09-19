@@ -111,10 +111,9 @@ def database(request):
 def _row(store: SqlStore, cls: type, name: str = "A"):
     searcher = store.searcher()
     variable = searcher.variable(cls)
-    searcher.output(variable, "record")
     if name != "A":
         searcher.add(variable.name == name)
-    return next(iter(searcher))[0][0]
+    return next(iter(searcher.results(record=variable))).record
 
 
 def test_equality_is_symmetric(database):
@@ -304,11 +303,10 @@ def test_iteration_has_no_child_query_until_field_access(database):
     try:
         searcher = store.searcher()
         variable = searcher.variable(BatchRecord)
-        searcher.output(variable, "record")
-        rows = list(searcher)
+        rows = list(searcher.results(record=variable))
         child_table = "batch_record_values"
         assert not any(child_table in statement for statement in statements)
-        assert rows[0][0][0].values == ["x", "y"]
+        assert rows[0].record.values == ["x", "y"]
         assert sum(child_table in statement for statement in statements) == 1
     finally:
         sqlalchemy.event.remove(database.engine, "before_cursor_execute", count)
@@ -329,11 +327,60 @@ def test_child_batches_once_per_chunk(database, records: int):
     try:
         searcher = store.searcher()
         variable = searcher.variable(BatchRecord)
-        searcher.output(variable, "record")
-        rows = list(searcher)
+        results = searcher.results(record=variable)
+        rows = list(results)
         for index in (0, 1, 500, 501, records - 1):
-            assert rows[index][0][0].values == [str(index)]
+            assert rows[index].record.values == [str(index)]
         assert len(statements) <= 8  # 1 outer + 3 parent + 3 child, with one slack statement
+    finally:
+        sqlalchemy.event.remove(database.engine, "before_cursor_execute", count)
+
+
+def test_iteration_field_access_does_not_requery_per_row(database):
+    # Regression for the sole public results() path: object outputs must stay
+    # pinned for the result set's lifetime, so `for row in results: row.record.f`
+    # loads each chunk once (a handful of statements) instead of re-querying the
+    # weakly-cached chunk per row (which measured one SELECT per row).
+    store = SqlStore(database, entry_records={})
+    for index in range(600):
+        store.save(BatchRecord(str(index), [str(index)]))
+    statements: list[str] = []
+
+    def count(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    sqlalchemy.event.listen(database.engine, "before_cursor_execute", count)
+    try:
+        searcher = store.searcher()
+        variable = searcher.variable(BatchRecord)
+        values = [row.record.values[0] for row in searcher.results(record=variable)]
+        assert sorted(int(value) for value in values) == list(range(600))
+        assert len(statements) < 10  # chunk size is 500: outer + parent/child chunks, not one per row
+    finally:
+        sqlalchemy.event.remove(database.engine, "before_cursor_execute", count)
+
+
+def test_cursor_field_access_does_not_requery_per_row(database):
+    # Regression for the cursor() path: the current row's hydrated proxy is held
+    # on the cursor until the next access, so its chunk stays alive across the
+    # scan and each chunk is queried once, not per row (measured 1201 -> ~5).
+    store = SqlStore(database, entry_records={})
+    for index in range(600):
+        store.save(BatchRecord(str(index), [str(index)]))
+    statements: list[str] = []
+
+    def count(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    sqlalchemy.event.listen(database.engine, "before_cursor_execute", count)
+    try:
+        searcher = store.searcher()
+        variable = searcher.variable(BatchRecord)
+        values = [row.record.values[0] for row in searcher.results(record=variable).cursor()]
+        assert sorted(int(value) for value in values) == list(range(600))
+        assert len(statements) < 10  # chunk size is 500: one chunk load, not one per row
     finally:
         sqlalchemy.event.remove(database.engine, "before_cursor_execute", count)
 
@@ -343,12 +390,12 @@ def test_stale_result_is_reported_at_hydration(database):
     sid = store.save(ParityRecord("A", 1))
     searcher = store.searcher()
     variable = searcher.variable(ParityRecord)
-    searcher.output(variable, "record")
-    results = iter(searcher)
+    results = searcher.results(record=variable)
+    len(results)  # force the outer query to run now, while the row still exists
     with database.engine.begin() as connection:
         connection.execute(sqlalchemy.text(f"DELETE FROM parity_record WHERE sid = {sid}"))
     with pytest.raises(StaleResultError, match=r"ParityRecord.*sid"):
-        next(results)
+        next(iter(results)).record  # noqa: B018
 
 
 def test_weak_chunk_is_rehydrated(database):

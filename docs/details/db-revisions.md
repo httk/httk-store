@@ -101,8 +101,7 @@ revision regardless of `only_latest` (see [Weak links](db-relationships.md#weak-
 ```python
 search = store.searcher(only_latest=True)
 note = search.variable(Note)
-search.output(note, "note")
-current = [row.values[0] for row in search]  # one row per lineage
+current = [row.note for row in search.results(note=note)]  # one row per lineage
 ```
 
 ### Alternatives

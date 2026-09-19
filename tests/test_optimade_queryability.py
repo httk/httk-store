@@ -52,7 +52,7 @@ def store():
 
 
 def _results(searcher):
-    return [item[0][0] for item in searcher]
+    return [item[0] for item in searcher.results()]
 
 
 def test_store_layer_filters_a_query_support_none_property(store) -> None:

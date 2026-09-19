@@ -228,9 +228,8 @@ def test_query_operands_floor_sort_and_optimade_integer_path():
 
         searcher = store.searcher()
         variable = searcher.variable(TimestampNoneRecord)
-        searcher.output(variable, "record")
         searcher.add(variable.store_timestamp <= 1_000_499)
-        assert {result[0][0].value for result in searcher} == {1, 2}
+        assert {row[0].value for row in searcher.results(record=variable)} == {1, 2}
 
         for operand in (
             1_000_499,
@@ -240,30 +239,26 @@ def test_query_operands_floor_sort_and_optimade_integer_path():
         ):
             query = store.searcher()
             candidate = query.variable(TimestampNoneRecord)
-            query.output(candidate, "record")
             query.add(candidate.store_timestamp <= operand)
-            assert list(query)
+            assert list(query.results(record=candidate))
         with pytest.raises(ValueError, match="timezone-aware"):
             _ = variable.store_timestamp <= datetime.datetime(1970, 1, 1)  # noqa: DTZ001
 
         ascending = store.searcher()
         asc = ascending.variable(TimestampNoneRecord)
-        ascending.output(asc, "record")
         ascending.add_sort(asc.store_timestamp)
-        assert [item[0][0].value for item in ascending] == [1, 2]
+        assert [row[0].value for row in ascending.results(record=asc)] == [1, 2]
         descending = store.searcher()
         desc = descending.variable(TimestampNoneRecord)
-        descending.output(desc, "record")
         descending.add_sort(desc.store_timestamp, descending=True)
-        assert [item[0][0].value for item in descending] == [2, 1]
+        assert [row[0].value for row in descending.results(record=desc)] == [2, 1]
 
         exposed = store.searcher()
         exposed_variable = exposed.variable(TimestampNoneRecord)
-        exposed.output(exposed_variable.store_timestamp, "stamp")
-        assert [row[0][0] for row in exposed] == [1_000_000, 1_000_000]
+        assert [row[0] for row in exposed.results(stamp=exposed_variable.store_timestamp)] == [1_000_000, 1_000_000]
 
         optimade = optimade_filter_searcher(store, TimestampNoneRecord, "_httk_store_timestamp <= 1000499")
-        assert {item[0][0].value for item in optimade} == {1, 2}
+        assert {row[0].value for row in optimade.results()} == {1, 2}
 
 
 def test_bulk_uses_one_batch_timestamp_and_keeps_existing_rows():

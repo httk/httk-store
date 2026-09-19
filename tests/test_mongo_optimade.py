@@ -62,7 +62,7 @@ def store(mongo_test_database):
 
 
 def results(searcher):
-    return [item.values[0] for item in searcher]
+    return [item.values[0] for item in searcher.results()]
 
 
 def test_numeric_comparison_on_fraction_field(store):

@@ -382,8 +382,9 @@ def test_sql_optional_child_presence_query(database):
     searcher = fresh.searcher()
     variable = searcher.variable(OptionalChildRoundTrip)
     searcher.add(variable.notes_present == True)
-    searcher.output(variable, "record")
-    assert [result[0][0] for result in searcher] == [fresh.fetch(OptionalChildRoundTrip, sid) for sid in sids[1:]]
+    assert [row.record for row in searcher.results(record=variable)] == [
+        fresh.fetch(OptionalChildRoundTrip, sid) for sid in sids[1:]
+    ]
 
 
 # --------------------------------------------------------------------- referring
@@ -434,7 +435,9 @@ def _subprocess_env() -> dict[str, str]:
 
 
 def test_plain_import_does_not_import_sqlalchemy():
-    code = "import httk.store.backend.sql\nimport sys\nassert 'sqlalchemy' not in sys.modules, 'sqlalchemy was imported'"
+    code = (
+        "import httk.store.backend.sql\nimport sys\nassert 'sqlalchemy' not in sys.modules, 'sqlalchemy was imported'"
+    )
     subprocess.run([sys.executable, "-c", code], check=True, env=_subprocess_env())
 
 

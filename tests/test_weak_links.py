@@ -568,8 +568,7 @@ class Owned:
 
 def _query_labels(searcher, variable):
     """Run a Result search and return the matched labels, sorted."""
-    searcher.output(variable, "r")
-    return sorted(row.values[0].label for row in searcher)
+    return sorted(row.values[0].label for row in searcher.results(r=variable))
 
 
 def test_field_chaining_reflects_latest_target_revision(store_factory):
@@ -869,11 +868,11 @@ def test_link_path_projection_is_rejected(store_factory):
     searcher = store.searcher()
     v = searcher.variable(Result)
     with pytest.raises(UnsupportedQueryError, match="weak-link path"):
-        searcher.output(v.links.projects.name, "pname")
+        searcher._output(v.links.projects.name, "pname")
     with pytest.raises(UnsupportedQueryError, match="weak-link path"):
         searcher.results(pname=v.links.projects.name)
     # The bare link set (no field chaining), by contrast, is a valid output.
-    searcher.output(v.links.projects, "projects")
+    searcher.results(projects=v.links.projects)
 
 
 def test_links_accessor_on_a_freshly_fetched_row(store_factory):
@@ -933,8 +932,7 @@ def test_child_field_has_only_empty_matches_only_empty_collections(store_factory
     searcher = store.searcher()
     v = searcher.variable(Team)
     searcher.add(v.members.has_only())
-    searcher.output(v, "t")
-    assert sorted(row.values[0].lead for row in searcher) == ["lead-b"]
+    assert sorted(row.values[0].lead for row in searcher.results(t=v)) == ["lead-b"]
 
 
 def test_sort_by_weak_link_path_is_rejected(store_factory):
@@ -964,7 +962,7 @@ def test_output_only_link_set_registers_no_join_or_grouping(store_factory):
 
     searcher = store.searcher()
     v = searcher.variable(Result)
-    searcher.output(v.links.projects, "projects")
+    searcher._output(v.links.projects, "projects")
     assert searcher._grouped is False
     assert len(v._joins) == 0
 
@@ -979,11 +977,11 @@ def test_count_is_unaffected_by_an_output_only_link_set(store_factory):
     store.save(Result("R2"))
 
     without = store.searcher()
-    without.output(without.variable(Result), "r")
+    without._output(without.variable(Result), "r")
     with_output = store.searcher()
     wv = with_output.variable(Result)
-    with_output.output(wv, "r")
-    with_output.output(wv.links.projects, "projects")
+    with_output._output(wv, "r")
+    with_output._output(wv.links.projects, "projects")
 
     assert without.count() == with_output.count() == 2
     assert with_output._grouped is False

@@ -21,7 +21,8 @@ from httk.store.backend.schema import (
     TableSchema,
     resolve_schema,
 )
-from httk.store.query import SearchResult, Slicer, UnsupportedQueryError
+from httk.store.query import Slicer, UnsupportedQueryError
+from httk.store.query.protocols import SearchResult
 from httk.store.store_timestamp import ns_operand_to_store_units
 
 if TYPE_CHECKING:
@@ -1283,7 +1284,7 @@ class MongoSearcher:
             self.add(cast(MongoField, variable.store_timestamp) <= self._as_of)
         return variable
 
-    def output(self, variable: "MongoVariable | MongoField | MongoLinkSet", name: str) -> None:
+    def _output(self, variable: "MongoVariable | MongoField | MongoLinkSet", name: str) -> None:
         """Declare an object variable, scalar field, or weak-link-set output.
 
         A weak-link-set output (a bare ``v.links.<name>``) yields a tuple of
@@ -1297,7 +1298,7 @@ class MongoSearcher:
             return
         _reject_link_output(variable)
         if not isinstance(variable, (MongoVariable, MongoField)):
-            raise TypeError(f"output() takes a Mongo variable or field, got {type(variable).__name__}")
+            raise TypeError(f"_output() takes a Mongo variable or field, got {type(variable).__name__}")
         self._outputs.append(_MongoOutput(name, variable))
 
     def add(self, expression: MongoExpression) -> None:
@@ -1629,7 +1630,7 @@ class MongoSearcher:
             values.append(tuple(row))
         return values
 
-    def __iter__(self) -> Iterator[SearchResult]:
+    def _matches(self) -> Iterator[SearchResult]:
         """Yield declared outputs as neutral search results."""
         names = tuple(output.name for output in self._outputs)
         return iter(SearchResult(values, names) for values in self._execute())

@@ -281,9 +281,9 @@ def optimade_filter_searcher(
             sid_column = nested._variables[0].sid
             assert isinstance(sid_column, SqlColumn)
             nested._outputs.clear()
-            nested.output(sid_column, "sid")
+            nested._output(sid_column, "sid")
             related_table = store._table(resolve_schema(related[related_type]).table_name)
-            values = tuple(int(item[0]) for item, _names in nested)
+            values = tuple(int(item[0]) for item, _names in nested._matches())
             with store._read_connection() as connection:
                 return tuple(
                     str(value[0])

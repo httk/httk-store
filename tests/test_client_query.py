@@ -233,9 +233,8 @@ def test_negotiated_base_routes_queries_through_effective_versioned_url() -> Non
     store = OptimadeStore(requested, client=client)
     searcher = store.searcher()
     variable = searcher.variable(store.entry_types[0])
-    searcher.output(variable, "record")
 
-    assert list(searcher) == []
+    assert list(searcher.results(record=variable)) == []
     query_url = client.requests[-1]
     assert query_url.startswith(effective + "/files?")
     assert not query_url.startswith(requested + "/files?")
@@ -271,9 +270,8 @@ def test_structural_filters_exact_literals_and_transport_renaming() -> None:
     searcher.add((expression | variable.always_false()) & variable.always_true())
     searcher.add_sort(variable.nelements, descending=True)
     searcher.add_sort(variable.id)
-    searcher.output(variable, "structure")
 
-    assert list(searcher) == []
+    assert list(searcher.results(structure=variable)) == []
 
     parameters = query_parameters(client)
     rendered = parameters["filter"][0]
@@ -309,9 +307,8 @@ def test_terminating_fraction_spellings_are_exact(fraction: Fraction, rendered: 
     searcher = store.searcher()
     variable = searcher.variable(store.entry_types[0])
     searcher.add(variable.elements_ratios.has_any(fraction))
-    searcher.output(variable, "record")
 
-    list(searcher)
+    list(searcher.results(record=variable))
 
     assert f"elements_ratios HAS ANY {rendered}" in query_parameters(client)["filter"][0]
 
@@ -362,9 +359,8 @@ def test_equality_only_membership_with_null_is_rendered_as_explicit_unknown() ->
     searcher = store.searcher()
     variable = searcher.variable(store.entry_types[0])
     searcher.add(variable.chemical_formula_reduced.is_in(None, "Si"))
-    searcher.output(variable, "record")
 
-    assert list(searcher) == []
+    assert list(searcher.results(record=variable)) == []
     rendered = query_parameters(client)["filter"][0]
     assert "chemical_formula_reduced IS UNKNOWN" in rendered
     assert 'chemical_formula_reduced = "Si"' in rendered
@@ -697,10 +693,9 @@ def test_count_uses_data_returned_and_len_applies_offset_limit_and_cache() -> No
     store, client = make_files([page([], available=99, returned=9)])
     searcher = store.searcher()
     variable = searcher.variable(store.entry_types[0])
-    searcher.output(variable, "record")
     searcher.add_offset(3)
     searcher.set_limit(4)
-    results = searcher.results()
+    results = searcher.results(record=variable)
 
     assert searcher.count() == 9
     assert searcher.count() == 9

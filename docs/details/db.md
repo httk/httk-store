@@ -140,8 +140,8 @@ land here; follow the matching link to the full discussion.
 (continuation-pages)=
 - [Continuation pages](db-querying.md#continuation-pages)
 
-(low-level-portable-protocol)=
-- [Low-level portable protocol](db-querying.md#low-level-portable-protocol)
+(portable-protocol)=
+- [Portable protocol](db-querying.md#portable-protocol)
 
 (neutral-portable-store-profile)=
 - [Neutral portable Store profile](db-querying.md#neutral-portable-store-profile)

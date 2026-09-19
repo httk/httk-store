@@ -270,9 +270,9 @@ class StoreEntryProvider(EntryProvider):
         searcher = self._store.searcher(only_latest=self._only_latest)
         variable = searcher.variable(record)
         searcher.add_sort(variable.sid)
-        searcher.output(variable, "record")
-        searcher.output(variable.sid, "sid")
-        for result in searcher:
+        searcher._output(variable, "record")
+        searcher._output(variable.sid, "sid")
+        for result in searcher._matches():
             yield result[0][0], int(result[0][1])
 
     def records(self, entry_type: str) -> Iterator[Mapping[str, Any]]:

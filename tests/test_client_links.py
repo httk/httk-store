@@ -131,9 +131,8 @@ def test_dotted_relationship_filter_uses_related_types_remote_names() -> None:
     searcher.add(
         (material.links.structures.nelements > 2) & (material.links.structures.chemical_formula_reduced == "Fe2O3")
     )
-    searcher.output(material, "item")
 
-    list(searcher)
+    list(searcher.results(item=material))
 
     rendered = query_params(client.requests[-1])["filter"][0]
     assert "structures.nelements > 2" in rendered
@@ -148,9 +147,8 @@ def test_underscore_prefixed_served_type_traverses_via_relationship() -> None:
     searcher = store.searcher()
     material = searcher.variable(store.entry_type("materials"))
     searcher.add(material.links._httk_records._anyterial_kind == "note")
-    searcher.output(material, "item")
 
-    list(searcher)
+    list(searcher.results(item=material))
 
     rendered = query_params(client.requests[-1])["filter"][0]
     assert '_httk_records._anyterial_kind = "note"' in rendered
@@ -167,7 +165,7 @@ def test_related_field_errors_and_depth_limit_happen_before_http() -> None:
     with pytest.raises(UnsupportedQueryError, match="traversal"):
         _value = material.links.structures.nelements.deeper
     with pytest.raises(UnsupportedQueryError, match="related fields as outputs"):
-        searcher.output(material.links.structures.nelements, "x")
+        searcher._output(material.links.structures.nelements, "x")
     with pytest.raises(UnsupportedQueryError, match="related fields as outputs"):
         searcher.add_sort(material.links.structures.nelements)
     with pytest.raises(UnsupportedQueryError, match="related fields as outputs"):
@@ -199,9 +197,8 @@ def test_root_field_shadows_a_same_named_served_type() -> None:
     # root's own field, this comparison would not yield a _RemoteExpression
     # and add() would reject it before any request was made.
     searcher.add(variable.references == "abc")
-    searcher.output(variable, "item")
 
-    list(searcher)
+    list(searcher.results(item=variable))
 
     assert 'references = "abc"' in query_params(client.requests[-1])["filter"][0]
 
@@ -652,10 +649,9 @@ def test_meta_warnings_are_logged(caplog: pytest.LogCaptureFixture) -> None:
     )
     searcher = store.searcher()
     variable = searcher.variable(store.entry_types[0])
-    searcher.output(variable, "record")
 
     with caplog.at_level(logging.WARNING, logger="httk.store.optimade.remote_query"):
-        list(searcher)
+        list(searcher.results(record=variable))
 
     assert any("filter references unknown property" in message for message in caplog.messages)
     assert any(getattr(rec, "context", None) == "optimade" for rec in caplog.records)

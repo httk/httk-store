@@ -87,7 +87,8 @@ from httk.store.backend.sql.mapping import (
     STORE_TIMESTAMP_COLUMN,
     TARGET_LID_COLUMN,
 )
-from httk.store.query import SearchResult, UnsupportedQueryError
+from httk.store.query import UnsupportedQueryError
+from httk.store.query.protocols import SearchResult
 from httk.store.store_timestamp import ns_operand_to_store_units
 
 if TYPE_CHECKING:
@@ -1291,10 +1292,13 @@ class SqlSearcher:
     """One query under construction against a :class:`~httk.store.backend.sql.store.SqlStore`.
 
     Build the query with :meth:`variable`, :meth:`add` (AND-joined conditions,
-    each placed by the expression itself), :meth:`output`, :meth:`add_sort`,
-    :meth:`set_limit` (``-1`` clears the limit) and :meth:`add_offset` (the
-    public :attr:`offset` attribute is readable and writable). Iterating
-    yields one :class:`~httk.store.query.SearchResult` per match, whose
+    each placed by the expression itself), the backend-internal ``_output()``
+    declaration, :meth:`add_sort`, :meth:`set_limit` (``-1`` clears the limit)
+    and :meth:`add_offset` (the public :attr:`offset` attribute is readable and
+    writable) and consume it through :meth:`SqlSearcher.results`. The
+    backend-internal ``_output()``/``_matches()`` path (see
+    :class:`~httk.store.query.protocols.BackendSearcher`) yields one
+    ``SearchResult`` per match, whose
     ``values`` holds one entry per declared output — a lazy row for variable
     outputs (bypassing the identity cache), the raw column value for column outputs. :meth:`count`
     returns the number of matches, disregarding any limit and offset.
@@ -1397,7 +1401,7 @@ class SqlSearcher:
         subquery = sqlalchemy.select(sqlalchemy.literal(1)).select_from(newer).where(*conds).correlate(alias)
         return _same(~subquery.exists())
 
-    def output(self, variable: "SqlVariable | SqlColumn | SqlLinkSet | SqlStrongLinkSet", name: str) -> None:
+    def _output(self, variable: "SqlVariable | SqlColumn | SqlLinkSet | SqlStrongLinkSet", name: str) -> None:
         """Append an output for a reconstructed instance, a raw column value, or a link set.
 
         A weak-link-set output (a bare ``v.links.<name>``) yields a tuple of
@@ -1477,7 +1481,7 @@ class SqlSearcher:
             )
         else:
             raise TypeError(
-                f"output() takes a search variable, a search column, or a link set, got {type(variable).__name__}"
+                f"_output() takes a search variable, a search column, or a link set, got {type(variable).__name__}"
             )
 
     def add(self, expression: SqlExpression) -> None:
@@ -1508,7 +1512,7 @@ class SqlSearcher:
             # A weak-link traversal is a variable-length joined column; ordering
             # by it would ORDER BY an unaggregated joined column under grouped
             # mode (a dialect error or an arbitrary pick). Same rule as the
-            # projection rejection in output().
+            # projection rejection in _output().
             raise UnsupportedQueryError(
                 "cannot sort by a weak-link path; weak-link traversals are usable only as search predicates"
             )
@@ -1629,8 +1633,8 @@ class SqlSearcher:
         with self._store._read_connection() as connection:
             return int(connection.execute(count_statement).scalar_one())
 
-    def __iter__(self) -> Iterator[SearchResult]:
-        """Run the query; yield a :class:`~httk.store.query.SearchResult` per match.
+    def _matches(self) -> Iterator[SearchResult]:
+        """Run the query; yield a ``SearchResult`` per match.
 
         ``values`` holds one entry per declared output (reconstructed instance
         or raw column value), ``names`` the names they were declared under.
@@ -1638,7 +1642,7 @@ class SqlSearcher:
         :return: An iterator yielding one search result per match.
         """
         if not self._outputs:
-            raise ValueError("this searcher has no outputs; call output() before iterating")
+            raise ValueError("no outputs are declared; use results(name=variable)")
         if self._vacuous:
             return iter(())
         columns = [output.element for output in self._outputs]

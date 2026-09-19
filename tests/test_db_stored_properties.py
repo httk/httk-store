@@ -322,7 +322,7 @@ def plan(request):
 
 
 def _records(searchers):
-    return [result[0][0] for searcher in searchers for result in searcher]
+    return [row[0] for searcher in searchers for row in searcher.results()]
 
 
 def test_plan_projects_concrete_backings_and_nullable_missing_properties(plan):

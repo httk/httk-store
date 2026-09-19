@@ -57,7 +57,7 @@ class SqliteStore(SqlStore):
     :param degraded: Open with autocommit isolation for degraded-mode access
         (recovery and inspection) instead of the default transactional isolation.
     :param \\**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
-        (``entry_records``, ``entry_ids``, ``upgrade``, ...).
+        (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
     """
 
     def __init__(
@@ -86,7 +86,7 @@ class DuckdbStore(SqlStore):
         ``"1GB"``; ``None`` falls back to the ``HTTK_DUCKDB_MEMORY_LIMIT``
         environment variable.
     :param \\**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
-        (``entry_records``, ``entry_ids``, ``upgrade``, ...).
+        (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
     """
 
     def __init__(
@@ -111,7 +111,7 @@ class PostgresqlStore(SqlStore):
     :param url: PostgreSQL SQLAlchemy URL or URL string.
     :param database: The database name overriding the URL path, if supplied.
     :param \\**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
-        (``entry_records``, ``entry_ids``, ``upgrade``, ...).
+        (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
     """
 
     def __init__(
@@ -135,7 +135,7 @@ class ClickhouseStore(SqlStore):
     :param url: ClickHouse SQLAlchemy URL or URL string.
     :param database: The database name overriding the URL path, if supplied.
     :param \\**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
-        (``entry_records``, ``entry_ids``, ``upgrade``, ...).
+        (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
     """
 
     def __init__(

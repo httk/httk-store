@@ -57,3 +57,44 @@ search DSL and stored properties, record replacement lineages, bulk ingestion
 (including `bulk_ingest(workers=N)` and the crash-safe `finalize="deferred"`
 fresh-store profile), the permanentization role model with `store.fsck()`
 recovery, OPTIMADE serving, and store-layout versioning.
+
+## Serving application records
+
+For a small application-defined OPTIMADE dataset, *httk-core* provides
+`EntryRecord`, `DataEntryRecord`, and `entry_record`. The decorator supplies
+the durable identifiers and direct property mappings; pass the decorated
+classes to the SQL store with `records=`:
+
+```python
+from typing import Annotated
+
+from httk.core import DataEntryRecord, Property, entry_record
+from httk.store import EntryIdScheme, SqliteStore
+
+
+@entry_record("example.result")
+class Result(DataEntryRecord):
+    formation_energy: Annotated[
+        float,
+        Property(description="Formation energy per atom.", unit="eV"),
+    ]
+
+
+store = SqliteStore(
+    "results.sqlite",
+    records=[Result],
+    entry_ids=EntryIdScheme("example", "1"),
+)
+store.save(Result(formation_energy=-1.25))
+store.close()
+```
+
+The same `records=[Result]` declaration is supplied when reopening the store.
+Records referenced by fields are discovered recursively when their classes are
+registered or decorated, so a `structure: UnitcellStructureRecord` field also
+declares the registered structures family. Use `entry_records=` or `entry_families=` for
+the existing explicit declaration APIs; `records=` is mutually exclusive with
+those forms. Multiple decorated records with the same family type are grouped
+into one local family and their property definitions must agree where names
+overlap. Existing plain frozen dataclasses should continue to use the explicit
+declaration APIs.

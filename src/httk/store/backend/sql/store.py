@@ -236,6 +236,7 @@ class SqlStore:
     :param database: The database used for storage.
     :param entry_records: The required entry-family declaration when first opening a database.
     :param entry_families: Application-owned declarations which bypass global registration.
+    :param records: Decorated application entry records; mutually exclusive with the explicit declarations.
     :param entry_ids: Optional scheme used to mint ids for defined entry families.
     :param store_timestamps: Whether parent rows carry store-managed timestamps.
     :param store_timestamp_resolution: Nanoseconds represented by one stored unit.
@@ -265,6 +266,7 @@ class SqlStore:
         *,
         entry_records: Mapping[type, type | tuple[type, ...]] | None = None,
         entry_families: Sequence[EntryFamilyDeclaration] | None = None,
+        records: Sequence[type] | None = None,
         entry_ids: EntryIdScheme | None = None,
         store_timestamps: bool = True,
         store_timestamp_resolution: int = 1000,
@@ -317,7 +319,9 @@ class SqlStore:
             # initialization can create metadata, and a dispose interleaving
             # must never leave a later write able to acquire an unowned lease.
             self._register_degraded_lifecycle_fence()
-        supplied = normalize_entry_declaration(entry_records, entry_families)
+        if records is not None and (entry_records is not None or entry_families is not None):
+            raise TypeError("records is mutually exclusive with entry_records and entry_families")
+        supplied = normalize_entry_declaration(entry_records, entry_families, records)
         self._initialize_layout(supplied)
         self._entry_record_types: dict[type, tuple[str, int, int]] = {
             record: (self._family_entry_type(family.family), len(family.records), backing_index)

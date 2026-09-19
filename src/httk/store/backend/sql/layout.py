@@ -30,6 +30,9 @@ from httk.store.storage_layout import (
 from httk.store.storage_layout import (
     normalize_entry_records as _normalize_entry_records,
 )
+from httk.store.storage_layout import (
+    normalize_entry_types as _normalize_entry_types,
+)
 
 __all__ = [
     "METADATA_TABLE_NAME",
@@ -50,6 +53,7 @@ __all__ = [
     "normalize_entry_declaration",
     "normalize_entry_families",
     "normalize_entry_records",
+    "normalize_entry_types",
     "read_store_metadata",
 ]
 
@@ -197,16 +201,32 @@ def normalize_entry_families(entry_families: Sequence[EntryFamilyDeclaration]) -
     return layout
 
 
+def normalize_entry_types(records: Sequence[type]) -> StorageLayout:
+    """Normalize decorated entry-record classes and validate SQL names.
+
+    :param records: Explicit decorated application record classes.
+    :return: The complete layout, including referenced entry families.
+    :raises TypeError: If the declaration has unsupported types.
+    :raises ValueError: If entry declarations or physical names conflict.
+    """
+    layout = _normalize_entry_types(records)
+    _validate_physical_names(layout)
+    return layout
+
+
 def normalize_entry_declaration(
     entry_records: Mapping[type, type | tuple[type, ...]] | None,
     entry_families: Sequence[EntryFamilyDeclaration] | None,
+    records: Sequence[type] | None = None,
 ) -> StorageLayout | None:
-    """Merge registered and application-owned declarations and validate SQL names."""
+    """Merge store declarations and validate SQL names."""
     layouts = []
     if entry_records is not None:
         layouts.append(_normalize_entry_records(entry_records))
     if entry_families is not None:
         layouts.append(_normalize_entry_families(entry_families))
+    if records is not None:
+        layouts.append(_normalize_entry_types(records))
     if not layouts:
         return None
     layout = _merge_storage_layouts(*layouts)

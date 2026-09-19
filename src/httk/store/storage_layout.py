@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, Final, cast
 
+from httk.core import PropertyDefinition
 from httk.core.register import (
     entry_family_info,
     entry_record_info,
@@ -39,6 +40,7 @@ __all__ = [
     "declaration_json",
     "normalize_entry_families",
     "normalize_entry_records",
+    "normalize_entry_types",
     "schema_fingerprint_diff",
     "schema_fingerprint_json",
     "validate_entry_id_fields",
@@ -321,6 +323,183 @@ def normalize_entry_families(entry_families: Sequence[EntryFamilyDeclaration]) -
     if any(not isinstance(item, EntryFamilyDeclaration) for item in entry_families):
         raise TypeError("entry_families must contain EntryFamilyDeclaration values")
     return _normalize_entry_families(entry_families, explicit=True)
+
+
+def normalize_entry_types(records: Sequence[type]) -> StorageLayout:
+    """Build a family declaration from decorated application record classes.
+
+    ``records`` is the short declaration used by the beginner-facing store
+    API.  Each class supplies its stable ``__httk_entry_name__`` and inherits
+    the family ``type`` and ``definition_id`` from a core entry-record base.
+    Registered record classes referenced by those records are included
+    recursively, so a record containing (for example) a structure also makes
+    the structure family available to a serving provider.
+
+    :param records: Decorated frozen entry-record classes to serve.
+    :return: The normalized storage layout.
+    :raises TypeError: If ``records`` is not a sequence of classes.
+    :raises ValueError: If a class has incomplete or conflicting entry metadata.
+    """
+    if not isinstance(records, Sequence) or isinstance(records, str | bytes):
+        raise TypeError("records must be a sequence of entry-record classes")
+    if not records:
+        raise ValueError("records cannot be empty")
+    if any(not isinstance(record, type) for record in records):
+        raise TypeError("records must contain entry-record classes")
+    if len(set(records)) != len(records):
+        raise ValueError("records repeats an entry-record class")
+
+    declarations: dict[str, EntryFamilyDeclaration] = {}
+    decorated_groups: dict[tuple[str, str], list[tuple[str, type]]] = {}
+    pending = [(record, "decorated") for record in records]
+    visited: set[type] = set()
+    while pending:
+        record, mode = pending.pop(0)
+        if record in visited:
+            continue
+        visited.add(record)
+        decorated_name = vars(record).get("__httk_entry_name__")
+        if mode == "decorated" or decorated_name is not None:
+            name = decorated_name
+            if not isinstance(name, str) or not name.strip() or name != name.strip():
+                raise ValueError(f"{record.__name__} must declare a nonempty __httk_entry_name__")
+            registered_name = None
+        else:
+            if mode == "private":
+                _queue_referenced_records(record, pending)
+                continue
+            registered_name = _registered_record_name(record)
+            name = registered_name
+        family_name = getattr(record, "type", None)
+        definition_id = getattr(record, "definition_id", None)
+        if registered_name is not None:
+            _, family_name, record_definition_id = entry_record_info(registered_name)
+            if family_name is None:
+                raise ValueError(f"registered entry record {registered_name!r} has no entry family")
+            family_definition_id = entry_family_info(family_name)[1]
+            definition_id = family_definition_id
+        else:
+            record_definition_id = definition_id
+        if not isinstance(family_name, str) or not family_name.strip() or family_name != family_name.strip():
+            raise ValueError(f"{record.__name__}.type must be a nonempty entry-family name")
+        if definition_id is not None and (not isinstance(definition_id, str) or not definition_id.strip()):
+            raise ValueError(f"{record.__name__}.definition_id must be a nonempty string or None")
+        if registered_name is None:
+            if not isinstance(definition_id, str):
+                raise ValueError(f"{record.__name__}.definition_id must be a nonempty string")
+            decorated_groups.setdefault((family_name, definition_id), []).append((name, record))
+            _queue_referenced_records(record, pending)
+            continue
+        else:
+            try:
+                family_reference, registered_definition = entry_family_info(family_name)
+                family = resolve_entry_family(family_name)
+            except ValueError as error:
+                raise ValueError(f"{record.__name__}.type {family_name!r} is not a registered entry family") from error
+            if not isinstance(family_reference, str):  # pragma: no cover - registry validates this
+                raise TypeError(f"entry family {family_name!r} has an invalid registry reference")
+        if definition_id != registered_definition:
+            raise ValueError(
+                f"{record.__name__}.definition_id {definition_id!r} does not match family "
+                f"{family_name!r} definition {registered_definition!r}"
+            )
+        declaration = declarations.get(family_name)
+        record_declaration = EntryRecordDeclaration(name=name, record=record, definition_id=record_definition_id)
+        if declaration is None:
+            declarations[family_name] = EntryFamilyDeclaration(
+                name=family_name,
+                family=family,
+                records=(record_declaration,),
+                definition_id=definition_id,
+            )
+        else:
+            if declaration.family is not family or declaration.definition_id != definition_id:
+                raise ValueError(f"entry record {name!r} conflicts with family {family_name!r}")
+            declarations[family_name] = dataclasses.replace(
+                declaration, records=declaration.records + (record_declaration,)
+            )
+
+        _queue_referenced_records(record, pending)
+
+    entry_type_definitions: dict[str, str] = {}
+    for (entry_type, definition_id), group in decorated_groups.items():
+        previous_definition = entry_type_definitions.get(entry_type)
+        if previous_definition is not None and previous_definition != definition_id:
+            raise ValueError(f"decorated records use conflicting definitions for entry type {entry_type!r}")
+        entry_type_definitions[entry_type] = definition_id
+        family_name = f"__httk_{entry_type}"
+        if family_name in declarations or family_name in known_entry_families():
+            raise ValueError(f"application entry family name {family_name!r} conflicts with an existing family")
+        family = _application_entry_family(family_name, entry_type, definition_id, tuple(record for _, record in group))
+        declarations[family_name] = EntryFamilyDeclaration(
+            name=family_name,
+            family=family,
+            records=tuple(
+                EntryRecordDeclaration(name=name, record=record, definition_id=definition_id) for name, record in group
+            ),
+            definition_id=definition_id,
+        )
+
+    return _normalize_entry_families(tuple(declarations.values()), explicit=True)
+
+
+def _queue_referenced_records(record: type, pending: list[tuple[type, str]]) -> None:
+    """Queue decorated and registered records reachable from ``record``."""
+    for target in resolve_schema(record).referenced_classes():
+        if vars(target).get("__httk_entry_name__") is not None:
+            pending.append((target, "decorated"))
+            continue
+        try:
+            target_name = _registered_record_name(target)
+        except ValueError:
+            pending.append((target, "private"))
+        else:
+            _, target_family, _ = entry_record_info(target_name)
+            pending.append(
+                (resolve_entry_record(target_name), "registered") if target_family is not None else (target, "private")
+            )
+
+
+def _application_entry_family(name: str, entry_type: str, definition_id: str, records: tuple[type, ...]) -> type:
+    """Create the local logical family shared by decorated records of one type."""
+    from httk.core import load_entry_type_definition
+
+    base = load_entry_type_definition(definition_id)
+    properties: dict[str, PropertyDefinition] = {}
+    for record in records:
+        factory = getattr(record, "entry_type_definition", None)
+        if not callable(factory):
+            raise TypeError(f"{record.__name__} must provide entry_type_definition()")
+        definition = factory()
+        definition_properties = getattr(definition, "properties", None)
+        if not isinstance(definition_properties, Mapping):
+            raise TypeError(f"{record.__name__}.entry_type_definition() has no properties mapping")
+        for property_name, property_definition in definition_properties.items():
+            if not isinstance(property_name, str) or not isinstance(property_definition, PropertyDefinition):
+                raise TypeError(f"{record.__name__}.entry_type_definition() has invalid property metadata")
+            if property_name in base.properties:
+                continue
+            previous = properties.get(property_name)
+            if previous is not None and previous != property_definition:
+                raise ValueError(f"decorated records disagree about property {property_name!r}")
+            properties[property_name] = property_definition
+    extended = base.extended(properties)
+
+    def entry_type_definition(cls: type) -> object:
+        return extended
+
+    family = type(
+        "_ApplicationEntryFamily",
+        (),
+        {
+            "__module__": __name__,
+            "__httk_entry_name__": name,
+            "type": entry_type,
+            "definition_id": definition_id,
+            "entry_type_definition": classmethod(entry_type_definition),
+        },
+    )
+    return family
 
 
 def _normalize_entry_families(declarations: Sequence[EntryFamilyDeclaration], *, explicit: bool) -> StorageLayout:

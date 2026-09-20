@@ -160,7 +160,7 @@ def test_store_accessor_plans_prefixed_family_in_wire_form(mongo_test_database) 
 def test_candidate_streams_are_id_only_and_verified(plan):
     streams = plan.candidate_searchers('_httk_selector = "composition"', sort=(("immutable_id", False),))
     assert len(streams) == 2
-    rows = [row for stream in streams for row in stream.searcher.results()]
+    rows = [result.values for stream in streams for result in stream.searcher._matches()]
     assert [row[0] for row in rows]
     assert all(isinstance(row[1], str) for row in rows)
     assert len(rows) == 1
@@ -178,7 +178,7 @@ def test_public_id_prefix_filters_sorts_and_candidate_streams(plan):
     plan.store.save(additional)
     streams = plan.candidate_searchers(sort=(("id", False),), public_id_prefix=prefix)
     first_stream = next(stream for stream in streams if stream.backing is GenericCalculationFirst)
-    rows = list(first_stream.searcher.results())
+    rows = [result.values for result in first_stream.searcher._matches()]
     assert all(row[1].startswith("httk.test-1-") for row in rows)
     # Four fixed outputs (sid, id, immutable_id, alt_kind) precede the sort values.
     assert [row[4] for row in rows] == sorted(prefix + row[1] for row in rows)
@@ -269,8 +269,13 @@ def test_optional_child_presence_and_response_serialization(plan):
     ]
     streams = plan.candidate_searchers(sort=(("type", True), ("immutable_id", False)))
     assert all(stream.sort_count == 2 for stream in streams)
+    # Candidates use the raw federation interface, including the injected type sort key.
+    results = [result for stream in streams for result in stream.searcher._matches()]
+    assert len(results) == 2
     # Four fixed outputs (sid, id, immutable_id, alt_kind) precede the two sort
     # values, followed by the store timestamp.
+    assert all(result.values[4] == "calculations" and len(result.values) == 7 for result in results)
     assert all(
-        result[4] == "calculations" and len(result) == 7 for stream in streams for result in stream.searcher.results()
+        result.names == ("sid", "id", "immutable_id", "alt_kind", "sort_0", "sort_1", "store_timestamp")
+        for result in results
     )

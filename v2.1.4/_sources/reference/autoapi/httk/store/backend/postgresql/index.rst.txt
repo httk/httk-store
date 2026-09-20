@@ -1,0 +1,28 @@
+httk.store.backend.postgresql
+=============================
+
+.. py:module:: httk.store.backend.postgresql
+
+.. autoapi-nested-parse::
+
+   PostgreSQL-specific support for the SQL storage backend.
+
+   The dialect-agnostic engine wrapper and store live in
+   :mod:`httk.store.backend.sql`; this package holds the PostgreSQL constructor
+   (:func:`httk.store.backend.postgresql.engine.database`) and the ``@compiles``
+   hook rewriting ``httk_fraction_scaled_equal`` to inline SQL in
+   :mod:`httk.store.backend.postgresql.compiler`.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/store/backend/postgresql/compiler/index
+   /reference/autoapi/httk/store/backend/postgresql/engine/index
+   /reference/autoapi/httk/store/backend/postgresql/hooks/index
+
+

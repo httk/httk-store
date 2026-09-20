@@ -1,0 +1,115 @@
+httk.store.backend.sql.stores
+=============================
+
+.. py:module:: httk.store.backend.sql.stores
+
+.. autoapi-nested-parse::
+
+   Per-dialect stores that build and own their :class:`~httk.store.backend.sql.engine.Backend`.
+
+   These are thin :class:`~httk.store.backend.sql.store.SqlStore` subclasses whose
+   name selects the database engine and whose first argument is only the location:
+   ``SqliteStore("results.sqlite")`` instead of
+   ``SqlStore(Backend.sqlite("results.sqlite"))``.  Each builds the matching
+   ``Backend``, owns it, and disposes it on :meth:`~httk.store.backend.sql.store.SqlStore.close`
+   or when leaving a ``with`` block.
+
+   For a custom SQLAlchemy engine, one ``Backend`` shared across several stores or
+   a ``with Backend.sqlite(...) as db:`` block, or ``degraded=True`` recovery, use
+   the two-object form :class:`~httk.store.backend.sql.engine.Backend` +
+   :class:`~httk.store.backend.sql.store.SqlStore` directly.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stores.SqliteStore
+   httk.store.backend.sql.stores.DuckdbStore
+   httk.store.backend.sql.stores.PostgresqlStore
+   httk.store.backend.sql.stores.ClickhouseStore
+
+
+Module Contents
+---------------
+
+.. py:class:: SqliteStore(path = None, *, degraded = False, **store_options)
+
+   Bases: :py:obj:`httk.store.backend.sql.store.SqlStore`
+
+
+   An SQLite store that builds and owns its :class:`~httk.store.backend.sql.engine.Backend`.
+
+   The store owns the backend it builds and disposes it on :meth:`~httk.store.backend.sql.store.SqlStore.close` or
+   when leaving a ``with`` block.  For a custom SQLAlchemy engine or a
+   ``Backend`` shared across a ``with`` block, use :class:`~httk.store.backend.sql.engine.Backend` and
+   :class:`~httk.store.backend.sql.store.SqlStore` directly.
+
+   :param path: The database file path, or ``None`` for an in-memory database.
+   :param degraded: Open with autocommit isolation for degraded-mode access
+       (recovery and inspection) instead of the default transactional isolation.
+   :param \**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
+       (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
+
+
+.. py:class:: DuckdbStore(path = None, *, read_only = False, memory_limit = None, **store_options)
+
+   Bases: :py:obj:`httk.store.backend.sql.store.SqlStore`
+
+
+   A DuckDB store that builds and owns its :class:`~httk.store.backend.sql.engine.Backend`.
+
+   The store owns the backend it builds and disposes it on :meth:`~httk.store.backend.sql.store.SqlStore.close` or
+   when leaving a ``with`` block.  For a custom SQLAlchemy engine or a
+   ``Backend`` shared across a ``with`` block, use :class:`~httk.store.backend.sql.engine.Backend` and
+   :class:`~httk.store.backend.sql.store.SqlStore` directly.
+
+   :param path: The database file path, or ``None`` for an in-memory database.
+   :param read_only: Open the file in DuckDB ``READ_ONLY`` access mode, so
+       several processes may open it concurrently for reading; writes then fail.
+       Ignored for the in-memory database.
+   :param memory_limit: An optional DuckDB ``memory_limit`` setting such as
+       ``"1GB"``; ``None`` falls back to the ``HTTK_DUCKDB_MEMORY_LIMIT``
+       environment variable.
+   :param \**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
+       (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
+
+
+.. py:class:: PostgresqlStore(url, *, database = None, **store_options)
+
+   Bases: :py:obj:`httk.store.backend.sql.store.SqlStore`
+
+
+   A PostgreSQL store that builds and owns its :class:`~httk.store.backend.sql.engine.Backend`.
+
+   The store owns the backend it builds and disposes it on :meth:`~httk.store.backend.sql.store.SqlStore.close` or
+   when leaving a ``with`` block.  For a custom SQLAlchemy engine or a
+   ``Backend`` shared across a ``with`` block, use :class:`~httk.store.backend.sql.engine.Backend` and
+   :class:`~httk.store.backend.sql.store.SqlStore` directly.
+
+   :param url: PostgreSQL SQLAlchemy URL or URL string.
+   :param database: The database name overriding the URL path, if supplied.
+   :param \**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
+       (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
+
+
+.. py:class:: ClickhouseStore(url, *, database = None, **store_options)
+
+   Bases: :py:obj:`httk.store.backend.sql.store.SqlStore`
+
+
+   A ClickHouse store that builds and owns its :class:`~httk.store.backend.sql.engine.Backend`.
+
+   The store owns the backend it builds and disposes it on :meth:`~httk.store.backend.sql.store.SqlStore.close` or
+   when leaving a ``with`` block.  For a custom SQLAlchemy engine or a
+   ``Backend`` shared across a ``with`` block, use :class:`~httk.store.backend.sql.engine.Backend` and
+   :class:`~httk.store.backend.sql.store.SqlStore` directly.
+
+   :param url: ClickHouse SQLAlchemy URL or URL string.
+   :param database: The database name overriding the URL path, if supplied.
+   :param \**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
+       (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
+
+

@@ -1,0 +1,265 @@
+httk.store.backend.sql.stored_properties
+========================================
+
+.. py:module:: httk.store.backend.sql.stored_properties
+
+.. autoapi-nested-parse::
+
+   SQL plans for property-mapped durable entry backings.
+
+   This module translates the backend-neutral
+   :class:`httk.core.storage.StoredPropertyProjection` callbacks declared by one concrete
+   record backing into SQLAlchemy predicates.  A logical entry family supplies its
+   entry type and OPTIMADE definition; every backing configured for that family in
+   the :class:`~httk.store.backend.sql.store.SqlStore` supplies only the properties it can
+   actually represent.
+
+   The plan is deliberately independent of serving.  It exposes concrete-record
+   responses and one SQL searcher per backing, leaving a later protocol adapter to
+   apply public ids, merge backing result streams, and construct envelopes.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stored_properties.StoredPropertySqlConfigurationError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stored_properties.RelationshipSourceMap
+   httk.store.backend.sql.stored_properties.StoredPropertySqlCandidateStream
+   httk.store.backend.sql.stored_properties.StoredPropertySqlPlan
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stored_properties.stored_property_sql_plan
+
+
+Module Contents
+---------------
+
+.. py:exception:: StoredPropertySqlConfigurationError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A configured family/backing cannot realize its declared entry definition.
+
+
+.. py:class:: RelationshipSourceMap
+
+   Carry resolved mount prefixes and wire names for one source's relationships.
+
+   Federations derive this mapping from their source inventory.
+
+   :param prefixes: Loose-edge forward target prefixes keyed by internal family type.
+   :param reverse_prefixes: Prefixes of reverse source mounts keyed by their concrete backing class.
+   :param wire_types: Served relationship target names keyed by internal family type.
+   :param backing_prefixes: Typed target prefixes keyed by their concrete backing class.
+   :param target_backings: Mounted loose-edge target record classes keyed by internal family type.
+
+
+   .. py:attribute:: prefixes
+      :type:  collections.abc.Mapping[str, str]
+
+
+   .. py:attribute:: reverse_prefixes
+      :type:  collections.abc.Mapping[type, tuple[str, ...]]
+
+
+   .. py:attribute:: wire_types
+      :type:  collections.abc.Mapping[str, str]
+
+
+   .. py:attribute:: backing_prefixes
+      :type:  collections.abc.Mapping[type, str]
+
+
+   .. py:attribute:: target_backings
+      :type:  collections.abc.Mapping[str, tuple[type, ...]]
+
+
+.. py:class:: StoredPropertySqlCandidateStream
+
+   One raw, SQL-bounded backing stream for a later federation merge.
+
+   ``searcher`` outputs only ``sid``, stored ``id``, stored ``immutable_id``,
+   stored ``alt_kind`` (NULL for mains), and one raw SQL value per requested
+   sort property.  Iterating it therefore never hydrates a record; a
+   federation can select its final page before fetching any object graph.
+
+   :param backing: The concrete record class represented by the stream.
+   :param backing_name: The stable persisted name of the backing.
+   :param searcher: The SQL searcher yielding the candidate projections.
+   :param sort_count: The number of requested sort projections in each row.
+   :param timestamp_output: Whether each row ends with a canonical timestamp value.
+
+
+   .. py:attribute:: backing
+      :type:  type
+
+
+   .. py:attribute:: backing_name
+      :type:  str
+
+
+   .. py:attribute:: searcher
+      :type:  httk.store.backend.sql.searcher.SqlSearcher
+
+
+   .. py:attribute:: sort_count
+      :type:  int
+
+
+   .. py:attribute:: timestamp_output
+      :type:  bool
+      :value: False
+
+
+
+.. py:class:: StoredPropertySqlPlan(store, family, layout, entry_type, definition, backings)
+
+   Validated responses and SQL queries for one configured logical entry family.
+
+   The plan has no federation semantics: :meth:`filter_searchers` returns one
+   independent searcher per configured concrete backing.  That explicit shape
+   preserves backing-local property semantics for a future protocol adapter.
+
+   :param store: The SQL store containing the configured family.
+   :param family: The logical entry-family class.
+   :param layout: The resolved persisted layout for the family.
+   :param entry_type: The served entry type name.
+   :param definition: The entry definition used for property validation.
+   :param backings: The validated concrete backing plans in persisted order.
+
+
+   .. py:attribute:: store
+
+
+   .. py:attribute:: family
+
+
+   .. py:attribute:: layout
+
+
+   .. py:attribute:: entry_type
+
+
+   .. py:attribute:: definition
+
+
+   .. py:property:: backings
+      :type: tuple[type, ...]
+
+
+      Return the configured concrete record classes in persisted order.
+
+      :return: The configured backing classes.
+
+
+   .. py:method:: records()
+
+      Yield protocol-boundary rows projected from concrete backing records.
+
+      :yield: A projected protocol-boundary row.
+
+
+
+   .. py:method:: filter_searchers(filter_string, *, sort = (), public_id_prefix = '', as_of = None, only_latest = False, revisions = False, alternatives = False, related_property_resolver = None)
+
+      Return one concrete-backing SQL searcher for an OPTIMADE filter and sort list.
+
+      :param filter_string: The OPTIMADE filter or parsed filter tree.
+      :param sort: The property sort keys and directions.
+      :param public_id_prefix: The prefix used when filtering or sorting ids.
+      :param as_of: Optional historic cutoff in canonical timestamp form.
+      :param only_latest: Whether root variables are restricted to the latest row of each lineage.
+      :param revisions: Whether ids render immutable revisions instead of mains (mains-only lineage stream).
+      :param alternatives: Whether the stream serves named alternatives with composite ``<id>~<kind>`` ids.
+      :param related_property_resolver: Optional depth-1 related-property resolver; the default matches nothing.
+      :return: One searcher for each configured backing.
+
+
+
+   .. py:method:: candidate_searchers(filter_string = None, *, sort = (), public_id_prefix = '', as_of = None, only_latest = False, revisions = False, alternatives = False, related_property_resolver = None, relationship_source_map = None)
+
+      Return ID-only concrete streams for a bounded federated page.
+
+      ``None`` emits the query context's portable true predicate.  It never
+      adds an ``ORDER BY`` unless a sort was explicitly requested.  The
+      supplied public-id prefix participates in both the intrinsic id
+      filter handlers and id sort expression.  Every row also carries the
+      raw ``alt_kind`` (NULL for mains) so a federation can render composite
+      alternative ids without a second read.
+
+      :param filter_string: The OPTIMADE filter, parsed filter tree, or no filter.
+      :param sort: The property sort keys and directions.
+      :param public_id_prefix: The prefix used when filtering or sorting ids.
+      :param as_of: Optional historic cutoff in canonical timestamp form.
+      :param only_latest: Whether root variables are restricted to the latest row of each lineage.
+      :param revisions: Whether ids render immutable revisions instead of mains (mains-only lineage stream).
+      :param alternatives: Whether the stream serves named alternatives with composite ``<id>~<kind>`` ids.
+      :param related_property_resolver: Optional depth-1 related-property resolver; the default matches nothing.
+      :param relationship_source_map: Resolved relationship mount prefixes and wire names, when federated.
+      :return: One candidate stream for each configured backing.
+
+
+
+   .. py:method:: response_row(backing, record, *, public_id = None, httk_id = None, revisions = False, kind = None, store_timestamp = None, fields = None)
+
+      Render one hydrated backing record at the protocol boundary.
+
+      :param backing: The configured concrete class of ``record``.
+      :param record: The hydrated backing record to project.
+      :param public_id: The public id to use, or the record's canonical id when omitted.
+      :param httk_id: The plain group entry id rendered for ``_httk_id`` when serving revisions or alternatives.
+      :param revisions: Whether the row is served from a revision stream (synthesizes ``_httk_id``).
+      :param kind: The alternative kind rendered for ``_httk_kind`` when serving alternatives, else ``None``.
+      :param store_timestamp: An already-normalized timestamp from a candidate stream, when available.
+      :param fields: The response property names to render, or ``None`` to render every configured property.
+      :return: The protocol-boundary response row.
+      :raises StoredPropertySqlConfigurationError: If ``backing`` is not configured for the family.
+
+
+
+.. py:function:: stored_property_sql_plan(store, family, *, served = None)
+
+   Validate and return the SQL property plan for one configured logical family.
+
+   The family must be present in ``store.entry_layout``; unconfigured family
+   classes and their records cannot accidentally become part of a durable
+   entry source. ``id``, ``type``, ``immutable_id``, ``_httk_id``, and
+   ``_httk_kind`` are intrinsic: a concrete backing's store-minted identifiers
+   and the family's fixed entry type. Backings must not redeclare any intrinsic
+   property.
+
+   The family's internal definition is used only to establish identity (that
+   the family and its records agree on one durable definition). Everything the
+   plan then serves — the entry ``type``, the property set that response and
+   filter/sort validation runs against, and the projection names backings must
+   match — is taken from ``served``: the OPTIMADE wire form of that definition
+   (see ``EntryTypeDefinition.served_form()``). A prefixed family
+   declares its ``__httk_stored_properties__`` projections under those served
+   names, so it MUST be planned with ``served=`` set; without it the bare
+   internal definition rejects the prefixed projection keys as unknown. When
+   ``served`` is omitted the internal definition serves itself, which is
+   byte-identical for standard (unprefixed) families.
+
+   :param store: The SQL store containing the configured family.
+   :param family: The logical entry-family class to validate.
+   :param served: The served (wire) definition to serve, or ``None`` for the internal definition.
+   :return: The validated SQL property plan.
+   :raises StoredPropertySqlConfigurationError: If the family or any backing is inconsistent with its definition.
+
+

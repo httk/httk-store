@@ -1,0 +1,331 @@
+httk.store.backend.sql.stored_federation
+========================================
+
+.. py:module:: httk.store.backend.sql.stored_federation
+
+.. autoapi-nested-parse::
+
+   Bounded, durable federation of stored entry-family property plans.
+
+   Unlike :mod:`httk.store.federated_store`, which is the general portable query
+   protocol, this module joins only configured durable entry families.
+   It can therefore retain a stable backing inventory, push candidate filtering
+   and bounds into SQL, and delay record hydration until a global page is known.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stored_federation.RelatedResolverFactory
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stored_federation.DuplicateEntryIdError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stored_federation.StoredEntrySource
+   httk.store.backend.sql.stored_federation.StoredEntryOrigin
+   httk.store.backend.sql.stored_federation.StoredEntryPage
+   httk.store.backend.sql.stored_federation.StoredEntryFederation
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.stored_federation.related_property_resolver_factory
+
+
+Module Contents
+---------------
+
+.. py:type:: RelatedResolverFactory
+   :canonical: Callable[[httk.store.store_common.EntryStore, RelationshipSourceMap | None], RelatedPropertyResolver | None]
+
+
+.. py:function:: related_property_resolver_factory(plans)
+
+   Build a same-store depth-1 related-property resolver factory over sibling plans.
+
+   ``plans`` are the family plans available to a serving edge (one per source).
+   The returned factory accepts the store whose row is being filtered and an
+   optional :class:`~httk.store.backend.sql.stored_properties.RelationshipSourceMap`, yielding a
+   :data:`~httk.store.query.optimade_filters.RelatedPropertyResolver` that resolves a
+   dotted ``<related_type>.<prop>`` filter to the matching related-entry ids by
+   running the stripped sub-filter through the sibling plan for ``related_type``
+   **in that same store** (same-store scope, mirroring reverse serving). Only
+   the sibling's own properties are consulted; the sub-search runs
+   ``only_latest=True`` over mains, so stale revisions and named alternatives can
+   never satisfy the filter. With a relationship map, each matching candidate
+   receives its concrete backing's target prefix before ids are combined;
+   that same prefix applies to ``id`` predicates in the sibling search.
+   Unrelated backings are excluded, and custom wire types map back to the
+   original plan type. Calling the factory with only the store returns raw
+   stored ids instead. These ids feed the ``<related_type>.id HAS ...`` handler
+   used by the semi-join rewrite.
+
+   :param plans: The family plans (one per source) available to the serving edge.
+   :return: A per-store resolver factory (a miss returns an empty tuple, i.e. matches nothing).
+
+
+.. py:class:: StoredEntrySource
+
+   One named configured family in one durable entry store.
+
+   ``public_id_prefix`` is concatenated with every backing's store-minted
+   lineage id.  It is intentionally not required to be unique: callers may
+   retain a legacy unprefixed source, in which case collisions are detected
+   when their visible ids are fetched or explicitly audited.
+
+   :param store: The durable entry store containing the entry family.
+   :param entry_family: The logical entry-family class to serve.
+   :param name: The unique name used to identify this source.
+   :param public_id_prefix: The prefix prepended to store-minted lineage ids.
+   :param relationship_sources: Explicit target-family to same-store source-name selections for ambiguous mounts.
+
+
+   .. py:attribute:: store
+      :type:  httk.store.store_common.EntryStore
+
+
+   .. py:attribute:: entry_family
+      :type:  type
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: public_id_prefix
+      :type:  str
+      :value: ''
+
+
+
+   .. py:attribute:: relationship_sources
+      :type:  collections.abc.Mapping[type, str]
+
+
+.. py:class:: StoredEntryOrigin
+
+   The durable source of one public entry id.
+
+   :param source: The configured source name.
+   :param source_index: The source's position in the federation.
+   :param backing: The concrete backing name.
+   :param entry_id: The store-minted lineage id claimed by the backing.
+
+
+   .. py:attribute:: source
+      :type:  str
+
+
+   .. py:attribute:: source_index
+      :type:  int
+
+
+   .. py:attribute:: backing
+      :type:  str
+
+
+   .. py:attribute:: entry_id
+      :type:  str
+
+
+.. py:exception:: DuplicateEntryIdError(public_id, origins)
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   Several durable origins claim the same public entry id.
+
+   Call :meth:`StoredEntryFederation.audit_duplicate_ids` to perform the
+   intentionally explicit complete audit; ordinary pages inspect only the
+   candidates they would otherwise return.
+
+   :param public_id: The public id claimed by multiple origins.
+   :param origins: The durable origins claiming the id.
+
+
+   .. py:attribute:: public_id
+
+
+   .. py:attribute:: origins
+
+
+.. py:class:: StoredEntryPage
+
+   One immutable globally paginated response.
+
+   ``total_count`` is the exact filtered count before global offset/limit.
+   The sentinel establishing :attr:`more_data_available` is ID-only and is
+   never present in :attr:`rows`.
+
+   :param rows: The rows visible in this page.
+   :param total_count: The exact filtered count before paging bounds.
+   :param more_data_available: Whether another row exists after this page.
+   :param relationships: The per-row exposed weak-link relationships, aligned
+       with :attr:`rows` (an empty mapping for a row carrying none).
+
+
+   .. py:attribute:: rows
+      :type:  tuple[collections.abc.Mapping[str, Any], ...]
+
+
+   .. py:attribute:: total_count
+      :type:  int
+
+
+   .. py:attribute:: more_data_available
+      :type:  bool
+
+
+   .. py:attribute:: relationships
+      :type:  tuple[collections.abc.Mapping[str, tuple[httk.core.RelatedEntry, ...]], ...]
+
+
+.. py:class:: StoredEntryFederation(sources, *, served_type_names = None, related_resolver_factory = None, source_inventory = None)
+
+   Merge one or more configured durable entry-family sources.
+
+   Sources preserve caller order.  Without a sort, rows remain in source,
+   persisted-backing, and native database order and candidate SQL contains no
+   ``ORDER BY``.  With a sort, each backing stream orders in SQL and this
+   object performs a bounded heap merge with a deterministic public-id/source
+   /backing tie-breaker.
+
+   Pages probe all sibling backings in prefixes shared by multiple sources.
+   Within-source corruption is otherwise audit-only; use
+   :meth:`audit_duplicate_ids` to detect it.
+
+   :param sources: The configured sources to merge in caller order.
+   :param served_type_names: An optional internal-to-wire map applied to the
+       entry-type names emitted on served relationships; unmapped names pass
+       through unchanged.
+   :param related_resolver_factory: An optional per-store factory (see
+       :func:`related_property_resolver_factory`) enabling depth-1
+       related-property filtering (``references.doi CONTAINS ...``); without it
+       such dotted filters match nothing, while ``<type>.id HAS ...`` still works.
+       Called with the store and its relationship source map (or ``None``).
+   :param source_inventory: All mounted families, used to resolve relationship target prefixes; defaults to sources.
+
+
+   .. py:property:: sources
+      :type: tuple[StoredEntrySource, ...]
+
+
+      Return the immutable declared source order.
+
+      :return: The declared sources in caller order.
+
+
+   .. py:method:: snapshot_cutoff_ns(now_ns)
+
+      Return the latest instant strictly before every capable source's current bucket.
+
+      Per-source floor conversion then selects each store's last completed
+      timestamp unit, so future monotonic writes cannot enter the snapshot,
+      even when sources use different timestamp resolutions. Timestamp-
+      disabled sources are ignored; ``None`` means no source is capable.
+
+      :param now_ns: Current time in nanoseconds.
+      :return: A nanosecond cutoff, or ``None`` when no source stores timestamps.
+
+
+
+   .. py:method:: query(filter_string = None, *, sort = (), offset = 0, limit = None, as_of = None, fields = None, revisions = False, alternatives = False)
+
+      Return one globally merged page with an exact filtered total.
+
+      ``limit=0`` intentionally runs only count plus an ID-only sentinel:
+      it is suitable for metadata initialization and never duplicate-probes
+      or hydrates a candidate.
+
+      :param filter_string: The OPTIMADE filter, parsed filter tree, or no filter.
+      :param sort: The property sort keys and directions.
+      :param offset: The number of matching rows to skip globally.
+      :param limit: The maximum number of rows to return, or no maximum.
+      :param as_of: Optional historic cutoff. Sources without store timestamps
+          deliberately omit this cutoff and serve their current state.
+          Dependencies of a visible row remain visible because references
+          only point at earlier-or-equal rows from the same transaction.
+      :param fields: The response property names to render, or ``None`` to render every configured property.
+      :param revisions: Whether to stream immutable revisions of mains instead of latest mains.
+      :param alternatives: Whether to stream latest named alternatives with composite ``<id>~<kind>`` ids.
+      :return: The globally merged page.
+      :raises DuplicateEntryIdError: If a visible id has multiple cross-source origins.
+
+
+
+   .. py:method:: fetch(public_id, *, as_of = None, fields = None, revisions = False, alternatives = False)
+
+      Fetch one public id and detect a collision among its possible origins.
+
+      :param public_id: The public id to fetch.
+      :param as_of: Optional historic cutoff. Sources without store timestamps
+          deliberately omit this cutoff and serve their current state.
+      :param fields: The response property names to render, or ``None`` to render every configured property.
+      :param revisions: Whether ``public_id`` addresses an immutable revision instead of a main.
+      :param alternatives: Whether ``public_id`` is a composite ``<id>~<kind>`` alternative id.
+      :return: The fetched ``(row, relationships)`` pair, or ``None`` when absent.
+      :raises DuplicateEntryIdError: If the id has multiple origins.
+
+
+
+   .. py:method:: fetch_revision(entry_id, immutable_id, *, as_of = None, fields = None)
+
+      Fetch one immutable revision addressed by its lineage and revision ids.
+
+      :param entry_id: The public lineage id of the revision.
+      :param immutable_id: The public immutable revision id.
+      :param as_of: Optional historic cutoff. Sources without store timestamps
+          deliberately omit this cutoff and serve their current state.
+      :param fields: The response property names to render, or ``None`` to render every configured property.
+      :return: The fetched ``(row, relationships)`` pair, or ``None`` when absent.
+      :raises DuplicateEntryIdError: If the id has multiple origins.
+
+
+
+   .. py:method:: fetch_alternative(entry_id, kind, *, as_of = None, fields = None)
+
+      Fetch one named alternative addressed by its group entry id and kind.
+
+      The returned alternative is its own latest revision.  A malformed kind
+      misses like an absent one, matching :meth:`fetch_revision`.
+
+      :param entry_id: The public group lineage id of the alternative.
+      :param kind: The alternative kind selecting the named alternative.
+      :param as_of: Optional historic cutoff. Sources without store timestamps
+          deliberately omit this cutoff and serve their current state.
+      :param fields: The response property names to render, or ``None`` to render every configured property.
+      :return: The fetched ``(row, relationships)`` pair, or ``None`` when absent.
+      :raises DuplicateEntryIdError: If the id has multiple origins.
+
+
+
+   .. py:method:: audit_duplicate_ids(*, batch_size = _AUDIT_BATCH_SIZE)
+
+      Lazily scan sorted ID-only batches and raise on the first collision.
+
+      The audit includes duplicate ids across backings within one source as
+      well as duplicates across sources.
+
+      :param batch_size: The maximum number of candidate ids read per batch.
+      :return: None.
+      :raises DuplicateEntryIdError: If any public id has multiple origins.
+
+
+

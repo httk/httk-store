@@ -31,3 +31,8 @@ Each served record also exposes its lineage identity as the integer property
 `_httk_logical_id` (see [Record replacement and lineages](db-revisions.md#record-replacement-and-lineages)),
 filterable like any other served field. Pass `only_latest=True` to
 `StoreEntryProvider` to serve only the latest row of each lineage.
+
+For a runnable end-to-end example, see
+[Serving a database as an OPTIMADE API](https://docs.httk.org/httk-serve/examples/serve_as_optimade.html)
+in *httk-serve*. Serving integration tests live there too, so *httk-store*
+can be developed and released without installing its downstream consumer.

@@ -518,28 +518,6 @@ def test_configured_family_uses_the_mongo_stored_property_plan(mongo_test_databa
         )
 
 
-def test_optimade_adapter_consumes_mongo_provider_records(provider):
-    pytest.importorskip("httk.serve.optimade")
-    from httk.serve.optimade import adapter_from_providers
-    from httk.serve.optimade.backend import execute_query
-    from httk.serve.optimade.filter import parse_optimade_filter
-
-    adapter = adapter_from_providers([provider])
-    results = list(
-        execute_query(
-            adapter,
-            ["books"],
-            ["id", "_httk_custom_title"],
-            [],
-            100,
-            0,
-            parse_optimade_filter("_httk_custom_pages > 200"),
-        )
-    )
-    assert len(results) == 1
-    assert results[0].values["_httk_custom_title"] == "Analytical Engines"
-
-
 @dataclass(frozen=True)
 class MongoRecordRow:
     """A minimal ``records`` backing for Mongo provenance-edge parity."""

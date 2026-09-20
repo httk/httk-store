@@ -6,7 +6,7 @@ import pytest
 from clickhouse_read_support import clickhouse_database
 from conftest import clickhouse_test_uri
 from test_clickhouse_read import READ_ROWS, ReadRecord
-from test_db_entry_provider import ADA, BOOK_1, BOOK_2, BOOLE, CARA, Book, Writer
+from test_db_entry_provider import ADA, BOOK_1, BOOK_2, BOOLE, CARA
 from test_db_paging import ROWS
 from test_db_searcher import LABELS, RECORDS, TAGS, Label, Rec
 from test_db_stored_federation import FederatedCalculation, FederationFirst, FederationSecond, _record
@@ -19,9 +19,8 @@ from test_db_stored_properties import (
 )
 
 from httk.store import EntryIdScheme, PageOrder
-from httk.store.backend.sql import SqlStore, stored_property_sql_plan
 from httk.store.backend.clickhouse.support import ClickHouseUnsupportedQueryError
-from httk.store.backend.sql.entry_provider import StoreEntryProvider
+from httk.store.backend.sql import SqlStore, stored_property_sql_plan
 from httk.store.backend.sql.stored_federation import StoredEntryFederation, StoredEntrySource
 from httk.store.backend.sql.stored_properties import StoredPropertySqlPlan
 
@@ -148,29 +147,6 @@ def test_stored_properties_reject_only_returned_nested_correlation(clickhouse_co
     )
     with pytest.raises(ClickHouseUnsupportedQueryError, match="beyond one immediate scope"):
         nested_plan.candidate_searchers(sort=(("_httk_selector", False),))
-
-
-def test_entry_provider_and_optimade_serving_end_to_end(clickhouse_corpus: SqlStore) -> None:
-    provider = StoreEntryProvider(clickhouse_corpus, {"books": Book, "writers": Writer})
-    assert sorted(row["__id"] for row in provider.records("books")) == ["httk.test.book-1-1", "httk.test.book-1-2"]
-    pytest.importorskip("httk.serve.optimade")
-    from httk.serve.optimade import adapter_from_providers
-    from httk.serve.optimade.backend import execute_query
-    from httk.serve.optimade.filter import parse_optimade_filter
-
-    adapter = adapter_from_providers([provider])
-    rows = list(
-        execute_query(
-            adapter,
-            ["books"],
-            ["id", "_httk_custom_title"],
-            [],
-            100,
-            0,
-            parse_optimade_filter("_httk_custom_pages > 200"),
-        )
-    )
-    assert [row.values["id"] for row in rows] == ["httk.test.book-1-1"]
 
 
 def test_federation_surface_is_bulk_populated(clickhouse_federation: StoredEntryFederation) -> None:

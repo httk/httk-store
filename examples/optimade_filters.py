@@ -68,7 +68,8 @@ reference/child id handler was fixed this series). Nesting deeper than one level
 The `_httk_relationships.<key>.id` filter root — which also reaches the semantic
 provenance keys — is *not* part of this library `optimade_filter_searcher` API;
 it exists only on the served stored route and the in-memory serving adapter (see
-the *serve as OPTIMADE* example and httk-serve's *how it works* guide).
+[the serving example](https://docs.httk.org/httk-serve/examples/serve_as_optimade.html)
+and *httk-serve*'s *how it works* guide).
 """
 
 from dataclasses import dataclass

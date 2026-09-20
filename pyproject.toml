@@ -41,9 +41,8 @@ Issues = "https://github.com/httk/httk-store/issues"
 
 [project.optional-dependencies]
 dev = [
-  # Remote OPTIMADE client tests exercise the atomistic binding over an ASGI transport.
+  # Remote OPTIMADE client tests exercise the atomistic binding.
   "httk-atomistic>=2.1.1,<3",
-  "httk-serve>=2.1.0,<3",
   "pytest>=8.0",
   "pytest-xdist>=3.6",
   "ruff>=0.16,<0.17",
@@ -119,13 +118,7 @@ skip-checking-raises = true
 [tool.pyright]
 pythonVersion = "3.12"
 include = ["src", "examples"]
-# The examples import httk as an installed package would, so point pyright at
-# the in-tree sources; ../httk-serve/src resolves the cross-repo serving
-# example (httk-serve is a consumer of this package, never a dependency of
-# it) against its workspace checkout, and is harmless where that path does not
-# exist. Listing extraPaths explicitly disables pyright's implicit use of ./src,
-# so "src" is listed too.
-extraPaths = ["src", "../httk-serve/src"]
+extraPaths = ["src"]
 # Resolve the httk-core runtime dependency (and jsonschema) against the shared
 # workspace venv, where httk-core is installed editable; pyright falls back to
 # default resolution where that venv does not exist (e.g. CI, where the deps are
@@ -146,16 +139,6 @@ warn_unused_ignores = true
 # jsonschema (a hard runtime dependency) ships no inline type information; we do
 # not vendor its optional third-party stubs, so treat its imports as untyped.
 module = ["jsonschema", "jsonschema.*"]
-ignore_missing_imports = true
-disable_error_code = ["import-untyped"]
-
-[[tool.mypy.overrides]]
-# httk-serve is a *consumer* of this package, not a dependency of it: the two
-# meet only at the httk.core.EntryProvider contract. The cross-repo example
-# (examples/serve_as_optimade.py) imports it to show the serving end of that
-# contract, so its import must typecheck whether httk-serve is absent
-# entirely or present without a py.typed marker.
-module = ["httk.serve.optimade", "httk.serve.optimade.*"]
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
 

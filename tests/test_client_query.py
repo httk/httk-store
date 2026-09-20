@@ -234,7 +234,7 @@ def test_negotiated_base_routes_queries_through_effective_versioned_url() -> Non
     searcher = store.searcher()
     variable = searcher.variable(store.entry_types[0])
 
-    assert list(searcher.results(record=variable)) == []
+    assert [row for row in searcher.results(record=variable)] == []
     query_url = client.requests[-1]
     assert query_url.startswith(effective + "/files?")
     assert not query_url.startswith(requested + "/files?")
@@ -271,7 +271,7 @@ def test_structural_filters_exact_literals_and_transport_renaming() -> None:
     searcher.add_sort(variable.nelements, descending=True)
     searcher.add_sort(variable.id)
 
-    assert list(searcher.results(structure=variable)) == []
+    assert [row for row in searcher.results(structure=variable)] == []
 
     parameters = query_parameters(client)
     rendered = parameters["filter"][0]
@@ -308,7 +308,7 @@ def test_terminating_fraction_spellings_are_exact(fraction: Fraction, rendered: 
     variable = searcher.variable(store.entry_types[0])
     searcher.add(variable.elements_ratios.has_any(fraction))
 
-    list(searcher.results(record=variable))
+    [row for row in searcher.results(record=variable)]
 
     assert f"elements_ratios HAS ANY {rendered}" in query_parameters(client)["filter"][0]
 
@@ -360,7 +360,7 @@ def test_equality_only_membership_with_null_is_rendered_as_explicit_unknown() ->
     variable = searcher.variable(store.entry_types[0])
     searcher.add(variable.chemical_formula_reduced.is_in(None, "Si"))
 
-    assert list(searcher.results(record=variable)) == []
+    assert [row for row in searcher.results(record=variable)] == []
     rendered = query_parameters(client)["filter"][0]
     assert "chemical_formula_reduced IS UNKNOWN" in rendered
     assert 'chemical_formula_reduced = "Si"' in rendered

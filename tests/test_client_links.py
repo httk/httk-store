@@ -132,7 +132,7 @@ def test_dotted_relationship_filter_uses_related_types_remote_names() -> None:
         (material.links.structures.nelements > 2) & (material.links.structures.chemical_formula_reduced == "Fe2O3")
     )
 
-    list(searcher.results(item=material))
+    [row for row in searcher.results(item=material)]
 
     rendered = query_params(client.requests[-1])["filter"][0]
     assert "structures.nelements > 2" in rendered
@@ -148,7 +148,7 @@ def test_underscore_prefixed_served_type_traverses_via_relationship() -> None:
     material = searcher.variable(store.entry_type("materials"))
     searcher.add(material.links._httk_records._anyterial_kind == "note")
 
-    list(searcher.results(item=material))
+    [row for row in searcher.results(item=material)]
 
     rendered = query_params(client.requests[-1])["filter"][0]
     assert '_httk_records._anyterial_kind = "note"' in rendered
@@ -198,7 +198,7 @@ def test_root_field_shadows_a_same_named_served_type() -> None:
     # and add() would reject it before any request was made.
     searcher.add(variable.references == "abc")
 
-    list(searcher.results(item=variable))
+    [row for row in searcher.results(item=variable)]
 
     assert 'references = "abc"' in query_params(client.requests[-1])["filter"][0]
 
@@ -651,7 +651,7 @@ def test_meta_warnings_are_logged(caplog: pytest.LogCaptureFixture) -> None:
     variable = searcher.variable(store.entry_types[0])
 
     with caplog.at_level(logging.WARNING, logger="httk.store.optimade.remote_query"):
-        list(searcher.results(record=variable))
+        [row for row in searcher.results(record=variable)]
 
     assert any("filter references unknown property" in message for message in caplog.messages)
     assert any(getattr(rec, "context", None) == "optimade" for rec in caplog.records)

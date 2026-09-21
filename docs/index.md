@@ -21,6 +21,7 @@ contracts. ClickHouse supports bulk ingestion and read serving via
 
 - **Data management guide**: {doc}`data`
 - **Backend storage guide**: {doc}`db`
+- **Connecting entries**: {doc}`connecting_entries`
 - **MongoDB storage guide**: {doc}`mongo`
 - **Federated stores guide**: {doc}`federation`
 - **Migrating from httk v1**: {doc}`migrating_from_v1`
@@ -69,6 +70,7 @@ validate_record(
 
 data
 db
+connecting_entries
 mongo
 federation
 migrating_from_v1

@@ -1,5 +1,9 @@
 # Weak links and provenance
 
+For a practical comparison of record-valued fields, strong links, and weak
+links, including complete class declarations and a decision table, start with
+{doc}`../connecting_entries`.
+
 ## Weak links
 
 Reference and child fields are **sid-pinned**: they bind a specific revision, so

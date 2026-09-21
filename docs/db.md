@@ -44,6 +44,11 @@ obj)` saves a logical successor sharing the predecessor's lineage, `store.histor
 walks a lineage, and `store.searcher(only_latest=True)` restricts root variables
 to each lineage's latest row.
 
+Entries can be connected by exact record-valued fields, immutable provenance
+edges (`StrongLink`), or editable lineage-level curation (`WeakLink`). See
+{doc}`connecting_entries` for the differences and complete declaration
+examples.
+
 An entry may also carry named **alternative representations** — a conventional
 cell beside a primitive one, say: `store.save(obj, alternative_of=<main entry id>,
 alternative_kind="conventional")` stores a sibling that shares the main's public
@@ -58,6 +63,7 @@ search DSL and stored properties, record replacement lineages, bulk ingestion
 fresh-store profile), the permanentization role model with `store.fsck()`
 recovery, OPTIMADE serving, and store-layout versioning.
 
+(serving-application-records)=
 ## Serving application records
 
 For a small application-defined OPTIMADE dataset, *httk-core* provides

@@ -33,6 +33,6 @@ filterable like any other served field. Pass `only_latest=True` to
 `StoreEntryProvider` to serve only the latest row of each lineage.
 
 For a runnable end-to-end example, see
-[Serving a database as an OPTIMADE API](https://docs.httk.org/httk-serve/examples/serve_as_optimade.html)
+[Serving a database as an OPTIMADE API](https://docs.httk.org/httk-serve/dev/main/examples/serve_as_optimade.html)
 in *httk-serve*. Serving integration tests live there too, so *httk-store*
 can be developed and released without installing its downstream consumer.

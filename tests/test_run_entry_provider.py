@@ -69,13 +69,16 @@ def test_run_provider_serves_rows_and_relationships() -> None:
         "_httk_source_id",
         "last_modified",
         "_httk_workflow_declaration_uri",
+        "_httk_workflow_definition_uri",
     }
     assert "workflow_declaration_uri" not in definition.properties
+    assert "workflow_definition_uri" not in definition.properties
 
     rows = list(provider.records("_httk_runs"))
     assert json.dumps(rows)
     assert rows[0]["__id"] == "run-key"
     assert rows[0]["workflow_declaration_uri"] is None
+    assert rows[0]["workflow_definition_uri"] is None
     assert rows[0]["source_id"] == "ws:job"
     assert definition.properties["_httk_source_id"].nullable
     assert definition.properties["_httk_source_id"].requirements["query-support"] == "all mandatory"
@@ -248,7 +251,13 @@ def test_run_stored_property_plan_serves_prefixed_properties() -> None:
             entry_records={RunEntry: Run},
             entry_ids=EntryIdScheme("httk.test", "1"),
         )
-        store.save(Run(source_id="ws:a", workflow_declaration_uri="https://wf.example/a"))
+        store.save(
+            Run(
+                source_id="ws:a",
+                workflow_declaration_uri="https://wf.example/a",
+                workflow_definition_uri="https://code.example/a",
+            )
+        )
         store.save(Run(source_id="ws:b"))
 
         plan = stored_property_sql_plan(store, RunEntry, served=served)
@@ -259,10 +268,18 @@ def test_run_stored_property_plan_serves_prefixed_properties() -> None:
         assert all(row["type"] == "_httk_runs" for row in rows.values())
         assert rows["ws:a"]["_httk_workflow_declaration_uri"] == "https://wf.example/a"
         assert rows["ws:b"]["_httk_workflow_declaration_uri"] is None
+        assert rows["ws:a"]["_httk_workflow_definition_uri"] == "https://code.example/a"
+        assert rows["ws:b"]["_httk_workflow_definition_uri"] is None
 
         # (b) a filter over _httk_source_id returns the right subset.
         filtered = _plan_records(plan.filter_searchers('_httk_source_id = "ws:a"'))
         assert [record.source_id for record in filtered] == ["ws:a"]
+
+        # (b2) a filter over _httk_workflow_definition_uri returns the right subset.
+        filtered_definition = _plan_records(
+            plan.filter_searchers('_httk_workflow_definition_uri = "https://code.example/a"')
+        )
+        assert [record.source_id for record in filtered_definition] == ["ws:a"]
 
         # (c) a sort over _httk_source_id orders correctly.
         ordered = _plan_records(plan.filter_searchers('type = "_httk_runs"', sort=(("_httk_source_id", False),)))

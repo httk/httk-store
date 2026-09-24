@@ -333,7 +333,13 @@ def test_federation_serves_a_prefixed_run_family() -> None:
             entry_records={RunEntry: Run},
             entry_ids=EntryIdScheme("httk.test", "1"),
         )
-        store.save(Run(source_id="ws:a", workflow_declaration_uri="https://wf.example/a"))
+        store.save(
+            Run(
+                source_id="ws:a",
+                workflow_declaration_uri="https://wf.example/a",
+                workflow_definition_uri="https://code.example/a",
+            )
+        )
         store.save(Run(source_id="ws:b", workflow_declaration_uri="https://wf.example/b"))
         federation = StoredEntryFederation((StoredEntrySource(store, RunEntry, "runs"),))
 
@@ -341,6 +347,10 @@ def test_federation_serves_a_prefixed_run_family() -> None:
         assert [row["type"] for row in page.rows] == ["_httk_runs", "_httk_runs"]
         assert [row["_httk_source_id"] for row in page.rows] == ["ws:a", "ws:b"]
         assert all(row["_httk_workflow_declaration_uri"] is not None for row in page.rows)
+        assert [row["_httk_workflow_definition_uri"] for row in page.rows] == ["https://code.example/a", None]
 
         filtered = federation.query('_httk_source_id = "ws:a"')
         assert [row["_httk_source_id"] for row in filtered.rows] == ["ws:a"]
+
+        definition_filtered = federation.query('_httk_workflow_definition_uri = "https://code.example/a"')
+        assert [row["_httk_source_id"] for row in definition_filtered.rows] == ["ws:a"]

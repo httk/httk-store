@@ -338,6 +338,7 @@ class RunEntryProvider(EntryProvider):
             "immutable_id": "immutable_id",
             "last_modified": "last_modified",
             "_httk_workflow_declaration_uri": "workflow_declaration_uri",
+            "_httk_workflow_definition_uri": "workflow_definition_uri",
             "_httk_source_id": "source_id",
         }
 
@@ -356,6 +357,7 @@ class RunEntryProvider(EntryProvider):
                 "immutable_id": run.immutable_id,
                 "last_modified": _json_value(run.last_modified),
                 "workflow_declaration_uri": run.workflow_declaration_uri,
+                "workflow_definition_uri": run.workflow_definition_uri,
                 "source_id": run.source_id,
             }
 
@@ -627,5 +629,6 @@ def _string_column_projection(column: str) -> StoredPropertyProjection:
 # values read the plain internal columns.
 Run.__httk_stored_properties__ = {  # type: ignore[attr-defined]
     "_httk_workflow_declaration_uri": _string_column_projection("workflow_declaration_uri"),
+    "_httk_workflow_definition_uri": _string_column_projection("workflow_definition_uri"),
     "_httk_source_id": _string_column_projection("source_id"),
 }

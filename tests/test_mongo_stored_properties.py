@@ -112,7 +112,13 @@ def test_run_stored_property_plan_serves_prefixed_properties(mongo_test_database
         entry_records={RunEntry: Run},
         entry_ids=EntryIdScheme("httk.test", "1"),
     )
-    store.save(Run(source_id="ws:a", workflow_declaration_uri="https://wf.example/a"))
+    store.save(
+        Run(
+            source_id="ws:a",
+            workflow_declaration_uri="https://wf.example/a",
+            workflow_definition_uri="https://code.example/a",
+        )
+    )
     store.save(Run(source_id="ws:b"))
 
     plan = stored_property_mongo_plan(store, RunEntry, served=served)
@@ -123,6 +129,8 @@ def test_run_stored_property_plan_serves_prefixed_properties(mongo_test_database
     assert all(row["type"] == "_httk_runs" for row in rows.values())
     assert rows["ws:a"]["_httk_workflow_declaration_uri"] == "https://wf.example/a"
     assert rows["ws:b"]["_httk_workflow_declaration_uri"] is None
+    assert rows["ws:a"]["_httk_workflow_definition_uri"] == "https://code.example/a"
+    assert rows["ws:b"]["_httk_workflow_definition_uri"] is None
 
     # (b) a filter over _httk_source_id returns the right subset.
     filtered = _records(plan.filter_searchers('_httk_source_id = "ws:a"'))
@@ -145,7 +153,13 @@ def test_store_accessor_plans_prefixed_family_in_wire_form(mongo_test_database) 
         entry_records={RunEntry: Run},
         entry_ids=EntryIdScheme("httk.test", "1"),
     )
-    store.save(Run(source_id="ws:a", workflow_declaration_uri="https://wf.example/a"))
+    store.save(
+        Run(
+            source_id="ws:a",
+            workflow_declaration_uri="https://wf.example/a",
+            workflow_definition_uri="https://code.example/a",
+        )
+    )
     store.save(Run(source_id="ws:b"))
 
     plan = store.stored_property_plan(RunEntry)
@@ -155,6 +169,8 @@ def test_store_accessor_plans_prefixed_family_in_wire_form(mongo_test_database) 
     assert all(row["type"] == "_httk_runs" for row in rows.values())
     assert rows["ws:a"]["_httk_workflow_declaration_uri"] == "https://wf.example/a"
     assert rows["ws:b"]["_httk_workflow_declaration_uri"] is None
+    assert rows["ws:a"]["_httk_workflow_definition_uri"] == "https://code.example/a"
+    assert rows["ws:b"]["_httk_workflow_definition_uri"] is None
 
 
 def test_candidate_streams_are_id_only_and_verified(plan):

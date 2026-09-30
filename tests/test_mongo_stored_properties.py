@@ -5,13 +5,18 @@ from fractions import Fraction
 
 import pytest
 from httk.core import FracScalar, Run, RunEntry, load_entry_type_definition
+from httk.core.data_records import DataRecord, DataRecordEntry, TotalEnergyRecord
 from httk.core.provenance import RUNS_DEFINITION_ID
 from test_db_stored_properties import (
     FIRST,
     SECOND,
+    TOTAL_ENERGY_DEFINITION,
     CalculationEntry,
+    ClashingEnergyRecord,
     GenericCalculationFirst,
     GenericCalculationSecond,
+    TypedEnergyRecord,
+    records_families,
 )
 
 from httk.store import EntryIdScheme
@@ -22,7 +27,7 @@ from httk.store.backend.mongo.stored_properties import (
     _MongoQueryContext,
     _response_json_value,
 )
-from httk.store.backend.sql import Backend, SqlStore, stored_property_sql_plan
+from httk.store.backend.sql import Backend, SqlStore, StoredEntryFederation, StoredEntrySource, stored_property_sql_plan
 
 
 @dataclass(frozen=True)
@@ -295,3 +300,68 @@ def test_optional_child_presence_and_response_serialization(plan):
         result.names == ("sid", "id", "immutable_id", "alt_kind", "sort_0", "sort_1", "store_timestamp")
         for result in results
     )
+
+
+@pytest.mark.parametrize("typed", (TypedEnergyRecord, TotalEnergyRecord), ids=("test-local", "core"))
+def test_mongo_records_family_serves_typed_backing_properties_next_to_data_records(mongo_test_database, typed):
+    """Mongo parity: the records family serves the union of its backings' property definitions."""
+    store = MongoStore(
+        mongo_test_database,
+        entry_families=records_families(DataRecord, typed),
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    generic = store.fetch(DataRecord, store.save(DataRecord.from_value(TOTAL_ENERGY_DEFINITION, "e", -1.0)))
+    low = store.fetch(typed, store.save(typed(-5.0)))
+    store.fetch(typed, store.save(typed(2.5)))
+
+    plan = store.stored_property_plan(DataRecordEntry)
+    assert plan.definition.properties["_httk_total_energy"].unit == "eV"
+    rows = {row["id"]: row for row in plan.records()}
+    assert rows[generic.id]["_httk_total_energy"] is None
+    assert rows[low.id]["_httk_total_energy"] == -5.0
+    assert {record.id for record in _records(plan.filter_searchers("_httk_total_energy < 0"))} == {low.id}
+    assert {record.id for record in _records(plan.filter_searchers("_httk_total_energy IS UNKNOWN"))} == {generic.id}
+
+    store.replace(low, typed(-6.0))
+    latest = _records(plan.filter_searchers("_httk_total_energy < 0", only_latest=True))
+    assert [(record.id, record.total_energy) for record in latest] == [(low.id, -6.0)]
+    assert [item.total_energy for item in store.history(low)] == [-5.0, -6.0]
+
+
+def test_mongo_records_family_rejects_backings_that_disagree_about_a_property(mongo_test_database):
+    store = MongoStore(
+        mongo_test_database,
+        entry_families=records_families(DataRecord, TypedEnergyRecord, ClashingEnergyRecord),
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    with pytest.raises(
+        MongoStoredPropertyConfigurationError,
+        match="TypedEnergyRecord and ClashingEnergyRecord disagree about property '_httk_total_energy'",
+    ):
+        stored_property_mongo_plan(store, DataRecordEntry)
+
+
+@pytest.mark.parametrize("typed", (TypedEnergyRecord, TotalEnergyRecord), ids=("test-local", "core"))
+def test_mongo_records_family_sorts_typed_values_with_unprojected_rows_last(mongo_test_database, typed):
+    """Mongo parity: an unprojected nullable property sorts as NULL, last in both directions."""
+    store = MongoStore(
+        mongo_test_database,
+        entry_families=records_families(DataRecord, typed),
+        entry_ids=EntryIdScheme("httk.test", "1"),
+    )
+    generic = sorted(
+        store.fetch(DataRecord, store.save(DataRecord.from_value(TOTAL_ENERGY_DEFINITION, "e", value))).id
+        for value in (-10.0, 10.0)
+    )
+    for value in (1.0, -3.0, 2.0):
+        store.save(typed(value))
+    federation = StoredEntryFederation((StoredEntrySource(store, DataRecordEntry, "records"),))
+
+    def ordered(descending, **page):
+        rows = federation.query(sort=(("_httk_total_energy", descending),), **page).rows
+        return [row["_httk_total_energy"] if row["_httk_total_energy"] is not None else row["id"] for row in rows]
+
+    assert ordered(False) == [-3.0, 1.0, 2.0, *generic]
+    assert ordered(True) == [2.0, 1.0, -3.0, *generic]
+    assert ordered(False, offset=2, limit=2) == [2.0, generic[0]]
+    assert ordered(True, offset=1, limit=3) == [1.0, -3.0, generic[0]]

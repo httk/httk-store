@@ -28,6 +28,7 @@ from httk.store.backend.schema import FieldSpec, TableSchema, resolve_schema
 from httk.store.backend.sql.mapping import ALT_KIND_COLUMN, LOGICAL_ID_COLUMN, SID_COLUMN
 from httk.store.backend.sql.store import SqlStore, _served_definition
 from httk.store.entry_providers import strong_link_markers
+from httk.store.storage_layout import EntryFamilyLayout
 
 __all__ = [
     "StrongLinkFamily",
@@ -60,7 +61,7 @@ class StrongLinkFamily:
     markers: Mapping[str, StrongLink]
 
 
-def _served_name(family: type, internal: str) -> str:
+def _served_name(family: EntryFamilyLayout, internal: str) -> str:
     """Return a family's served (wire) name, falling back to its internal name."""
     served = _served_definition(family)
     return served.name if served is not None else internal
@@ -77,7 +78,7 @@ def strong_link_families(store: SqlStore) -> list[StrongLinkFamily]:
         internal = getattr(family.family, "type", None)
         if not isinstance(internal, str):
             continue
-        wire = _served_name(family.family, internal)
+        wire = _served_name(family, internal)
         for backing in family.records:
             markers = strong_link_markers(backing)
             if markers:
@@ -101,7 +102,7 @@ def wire_type_for_internal(store: SqlStore, internal_type: str) -> str:
     """
     for family in store.layout.families:
         if family.definition_id is not None and getattr(family.family, "type", None) == internal_type:
-            return _served_name(family.family, internal_type)
+            return _served_name(family, internal_type)
     return internal_type
 
 

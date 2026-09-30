@@ -19,6 +19,8 @@ from httk.core.register import (
     load_property_definition,
 )
 
+from httk.store.storage_layout import family_entry_type_definition
+
 if TYPE_CHECKING:
     from httk.core import CLIContext
 
@@ -75,9 +77,7 @@ def _definitions(
                 record_ids.append(record_id)
         if family_id is not None:
             entry_ids.add(family_id)
-            factory = getattr(family.family, "entry_type_definition", None)
-            if callable(factory):
-                authoritative_definitions[family_id] = factory()
+            authoritative_definitions[family_id] = family_entry_type_definition(family)
         elif not record_ids:
             raise ValueError(f"store family {family.name!r} has no entry-type definition")
         declaration.append(

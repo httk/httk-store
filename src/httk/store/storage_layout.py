@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, Final, cast
 
-from httk.core import PropertyDefinition
+from httk.core import EntryTypeDefinition, PropertyDefinition
 from httk.core.register import (
     entry_family_info,
     entry_record_info,
@@ -38,6 +38,7 @@ __all__ = [
     "StorageLayoutUpgradeRequiredError",
     "classify_schema_upgrade",
     "declaration_json",
+    "family_entry_type_definition",
     "normalize_entry_families",
     "normalize_entry_records",
     "normalize_entry_types",
@@ -482,30 +483,96 @@ def _queue_referenced_records(record: type, pending: list[tuple[type, str]]) -> 
             )
 
 
+def family_entry_type_definition(family: EntryFamilyLayout) -> EntryTypeDefinition:
+    """Return the internal entry-type definition a configured family serves.
+
+    A family class that defines ``entry_type_definition()`` is authoritative and
+    its result is returned unchanged. Otherwise the family's registered
+    definition is extended with the union of the property definitions its
+    record backings declare in ``__httk_property_definitions__``, so a typed
+    backing (for example a record with a native total-energy column) serves its
+    property next to generic backings of the same family. Backings without
+    ``__httk_property_definitions__`` contribute nothing, names already in the
+    registered definition are left to it, and a family whose backings add
+    nothing gets the registered definition itself. The result is the internal
+    form; serve it through ``served_form()``.
+
+    :param family: The configured entry family whose definition is derived.
+    :return: The family's internal entry-type definition.
+    :raises TypeError: If the family's ``entry_type_definition()`` does not
+        return an :class:`~httk.core.EntryTypeDefinition`, or a backing declares
+        malformed property metadata.
+    :raises ValueError: If the family has neither a definition id nor
+        ``entry_type_definition()``, or two backings declare different
+        definitions under one property name.
+    """
+    factory = getattr(family.family, "entry_type_definition", None)
+    if callable(factory):
+        definition = factory()
+        if not isinstance(definition, EntryTypeDefinition):
+            raise TypeError(f"{family.family.__name__}.entry_type_definition() must return EntryTypeDefinition")
+        return definition
+    if family.definition_id is None:
+        raise ValueError(f"entry family {family.name!r} has no entry-type definition")
+    from httk.core import load_entry_type_definition
+
+    base = load_entry_type_definition(family.definition_id)
+    contributions = [
+        (record, f"{record.__name__}.__httk_property_definitions__", declared)
+        for record in family.records
+        if (declared := getattr(record, "__httk_property_definitions__", None)) is not None
+    ]
+    properties = _record_property_union(base, contributions)
+    return base.extended(properties) if properties else base
+
+
+def _record_property_union(
+    base: EntryTypeDefinition, contributions: Sequence[tuple[type, str, object]]
+) -> dict[str, PropertyDefinition]:
+    """Return the property definitions records add to ``base``, rejecting disagreements.
+
+    Each contribution is ``(record, source, properties)``: the declaring record,
+    a diagnostic label, and its name-to-definition mapping (read only through
+    the ``Mapping`` interface).  Names already in ``base`` are skipped; one name
+    declared with two different definitions raises :class:`ValueError` naming
+    both records.
+    """
+    properties: dict[str, PropertyDefinition] = {}
+    owners: dict[str, type] = {}
+    for record, source, declared in contributions:
+        if not isinstance(declared, Mapping):
+            raise TypeError(f"{source} is not a properties mapping")
+        for property_name, property_definition in cast(Mapping[object, object], declared).items():
+            if not isinstance(property_name, str) or not isinstance(property_definition, PropertyDefinition):
+                raise TypeError(f"{source} has invalid property metadata")
+            if property_name in base.properties:
+                continue
+            previous = properties.get(property_name)
+            if previous is not None and previous != property_definition:
+                raise ValueError(
+                    f"records {owners[property_name].__name__} and {record.__name__} disagree about "
+                    f"property {property_name!r}"
+                )
+            properties[property_name] = property_definition
+            owners.setdefault(property_name, record)
+    return properties
+
+
 def _application_entry_family(name: str, entry_type: str, definition_id: str, records: tuple[type, ...]) -> type:
     """Create the local logical family shared by decorated records of one type."""
     from httk.core import load_entry_type_definition
 
     base = load_entry_type_definition(definition_id)
-    properties: dict[str, PropertyDefinition] = {}
+    contributions: list[tuple[type, str, object]] = []
     for record in records:
         factory = getattr(record, "entry_type_definition", None)
         if not callable(factory):
             raise TypeError(f"{record.__name__} must provide entry_type_definition()")
-        definition = factory()
-        definition_properties = getattr(definition, "properties", None)
+        definition_properties = getattr(factory(), "properties", None)
         if not isinstance(definition_properties, Mapping):
             raise TypeError(f"{record.__name__}.entry_type_definition() has no properties mapping")
-        for property_name, property_definition in definition_properties.items():
-            if not isinstance(property_name, str) or not isinstance(property_definition, PropertyDefinition):
-                raise TypeError(f"{record.__name__}.entry_type_definition() has invalid property metadata")
-            if property_name in base.properties:
-                continue
-            previous = properties.get(property_name)
-            if previous is not None and previous != property_definition:
-                raise ValueError(f"decorated records disagree about property {property_name!r}")
-            properties[property_name] = property_definition
-    extended = base.extended(properties)
+        contributions.append((record, f"{record.__name__}.entry_type_definition()", definition_properties))
+    extended = base.extended(_record_property_union(base, contributions))
 
     def entry_type_definition(cls: type) -> object:
         return extended

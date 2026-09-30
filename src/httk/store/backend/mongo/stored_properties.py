@@ -20,7 +20,6 @@ from httk.core import (
     FracVector,
     PropertyDefinition,
     known_definition_prefixes,
-    load_entry_type_definition,
 )
 from httk.core.optimade import FilterAst, parse_optimade_filter
 from httk.core.storage import (
@@ -36,6 +35,7 @@ from httk.store.query.optimade_filters import (
     translate_filter_ast,
 )
 from httk.store.query.protocols import SearchResult
+from httk.store.storage_layout import family_entry_type_definition
 from httk.store.store_timestamp import ns_operand_to_store_units
 
 from .evaluator import (
@@ -280,18 +280,20 @@ class MongoStoredPropertyCandidateStream:
 
 
 class _ConstantSortSearcher:
-    """Inject family-constant sort values into a Mongo candidate projection.
+    """Inject backing-constant sort values into a Mongo candidate projection.
 
-    MongoDB need not sort on a constant ``type`` value, but federation's
-    merge contract consumes sort values positionally.  This adapter restores
-    that value in exactly the requested position while delegating query
-    execution and limits to the real Mongo searcher.
+    MongoDB need not sort on a value that is constant for the backing (the
+    family ``type``, or ``None`` for a nullable property the backing does not
+    project), but federation's merge contract consumes sort values
+    positionally.  This adapter restores those values in exactly the requested
+    positions while delegating query execution and limits to the real Mongo
+    searcher.
     """
 
-    def __init__(self, searcher: MongoSearcher, sort: Sequence[tuple[str, bool]], entry_type: str) -> None:
+    def __init__(self, searcher: MongoSearcher, sort_count: int, constants: Mapping[int, object]) -> None:
         self._searcher = searcher
-        self._sort = tuple(sort)
-        self._entry_type = entry_type
+        self._sort_count = sort_count
+        self._constants = constants
 
     def set_limit(self, limit: int) -> None:
         self._searcher.set_limit(limit)
@@ -301,7 +303,8 @@ class _ConstantSortSearcher:
             # Four fixed outputs precede the sort values: sid, id, immutable_id, alt_kind.
             values = iter(result.values[4:])
             sort_values = tuple(
-                self._entry_type if name == "type" else next(values) for name, _descending in self._sort
+                self._constants[index] if index in self._constants else next(values)
+                for index in range(self._sort_count)
             )
             tail = tuple(values)
             names = (
@@ -309,7 +312,7 @@ class _ConstantSortSearcher:
                 "id",
                 "immutable_id",
                 "alt_kind",
-                *(f"sort_{index}" for index in range(len(self._sort))),
+                *(f"sort_{index}" for index in range(self._sort_count)),
                 *(("store_timestamp",) if tail else ()),
             )
             yield SearchResult(
@@ -431,11 +434,12 @@ class MongoStoredPropertyPlan:
             timestamp_output = self.store.store_timestamps
             if timestamp_output:
                 searcher._output(cast(MongoField, variable.store_timestamp), "store_timestamp")
-            candidate_searcher: Any = (
-                _ConstantSortSearcher(searcher, sort, self.entry_type)
-                if any(sort_name == "type" for sort_name, _descending in sort)
-                else searcher
-            )
+            constants: dict[int, object] = {
+                index: self.entry_type if sort_name == "type" else None
+                for index, (sort_name, _descending) in enumerate(sort)
+                if sort_name == "type" or self._unprojected_nullable(backing, sort_name)
+            }
+            candidate_searcher: Any = _ConstantSortSearcher(searcher, len(sort), constants) if constants else searcher
             streams.append(
                 MongoStoredPropertyCandidateStream(
                     backing.backing,
@@ -639,7 +643,9 @@ class MongoStoredPropertyPlan:
             searcher.add(variable.always_true())
         sort_fields: list[MongoField] = []
         for name, descending in sort:
-            if name == "type":
+            if name == "type" or self._unprojected_nullable(backing, name):
+                # Constant for this backing: nothing to sort server-side; the
+                # candidate adapter restores the value (None sorts last).
                 continue
             field = self._sort_field(backing, variable, name, public_id_prefix, revisions, alternatives)
             searcher.add_sort(field, descending)
@@ -693,6 +699,13 @@ class MongoStoredPropertyPlan:
             elif projection.query is not None:
                 handlers[name] = _projection_handlers(projection, context)
         return handlers
+
+    def _unprojected_nullable(self, backing: _BackingPlan, name: str) -> bool:
+        """Return whether ``name`` is a nullable property ``backing`` does not project (NULL on its rows)."""
+        if name in _INTRINSIC_PROPERTIES or name in backing.projections:
+            return False
+        definition = self.definition.properties.get(name)
+        return definition is not None and definition.nullable
 
     def _sort_field(
         self,
@@ -826,13 +839,11 @@ def stored_property_mongo_plan(
         raise MongoStoredPropertyConfigurationError(
             f"{family.__name__}.definition_id does not match the store family definition id"
         )
-    factory = getattr(family, "entry_type_definition", None)
-    definition = factory() if callable(factory) else load_entry_type_definition(definition_id)
-    if (
-        not isinstance(definition, EntryTypeDefinition)
-        or (definition.definition_id or definition.extends_id) != definition_id
-        or definition.name != entry_type
-    ):
+    try:
+        definition = family_entry_type_definition(layout)
+    except (TypeError, ValueError) as error:
+        raise MongoStoredPropertyConfigurationError(str(error)) from error
+    if (definition.definition_id or definition.extends_id) != definition_id or definition.name != entry_type:
         raise MongoStoredPropertyConfigurationError(f"{family.__name__} has an inconsistent entry definition")
 
     # Identity is settled against the internal definition above; everything the

@@ -18,7 +18,6 @@ from httk.core import (
     PropertyDefinition,
     RelatedEntry,
     known_definition_prefixes,
-    load_entry_type_definition,
 )
 from httk.core.storage import StrongLink
 
@@ -32,8 +31,10 @@ from httk.store.backend.schema import (
 from httk.store.entry_providers import strong_link_markers, wire_relationship_key
 from httk.store.query import ID_FIELD
 from httk.store.served_specs import served_specs
+from httk.store.storage_layout import EntryFamilyLayout
 
 from .documents import _as_fixed_tensor
+from .store import _served_definition
 from .stored_properties import MongoStoredPropertyPlan
 
 __all__ = ["StoreEntryProvider", "auto_definition", "served_specs"]
@@ -50,17 +51,10 @@ class _MongoStrongFamily:
     markers: Mapping[str, StrongLink]
 
 
-def _served_family_name(family: type, internal: str) -> str:
+def _served_family_name(family: EntryFamilyLayout, internal: str) -> str:
     """Return a family's served (wire) name, falling back to its internal name."""
-    factory = getattr(family, "entry_type_definition", None)
-    if callable(factory):
-        definition = factory()
-    else:
-        definition_id = getattr(family, "definition_id", None)
-        if not isinstance(definition_id, str) or not definition_id:
-            return internal
-        definition = load_entry_type_definition(definition_id)
-    return definition.served_form().name if isinstance(definition, EntryTypeDefinition) else internal
+    served = _served_definition(family)
+    return served.name if served is not None else internal
 
 
 def _default_id(_entry_type: str, _sid: int, obj: Any) -> str:
@@ -329,7 +323,7 @@ class StoreEntryProvider(EntryProvider):
             internal = getattr(family.family, "type", None)
             if not isinstance(internal, str):
                 continue
-            wire = _served_family_name(family.family, internal)
+            wire = _served_family_name(family, internal)
             for backing in family.records:
                 markers = strong_link_markers(backing)
                 if markers:
@@ -340,7 +334,7 @@ class StoreEntryProvider(EntryProvider):
         """Return the served (wire) entry-type name for an edge's internal target type."""
         for family in self._store.layout.families:
             if family.definition_id is not None and getattr(family.family, "type", None) == internal_type:
-                return _served_family_name(family.family, internal_type)
+                return _served_family_name(family, internal_type)
         return internal_type
 
     def _family_internal_type(self, entry_type: str) -> str | None:

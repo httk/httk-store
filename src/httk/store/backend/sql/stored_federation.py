@@ -1365,7 +1365,7 @@ class StoredEntryFederation:
             # name so an unmapped target still keys the block in the one wire
             # vocabulary, never the internal one (e.g. "_httk_runs", not "runs").
             family_layout = store._family_for_backing(link_spec.target)
-            served = _served_definition(family_layout.family) if family_layout is not None else None
+            served = _served_definition(family_layout) if family_layout is not None else None
             related_type = served.name if served is not None else internal[0]
         link_table = store._table(link_spec.table_name)
         source_lids = sorted(set(lid_by_sid.values()))

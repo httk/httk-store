@@ -9,18 +9,22 @@ import pytest
 import sqlalchemy
 from clickhouse_read_support import CLICKHOUSE_PARAM, bulk_store
 from httk.core import PropertyDefinition, load_entry_type_definition
-from httk.core.register import register_entry_family, register_entry_record
+from httk.core.data_records import RECORDS_DEFINITION_ID, DataRecord, DataRecordEntry, TotalEnergyRecord
+from httk.core.register import load_property_definition, register_entry_family, register_entry_record
 from httk.core.storage import IdentitySkip, Indexed, QueryLiteralError, StorageInfo, StoredPropertyProjection, Unique
 from postgres_support import POSTGRES_PARAM, postgres_database
 
-from httk.store import EntryIdScheme
+from httk.store import EntryFamilyDeclaration, EntryIdScheme, EntryRecordDeclaration
 from httk.store.backend.sql import (
     Backend,
     SqlStore,
+    StoredEntryFederation,
+    StoredEntrySource,
     StoredPropertySqlConfigurationError,
     stored_property_sql_plan,
 )
 from httk.store.query.optimade_filters import FilterTranslationError
+from httk.store.storage_layout import family_entry_type_definition
 
 pytestmark = pytest.mark.xdist_group("clickhouse_read_corpus")
 
@@ -471,3 +475,211 @@ def test_backings_cannot_override_intrinsic_id_or_type():
         store = SqlStore(database, entry_records={BadFamily: BadCalculation}, entry_ids=EntryIdScheme("httk.test", "1"))
         with pytest.raises(StoredPropertySqlConfigurationError, match="intrinsic"):
             stored_property_sql_plan(store, BadFamily)
+
+
+# A family without its own ``entry_type_definition()`` (core ``records``) serves
+# the union of its backings' ``__httk_property_definitions__``: a typed backing
+# with a native float column serves ``_httk_total_energy`` next to generic
+# ``DataRecord`` rows, which do not project it and so count as null.
+
+TOTAL_ENERGY_DEFINITION = "https://schemas.httk.org/defs/v0.1/properties/core/total_energy"
+
+
+def _energy_query(ctx, operator: str, literal: object):
+    value = ctx.field("total_energy")
+    if operator == "IS_UNKNOWN":
+        return ctx.is_null(value)
+    if operator == "IS_KNOWN":
+        return ctx.not_(ctx.is_null(value))
+    return ctx.compare(value, operator, ctx.constant(literal))
+
+
+_ENERGY_PROJECTION = StoredPropertyProjection(
+    response=lambda record: record.total_energy,
+    query=_energy_query,
+    sort=lambda ctx: ctx.field("total_energy"),
+)
+
+
+@dataclass(frozen=True)
+class TypedEnergyRecord:
+    """A test-local typed ``records`` backing mirroring the ``DataRecord`` storage contract."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        storage_name="stored_property_typed_energy", identity_name="stored_property_typed_energy"
+    )
+    __httk_property_definitions__: ClassVar = {
+        "_httk_total_energy": load_property_definition(TOTAL_ENERGY_DEFINITION).served_form()
+    }
+    __httk_stored_properties__: ClassVar = {"_httk_total_energy": _ENERGY_PROJECTION}
+
+    total_energy: float
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+    @property
+    def type(self) -> str:
+        return "records"
+
+
+@dataclass(frozen=True)
+class ClashingEnergyRecord:
+    """A second typed backing declaring ``_httk_total_energy`` with a different definition."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        storage_name="stored_property_clashing_energy", identity_name="stored_property_clashing_energy"
+    )
+    __httk_property_definitions__: ClassVar = {
+        "_httk_total_energy": PropertyDefinition.from_simple(
+            "_httk_total_energy", description="A different energy.", fulltype="float"
+        )
+    }
+    __httk_stored_properties__: ClassVar = {"_httk_total_energy": _ENERGY_PROJECTION}
+
+    total_energy: float
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+    @property
+    def type(self) -> str:
+        return "records"
+
+
+_RECORD_NAMES = {
+    DataRecord: "core-data-record",
+    TotalEnergyRecord: "core-total-energy",
+    TypedEnergyRecord: "test-stored-properties-typed-energy",
+    ClashingEnergyRecord: "test-stored-properties-clashing-energy",
+}
+
+
+def records_families(*records):
+    """Declare the core ``records`` family explicitly over ``records``.
+
+    The test-local typed records are never registered globally (an in-process
+    layout built from ``known_entry_records`` would otherwise gain them); the
+    explicit declaration keeps the core family and record names, so it passes
+    the registry-conflict checks.
+    """
+    return (
+        EntryFamilyDeclaration(
+            name="records",
+            family=DataRecordEntry,
+            definition_id=RECORDS_DEFINITION_ID,
+            records=tuple(
+                EntryRecordDeclaration(name=_RECORD_NAMES[record], record=record, definition_id=RECORDS_DEFINITION_ID)
+                for record in records
+            ),
+        ),
+    )
+
+
+def _records_layout(store):
+    return next(layout for layout in store.entry_layout if layout.family is DataRecordEntry)
+
+
+def test_records_family_without_typed_backings_serves_the_registered_definition_unchanged():
+    with Backend.sqlite() as database:
+        store = SqlStore(
+            database, entry_records={DataRecordEntry: DataRecord}, entry_ids=EntryIdScheme("httk.test", "1")
+        )
+        registered = load_entry_type_definition(RECORDS_DEFINITION_ID)
+        assert family_entry_type_definition(_records_layout(store)) == registered
+        assert store.stored_property_plan(DataRecordEntry).definition == registered.served_form()
+
+
+@pytest.mark.parametrize("typed", (TypedEnergyRecord, TotalEnergyRecord), ids=("test-local", "core"))
+def test_records_family_serves_typed_backing_properties_next_to_data_records(typed):
+    with Backend.sqlite() as database:
+        store = SqlStore(
+            database,
+            entry_families=records_families(DataRecord, typed),
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
+        generic = store.fetch(DataRecord, store.save(DataRecord.from_value(TOTAL_ENERGY_DEFINITION, "e", -1.0)))
+        low = store.fetch(typed, store.save(typed(-5.0)))
+        high = store.fetch(typed, store.save(typed(2.5)))
+
+        internal = family_entry_type_definition(_records_layout(store))
+        assert internal.extends_id == RECORDS_DEFINITION_ID
+        assert internal.properties["_httk_total_energy"].definition_id == TOTAL_ENERGY_DEFINITION
+        plan = store.stored_property_plan(DataRecordEntry)
+        assert plan.entry_type == "_httk_records"
+        assert plan.definition.properties["_httk_total_energy"].unit == "eV"
+        rows = {row["id"]: row for row in plan.records()}
+        assert rows[generic.id]["_httk_total_energy"] is None
+        assert rows[low.id]["_httk_total_energy"] == -5.0
+
+        assert {record.id for record in _records(plan.filter_searchers("_httk_total_energy < 0"))} == {low.id}
+        assert {record.id for record in _records(plan.filter_searchers("_httk_total_energy IS UNKNOWN"))} == {
+            generic.id
+        }
+        assert {record.id for record in _records(plan.filter_searchers("_httk_total_energy IS KNOWN"))} == {
+            low.id,
+            high.id,
+        }
+
+        store.replace(low, typed(-6.0))
+        latest = _records(plan.filter_searchers("_httk_total_energy < 0", only_latest=True))
+        assert [(record.id, record.total_energy) for record in latest] == [(low.id, -6.0)]
+        assert [item.total_energy for item in store.history(low)] == [-5.0, -6.0]
+
+
+def test_records_family_rejects_backings_that_disagree_about_a_property():
+    with Backend.sqlite() as database:
+        store = SqlStore(
+            database,
+            entry_families=records_families(DataRecord, TypedEnergyRecord, ClashingEnergyRecord),
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
+        message = "TypedEnergyRecord and ClashingEnergyRecord disagree about property '_httk_total_energy'"
+        with pytest.raises(ValueError, match=message):
+            family_entry_type_definition(_records_layout(store))
+        with pytest.raises(StoredPropertySqlConfigurationError, match=message):
+            stored_property_sql_plan(store, DataRecordEntry)
+        with pytest.raises(ValueError, match=message):
+            store.stored_property_plan(DataRecordEntry)
+
+
+def _records_database(dialect):
+    if dialect == "postgresql":
+        return postgres_database()
+    if dialect == "duckdb":
+        pytest.importorskip("duckdb_engine")
+        return Backend.duckdb()
+    return Backend.sqlite()
+
+
+@pytest.mark.parametrize("dialect", ("sqlite", "duckdb", POSTGRES_PARAM))
+@pytest.mark.parametrize("typed", (TypedEnergyRecord, TotalEnergyRecord), ids=("test-local", "core"))
+def test_records_family_sorts_typed_values_with_unprojected_rows_last(dialect, typed):
+    """A backing that does not project a nullable property sorts as NULL: last in both directions."""
+    with _records_database(dialect) as database:
+        store = SqlStore(
+            database,
+            entry_families=records_families(DataRecord, typed),
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
+        generic = sorted(
+            store.fetch(DataRecord, store.save(DataRecord.from_value(TOTAL_ENERGY_DEFINITION, "e", value))).id
+            for value in (-10.0, 10.0)
+        )
+        for value in (1.0, -3.0, 2.0):
+            store.save(typed(value))
+        federation = StoredEntryFederation((StoredEntrySource(store, DataRecordEntry, "records"),))
+
+        def ordered(descending, **page):
+            rows = federation.query(sort=(("_httk_total_energy", descending),), **page).rows
+            return [row["_httk_total_energy"] if row["_httk_total_energy"] is not None else row["id"] for row in rows]
+
+        assert ordered(False) == [-3.0, 1.0, 2.0, *generic]
+        assert ordered(True) == [2.0, 1.0, -3.0, *generic]
+        # Pages crossing the typed/NULL boundary keep the merged order.
+        assert ordered(False, offset=2, limit=2) == [2.0, generic[0]]
+        assert ordered(True, offset=1, limit=3) == [1.0, -3.0, generic[0]]
+        # The per-backing plan orders the typed backing's own rows natively.
+        plan = store.stored_property_plan(DataRecordEntry)
+        searchers = plan.filter_searchers("_httk_total_energy IS KNOWN", sort=(("_httk_total_energy", True),))
+        assert [record.total_energy for record in _records(searchers)] == [2.0, 1.0, -3.0]

@@ -126,3 +126,31 @@ def test_structure_export_contains_extended_family_definition(tmp_path: Path) ->
         atomistic.StructureEntry.entry_type_definition().as_optimade()["properties"].keys()
         == entry["properties"].keys()
     )
+
+
+def test_records_export_contains_typed_backing_property_definitions(tmp_path: Path) -> None:
+    from httk.core.data_records import (
+        RECORDS_DEFINITION_ID,
+        TOTAL_ENERGY_DEFINITION_ID,
+        DataRecord,
+        DataRecordEntry,
+        TotalEnergyRecord,
+    )
+
+    source = tmp_path / "records.sqlite"
+    output = tmp_path / "records.zip"
+    with Backend.sqlite(source) as database:
+        store = SqlStore(
+            database,
+            entry_records={DataRecordEntry: (DataRecord, TotalEnergyRecord)},
+            entry_ids=EntryIdScheme("httk.test", "1"),
+        )
+        store.save(TotalEnergyRecord(-1.5))
+
+    export_dataset(source, output)
+    with zipfile.ZipFile(output) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        definitions = {item["id"]: json.loads(archive.read(item["path"])) for item in manifest["definitions"]}
+    assert "total_energy" not in definitions[RECORDS_DEFINITION_ID]["properties"]
+    assert definitions[RECORDS_DEFINITION_ID]["properties"]["_httk_total_energy"]["$id"] == TOTAL_ENERGY_DEFINITION_ID
+    assert definitions[TOTAL_ENERGY_DEFINITION_ID]["x-optimade-unit"] == "eV"

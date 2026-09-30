@@ -11,7 +11,7 @@ import typing
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from httk.core import EntryTypeDefinition, FracVector, load_entry_type_definition
+from httk.core import EntryTypeDefinition, FracVector
 from httk.core.entry_ids import (
     ALTERNATIVE_KIND_PATTERN,
     check_entry_id,
@@ -41,6 +41,7 @@ from httk.store.storage_layout import (
     _merge_storage_layouts,
     classify_schema_upgrade,
     declaration_json,
+    family_entry_type_definition,
     normalize_entry_families,
     normalize_entry_records,
     schema_fingerprint_diff,
@@ -200,26 +201,27 @@ def _bound_record_class(cls: type) -> type:
     return bound_type
 
 
-def _served_definition(family: type) -> EntryTypeDefinition | None:
+def _served_definition(family: EntryFamilyLayout) -> EntryTypeDefinition | None:
     """Return the wire (served) form of a family's internal definition, if resolvable.
 
     Resolved exactly as :func:`stored_property_mongo_plan` resolves its internal
-    definition (family ``entry_type_definition()`` or, failing that,
-    ``load_entry_type_definition(definition_id)``). Returns ``None`` when the
-    family declares neither, leaving the plan builder to raise its own error.
+    definition (:func:`~httk.store.storage_layout.family_entry_type_definition`).
+    Returns ``None`` when the family class declares neither
+    ``entry_type_definition()`` nor a ``definition_id``, or the definition is
+    malformed, leaving the plan builder to raise its own error.
 
-    :param family: The logical entry-family class to resolve.
+    :param family: The configured entry family to resolve.
     :return: The served definition, or ``None`` when it cannot be resolved.
     """
-    factory = getattr(family, "entry_type_definition", None)
-    if callable(factory):
-        internal = factory()
-    else:
-        definition_id = getattr(family, "definition_id", None)
-        if not isinstance(definition_id, str) or not definition_id:
-            return None
-        internal = load_entry_type_definition(definition_id)
-    return internal.served_form() if isinstance(internal, EntryTypeDefinition) else None
+    definition_id = getattr(family.family, "definition_id", None)
+    if not callable(getattr(family.family, "entry_type_definition", None)) and (
+        not isinstance(definition_id, str) or not definition_id
+    ):
+        return None
+    try:
+        return family_entry_type_definition(family).served_form()
+    except TypeError:
+        return None
 
 
 class _AlternativeRequest(typing.NamedTuple):
@@ -2566,7 +2568,8 @@ class MongoStore:
         """
         from .stored_properties import stored_property_mongo_plan
 
-        return stored_property_mongo_plan(self, family, served=_served_definition(family))
+        layout = next((item for item in self.entry_layout if item.family is family), None)
+        return stored_property_mongo_plan(self, family, served=None if layout is None else _served_definition(layout))
 
     def referring(self, cls: type, *, field: str, to: Any, eager: bool = False) -> list[Any]:
         """Return records whose reference field points at ``to``, ordered by sid.

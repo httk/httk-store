@@ -29,7 +29,6 @@ from httk.core import (
     PropertyDefinition,
     apply_definition_prefix,
     known_definition_prefixes,
-    load_entry_type_definition,
 )
 from httk.core.optimade import FilterAst, parse_optimade_filter
 from httk.core.provenance import RUNS_DEFINITION_ID
@@ -72,6 +71,7 @@ from httk.store.query.optimade_filters import (
     constant_stringmatching_handler,
     translate_filter_ast,
 )
+from httk.store.storage_layout import family_entry_type_definition
 from httk.store.store_timestamp import ns_operand_to_store_units
 
 __all__ = [
@@ -956,10 +956,15 @@ class StoredPropertySqlPlan:
         for name, descending in sort:
             value = self._sort_value(backing, context, name, public_id_prefix, revisions, alternatives)
             self._validate_clickhouse_correlation(value)
+            sort_values.append(value)
+            if isinstance(value.element, Null):
+                # A constant NULL key ties every row of this backing: it is output
+                # for the federation merge but not ordered by (PostgreSQL rejects
+                # a bare constant in ORDER BY).
+                continue
             # SqlSearcher._order_by ranks NULLs last before each sort key.
             order_element = value.element if value.codec is not None and value.codec.name == "float" else value.exact
             searcher.add_sort(SqlColumn(searcher, order_element), descending)
-            sort_values.append(value)
         return searcher, variable, tuple(sort_values)
 
     def _validate_clickhouse_correlation(self, value: object) -> None:
@@ -1156,6 +1161,10 @@ class StoredPropertySqlPlan:
         if name not in self.definition.properties:
             raise StoredPropertySqlConfigurationError(f"{self.entry_type} has no property {name!r} to sort")
         projection = backing.projections.get(name)
+        if projection is None and self.definition.properties[name].nullable:
+            # An unprojected nullable property is NULL on every row of this
+            # backing; it sorts with the other NULLs (last, in both directions).
+            return context.null()
         if projection is None or projection.sort is None:
             raise StoredPropertySqlConfigurationError(
                 f"{backing.backing.__name__} has no sortable projection for {name!r}"
@@ -1215,12 +1224,10 @@ def stored_property_sql_plan(
         )
     if not isinstance(definition_id, str) or not definition_id:
         raise StoredPropertySqlConfigurationError(f"{family.__name__} needs an entry definition id")
-    factory = getattr(family, "entry_type_definition", None)
-    definition = factory() if callable(factory) else load_entry_type_definition(definition_id)
-    if not isinstance(definition, EntryTypeDefinition):
-        raise StoredPropertySqlConfigurationError(
-            f"{family.__name__}.entry_type_definition() must return EntryTypeDefinition"
-        )
+    try:
+        definition = family_entry_type_definition(layout)
+    except (TypeError, ValueError) as error:
+        raise StoredPropertySqlConfigurationError(str(error)) from error
     source_id = definition.definition_id or definition.extends_id
     if source_id != definition_id:
         raise StoredPropertySqlConfigurationError(
@@ -1414,7 +1421,7 @@ def _served_type_for_target(store: SqlStore, target: type) -> str | None:
     if internal is None:
         return None
     family_layout = store._family_for_backing(target)
-    served = _served_definition(family_layout.family) if family_layout is not None else None
+    served = _served_definition(family_layout) if family_layout is not None else None
     return served.name if served is not None else internal[0]
 
 

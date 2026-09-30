@@ -335,10 +335,12 @@ def normalize_entry_types(records: Sequence[type]) -> StorageLayout:
     recursively, so a record containing (for example) a structure also makes
     the structure family available to a serving provider.
 
-    :param records: Decorated frozen entry-record classes to serve.
+    :param records: Decorated frozen entry-record classes, or registered core records such as ``Run``, to serve.
     :return: The normalized storage layout.
     :raises TypeError: If ``records`` is not a sequence of classes.
-    :raises ValueError: If a class has incomplete or conflicting entry metadata.
+    :raises ValueError: If a class is neither decorated nor registered, has incomplete or conflicting entry
+        metadata, or two families containing explicitly listed
+        classes would serve the same entry type.
     """
     if not isinstance(records, Sequence) or isinstance(records, str | bytes):
         raise TypeError("records must be a sequence of entry-record classes")
@@ -351,7 +353,8 @@ def normalize_entry_types(records: Sequence[type]) -> StorageLayout:
 
     declarations: dict[str, EntryFamilyDeclaration] = {}
     decorated_groups: dict[tuple[str, str], list[tuple[str, type]]] = {}
-    pending = [(record, "decorated") for record in records]
+    pending = [(record, "registered") for record in records]
+    listed = set(records)
     visited: set[type] = set()
     while pending:
         record, mode = pending.pop(0)
@@ -368,7 +371,15 @@ def normalize_entry_types(records: Sequence[type]) -> StorageLayout:
             if mode == "private":
                 _queue_referenced_records(record, pending)
                 continue
-            registered_name = _registered_record_name(record)
+            try:
+                registered_name = _registered_record_name(record)
+            except ValueError:
+                if record not in listed:
+                    raise
+                raise ValueError(
+                    f"{record.__name__} is neither decorated nor registered: decorate it with "
+                    "httk.core.entry_record or register it with httk.core.register_entry_record"
+                ) from None
             name = registered_name
         family_name = getattr(record, "type", None)
         definition_id = getattr(record, "definition_id", None)
@@ -440,6 +451,17 @@ def normalize_entry_types(records: Sequence[type]) -> StorageLayout:
             definition_id=definition_id,
         )
 
+    served: dict[str, str] = {}
+    for declaration in declarations.values():
+        if not any(item.record in listed for item in declaration.records):
+            continue
+        entry_type = getattr(declaration.family, "type", declaration.name)
+        if entry_type in served:
+            raise ValueError(
+                f"entry families {served[entry_type]!r} and {declaration.name!r} both serve entry type "
+                f"{entry_type!r}; serve only one of them (for example a DataEntryRecord subclass instead of DataRecord)"
+            )
+        served[entry_type] = declaration.name
     return _normalize_entry_families(tuple(declarations.values()), explicit=True)
 
 

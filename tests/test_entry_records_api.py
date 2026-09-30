@@ -1,14 +1,16 @@
 """Coverage for the compact decorated-record SQL store declaration."""
 
+import hashlib
 from dataclasses import dataclass
 from typing import Annotated
 
 import pytest
 from httk.atomistic import UnitcellStructureRecord
-from httk.core import DataEntryRecord, Property, entry_record, register_entry_record
+from httk.core import DataEntryRecord, DataRecord, FileRecord, Property, Run, entry_record, register_entry_record
 
 from httk.store import EntryIdScheme, SqliteStore
 from httk.store.backend.sql import optimade_filter_searcher
+from httk.store.storage_layout import declaration_json, normalize_entry_types, schema_fingerprint_json
 
 
 @entry_record("test.result")
@@ -125,3 +127,59 @@ def test_multiple_decorated_records_reject_duplicate_stable_names() -> None:
 def test_records_declaration_is_mutually_exclusive_with_explicit_layout() -> None:
     with pytest.raises(TypeError, match="mutually exclusive"):
         SqliteStore(None, records=[Result], entry_records={})
+
+
+def test_records_declaration_accepts_registered_core_records() -> None:
+    store = SqliteStore(None, records=[ResultWithStructure, Run, FileRecord], entry_ids=EntryIdScheme("test", "1"))
+    assert store.layout.declaration == {
+        "__httk_records": ("test.result_with_structure",),
+        "files": ("core-file",),
+        "runs": ("core-run",),
+        "structures": ("atomistic-unitcell-structure",),
+    }
+    store.close()
+
+
+def test_records_declaration_listing_referenced_record_does_not_duplicate() -> None:
+    store = SqliteStore(
+        None, records=[ResultWithStructure, UnitcellStructureRecord], entry_ids=EntryIdScheme("test", "1")
+    )
+    assert list(store.layout.declaration).count("structures") == 1
+    store.close()
+
+
+def test_records_declaration_rejects_unregistered_undecorated_class() -> None:
+    @dataclass(frozen=True)
+    class Plain:
+        value: int
+
+    with pytest.raises(ValueError, match="entry_record.*register_entry_record"):
+        SqliteStore(None, records=[Plain])
+
+
+def test_records_declaration_rejects_two_families_serving_one_entry_type() -> None:
+    with pytest.raises(ValueError, match="both serve entry type 'records'"):
+        SqliteStore(None, records=[Result, DataRecord])
+
+
+def test_decorated_only_records_layout_is_unchanged() -> None:
+    layouts = {
+        (ResultWithStructure,): "5d85f3e3e1da594d",
+        (Result,): "6f112d9b5ed9c225",
+        (Alpha, Beta): "1329a570deae655b",
+    }
+    for records, digest in layouts.items():
+        layout = normalize_entry_types(list(records))
+        text = declaration_json(layout) + schema_fingerprint_json(layout)
+        assert hashlib.sha256(text.encode()).hexdigest()[:16] == digest
+
+
+@entry_record("test.with_detail")
+class WithDetail(DataEntryRecord):
+    detail: DataRecord
+
+
+def test_records_declaration_allows_referenced_colliding_family() -> None:
+    store = SqliteStore(None, records=[WithDetail], entry_ids=EntryIdScheme("test", "1"))
+    assert {"__httk_records", "records"} <= set(store.layout.declaration)
+    store.close()

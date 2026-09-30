@@ -183,3 +183,27 @@ def test_records_declaration_allows_referenced_colliding_family() -> None:
     store = SqliteStore(None, records=[WithDetail], entry_ids=EntryIdScheme("test", "1"))
     assert {"__httk_records", "records"} <= set(store.layout.declaration)
     store.close()
+
+
+@entry_record("test.nullable_props")
+class NullableProps(DataEntryRecord):
+    energy: Annotated[float | None, Property(description="Nullable energy")] = None
+    source: Annotated[str, Property(description="Source path")] = ""
+    flag: Annotated[bool, Property(description="A flag")] = False
+
+
+def test_is_known_and_is_unknown_filters_on_decorated_properties() -> None:
+    store = SqliteStore(None, records=[NullableProps], entry_ids=EntryIdScheme("test", "1"))
+    store.save(NullableProps(energy=1.5, source="a", flag=True))
+    store.save(NullableProps(energy=None, source="b", flag=False))
+    plan = store.stored_property_plan(store.entry_layout[0].family)
+
+    def sources(filter_string: str) -> set[str]:
+        return {row[0].source for searcher in plan.filter_searchers(filter_string) for row in searcher.results()}
+
+    assert sources("_httk_custom_energy IS UNKNOWN") == {"b"}
+    assert sources("_httk_custom_energy IS KNOWN") == {"a"}
+    assert sources("NOT _httk_custom_energy IS KNOWN") == {"b"}
+    assert sources("_httk_custom_source IS KNOWN") == {"a", "b"}
+    assert sources("_httk_custom_flag IS KNOWN") == {"a", "b"}
+    store.close()

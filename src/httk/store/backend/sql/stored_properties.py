@@ -956,16 +956,7 @@ class StoredPropertySqlPlan:
         for name, descending in sort:
             value = self._sort_value(backing, context, name, public_id_prefix, revisions, alternatives)
             self._validate_clickhouse_correlation(value)
-            # SQLite orders nulls first in ascending order while DuckDB's
-            # default differs.  Make the cross-dialect NULLS LAST contract
-            # explicit before the actual user key in both directions.
-            if self.store._database.engine.dialect.name == "clickhousedb":
-                from httk.store.backend.clickhouse.support import null_order_rank
-
-                null_rank = null_order_rank(value.element, "last", dialect_name="clickhousedb")
-            else:
-                null_rank = sqlalchemy.case((value.element.is_(None), 1), else_=0)
-            searcher.add_sort(SqlColumn(searcher, null_rank), False)
+            # SqlSearcher._order_by ranks NULLs last before each sort key.
             order_element = value.element if value.codec is not None and value.codec.name == "float" else value.exact
             searcher.add_sort(SqlColumn(searcher, order_element), descending)
             sort_values.append(value)

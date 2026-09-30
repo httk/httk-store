@@ -1503,6 +1503,8 @@ class SqlSearcher:
     def add_sort(self, field: SqlColumn, descending: bool = False) -> None:
         """Append a sort key; the first-declared key is the most significant.
 
+        NULLs sort last in both directions, on every dialect.
+
         :param field: The column used as the next sort key.
         :param descending: Whether the key is ordered from highest to lowest.
         :return: None.
@@ -1517,6 +1519,21 @@ class SqlSearcher:
                 "cannot sort by a weak-link path; weak-link traversals are usable only as search predicates"
             )
         self._sorts.append((field, descending))
+
+    def _order_by(self, statement: sqlalchemy.Select[Any]) -> sqlalchemy.Select[Any]:
+        """Apply the declared sort keys, each preceded by a NULLS LAST rank."""
+        clickhouse = self._store._database.engine.dialect.name == "clickhousedb"
+        for column, descending in self._sorts:
+            element = column._element
+            if clickhouse:
+                from httk.store.backend.clickhouse.support import null_order_rank
+
+                rank = null_order_rank(element, "last", dialect_name="clickhousedb")
+            else:
+                # A portable CASE rank, not .nulls_last(): ClickHouse and older SQLite lack it.
+                rank = sqlalchemy.case((element.is_(None), 1), else_=0)
+            statement = statement.order_by(rank.asc(), element.desc() if descending else element.asc())
+        return statement
 
     def set_limit(self, limit: int) -> None:
         """Limit the number of iterated matches; a negative value clears the limit.
@@ -1649,8 +1666,7 @@ class SqlSearcher:
         group_columns = [cast("sqlalchemy.ColumnElement[Any]", v._alias.c[SID_COLUMN]) for v in self._variables]
         group_columns += [output.element for output in self._outputs if output.target is None and not output.from_child]
         statement = self._base_select(columns, group_columns)
-        for column, descending in self._sorts:
-            statement = statement.order_by(column._element.desc() if descending else column._element.asc())
+        statement = self._order_by(statement)
         if self._limit is not None:
             statement = statement.limit(self._limit)
         if self.offset > 0:

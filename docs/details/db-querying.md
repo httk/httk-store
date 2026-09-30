@@ -195,6 +195,33 @@ obvious alternative, a `field == field` probe, is not NULL-safe — it yields
 NULL rather than true for a row whose field is NULL, and so silently drops
 rows.
 
+### Implementing the protocol for another backend
+
+A store over another backend (an existing database, an in-memory table, a
+remote service) conforms when it follows the same three-valued truth table:
+
+- Comparisons and literal string matching against NULL are unknown, `~`
+  keeps them unknown, `&`/`|` follow Kleene logic, and unknown rows never
+  match (OPTIMADE's rule for unknown values). `field == None` and
+  `field != None` are definite `IS [NOT] NULL` tests.
+- `is_in` is definite: NULL matches only an explicit `None` member.
+- `has`/`has_any`/`has_only` read a NULL list as the empty set.
+- `count()` ignores limit and offset; sorting puts NULLs last both ways.
+- String-matching case sensitivity is backend-defined.
+
+`httk.store.query.conformance` states this as data: load
+`conformance_rows()` into one table or collection, then run the cases (or
+parametrize your own tests over `conformance_cases()`):
+
+```python
+from httk.store.query.conformance import check_query_conformance, conformance_rows
+
+store = MyStore(rows=conformance_rows())  # rows keyed by "rid"
+check_query_conformance(store, "rows")  # raises AssertionError listing failures
+```
+
+Rows may come back as mappings or as attribute-style records.
+
 ### Result and identity semantics
 
 Search rows are lazy subclasses of the storable class, so `isinstance(row,

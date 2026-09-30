@@ -71,6 +71,7 @@ db-recovery
 db-bulk-ingestion
 db-querying
 db-serving
+db-tables
 db-optimade-client
 ```
 

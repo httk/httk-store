@@ -63,6 +63,8 @@ search DSL and stored properties, record replacement lineages, bulk ingestion
 fresh-store profile), the permanentization role model with `store.fsck()`
 recovery, OPTIMADE serving, and store-layout versioning.
 
+To query or serve an existing SQL database in place, see {doc}`details/db-tables`.
+
 (serving-application-records)=
 ## Serving application records
 

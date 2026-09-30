@@ -281,8 +281,7 @@ class SqlResultSet:
         ]
         group_columns += [extra for extras in self._projection_extras for extra in extras]
         statement = self._plan._base_select(columns, group_columns)
-        for column, descending in self._plan._sorts:
-            statement = statement.order_by(column._element.desc() if descending else column._element.asc())
+        statement = self._plan._order_by(statement)
         if limit is None:
             limit = self._plan._limit
         elif self._plan._limit is not None:

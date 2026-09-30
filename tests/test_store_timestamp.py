@@ -247,10 +247,12 @@ def test_query_operands_floor_sort_and_optimade_integer_path():
         ascending = store.searcher()
         asc = ascending.variable(TimestampNoneRecord)
         ascending.add_sort(asc.store_timestamp)
+        ascending.add_sort(asc.value)
         assert [row[0].value for row in ascending.results(record=asc)] == [1, 2]
         descending = store.searcher()
         desc = descending.variable(TimestampNoneRecord)
         descending.add_sort(desc.store_timestamp, descending=True)
+        descending.add_sort(desc.value, descending=True)
         assert [row[0].value for row in descending.results(record=desc)] == [2, 1]
 
         exposed = store.searcher()

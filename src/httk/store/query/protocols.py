@@ -35,7 +35,11 @@ __all__ = [
 ]
 
 ID_FIELD: Final = "__id"
-"""The backend field name used for the served entry identifier."""
+"""The backend field name used for the served entry identifier.
+
+This is the in-memory/provider serving convention for the served id; a store
+serving its own data may name its id field freely.
+"""
 
 
 class UnsupportedQueryError(ValueError):
@@ -298,7 +302,13 @@ class ResultSetLike(Protocol):
 
 
 class SearchExpression(Protocol):
-    """Require composable backend search expressions."""
+    """Require composable backend search expressions.
+
+    Expressions are three-valued: a comparison against a NULL value is
+    *unknown*, ``~unknown`` stays unknown, ``&``/``|`` follow Kleene logic, and
+    only definitely true rows match. :mod:`httk.store.query.conformance` is the
+    executable statement of this contract.
+    """
 
     def __and__(self, other: "SearchExpression") -> "SearchExpression":
         """Conjoin this expression with ``other``."""
@@ -327,6 +337,15 @@ class SearchField(Protocol):
     any other metacharacter) match themselves. A backend is therefore free to
     implement them with SQL ``LIKE`` over an escaped pattern, with a regular
     expression, or with a full-text index — the choice is invisible here.
+    Their case sensitivity is backend-defined.
+
+    NULL semantics by operation family: comparisons and string matching against
+    a NULL value are unknown (see :class:`SearchExpression`); ``== None`` and
+    ``!= None`` are definite ``IS [NOT] NULL`` tests; :meth:`is_in` is definite
+    and matches NULL only through an explicit ``None`` member; set operations
+    treat a NULL list as the empty set (``has``/``has_any`` false, ``has_only``
+    true), definite under ``~``. Sorting places NULLs last in both directions.
+    See :mod:`httk.store.query.conformance`.
     """
 
     def has(self, value: Any) -> SearchExpression:
@@ -441,7 +460,7 @@ class Searcher(Protocol):
         ...
 
     def count(self) -> int:
-        """Return the exact count of the current query."""
+        """Return the exact count of the current query, ignoring limit and offset."""
         ...
 
     def set_limit(self, limit: int) -> None:
@@ -457,7 +476,12 @@ class Searcher(Protocol):
         ...
 
     def results(self, **outputs: Any) -> ResultSetLike:
-        """Return a result set for the requested named outputs."""
+        """Return a result set for the requested named outputs.
+
+        A variable output yields the backend's matched row object (the serving
+        layer passes it to response extractors, and mapped serving sources read
+        it as a ``Mapping``); a field output yields that field's value.
+        """
         ...
 
 

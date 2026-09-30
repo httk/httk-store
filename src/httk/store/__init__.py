@@ -101,6 +101,7 @@ __all__ = [
     "ContinuationToken",
     "CountUnavailableError",
     "DataRecordEntryProvider",
+    "DelimitedColumn",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "DuckdbStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "EntryFamilyDeclaration",
     "EntryIdConflictError",
@@ -119,6 +120,7 @@ __all__ = [
     "FilterTranslationError",
     "IdLedger",
     "IdLedgerError",
+    "ListTable",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "MongoStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "MultipleResultsError",
     "NoResultError",
@@ -140,6 +142,8 @@ __all__ = [
     "Searcher",
     "SqliteStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "Store",
+    "TableSource",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
+    "TableStore",  # pyright: ignore[reportUnsupportedDunderAll]  (provided lazily via __getattr__)
     "UnsupportedQueryError",
     "check_ledger_key",
     "export_dataset",
@@ -165,6 +169,10 @@ _LAZY_EXPORTS = {
     "Backend": "httk.store.backend.sql.engine",
     "SqlStore": "httk.store.backend.sql.store",
     "MongoStore": "httk.store.backend.mongo",
+    "TableStore": "httk.store.backend.sql.tables",
+    "TableSource": "httk.store.backend.sql.tables",
+    "ListTable": "httk.store.backend.sql.tables",
+    "DelimitedColumn": "httk.store.backend.sql.tables",
 }
 
 

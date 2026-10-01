@@ -1,0 +1,164 @@
+httk.store.backend.sql.provenance_edges
+=======================================
+
+.. py:module:: httk.store.backend.sql.provenance_edges
+
+.. autoapi-nested-parse::
+
+   Store-scoped SQL scanning of :class:`~httk.core.storage.StrongLink` edges.
+
+   Run provenance edges (``inputs``/``artifacts``/``outputs`` on
+   :class:`~httk.core.Run`) are child fields whose element class is an edge record
+   carrying the string fields ``label``, ``entry_type``, and ``entry_id``. Both the
+   database-backed :class:`~httk.store.backend.sql.entry_provider.StoreEntryProvider`
+   and the durable :class:`~httk.store.backend.sql.stored_federation.StoredEntryFederation`
+   serve these edges as OPTIMADE relationships in both directions. This module holds
+   the shared discovery and SQL scanning so both serve them identically, and so the
+   declaring family is always discovered from the store's registered families (never
+   a hardcoded record class).
+
+   The forward view projects one run's own edges. The reverse view is derived,
+   never stored: it filters ``alt_kind IS NULL`` (run alternatives are separate
+   lineages that must not emit reverse identifiers) and reduces each run lineage to
+   its latest main row, so a target entry names only the runs whose latest main
+   revision still references it.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.provenance_edges.StrongLinkFamily
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.provenance_edges.strong_link_families
+   httk.store.backend.sql.provenance_edges.wire_type_for_internal
+   httk.store.backend.sql.provenance_edges.forward_run_edges
+   httk.store.backend.sql.provenance_edges.latest_main_run_sids
+   httk.store.backend.sql.provenance_edges.latest_main_condition
+   httk.store.backend.sql.provenance_edges.reverse_run_edges
+
+
+Module Contents
+---------------
+
+.. py:class:: StrongLinkFamily
+
+   One store-registered family whose backing declares StrongLink edge fields.
+
+   :param internal_type: The family's internal (unprefixed) entry-type name.
+   :param wire_type: The family's served (wire) entry-type name.
+   :param definition_id: The family's entry-type definition IRI, whose prefix names the wire relationship keys.
+   :param backing: The concrete backing record class carrying the edge fields.
+   :param schema: The backing's resolved storage schema.
+   :param markers: The backing's StrongLink markers keyed by field name.
+
+
+   .. py:attribute:: internal_type
+      :type:  str
+
+
+   .. py:attribute:: wire_type
+      :type:  str
+
+
+   .. py:attribute:: definition_id
+      :type:  str | None
+
+
+   .. py:attribute:: backing
+      :type:  type
+
+
+   .. py:attribute:: schema
+      :type:  httk.store.backend.schema.TableSchema
+
+
+   .. py:attribute:: markers
+      :type:  collections.abc.Mapping[str, httk.core.storage.StrongLink]
+
+
+.. py:function:: strong_link_families(store)
+
+   Return the store's registered families whose backings declare StrongLink fields.
+
+   :param store: The SQL store whose configured families are inspected.
+   :return: One :class:`StrongLinkFamily` per StrongLink-declaring backing.
+
+
+.. py:function:: wire_type_for_internal(store, internal_type)
+
+   Return the served (wire) entry-type name for an edge's internal target type.
+
+   Resolves via the target family's served definition — the same
+   ``EntryTypeDefinition.served_form()`` source used elsewhere — so a target such
+   as ``records`` serves as ``_httk_records`` while a standard name (or any
+   unregistered target) passes through unchanged.
+
+   :param store: The SQL store whose configured families supply the mapping.
+   :param internal_type: The edge's internal (unprefixed) target entry-type name.
+   :return: The served (wire) entry-type name, or ``internal_type`` unchanged.
+
+
+.. py:function:: forward_run_edges(connection, store, family, run_sids, *, target_prefixes = None, target_backings = None)
+
+   Return each run's own edges keyed by run sid, in field then row order.
+
+   :param connection: An open read connection to ``store``.
+   :param store: The SQL store backing the run family.
+   :param family: The StrongLink family whose edges are read.
+   :param run_sids: The run row sids to project edges for.
+   :param target_prefixes: Mounted prefixes to apply only to locally resolved targets.
+   :param target_backings: Mounted target record classes keyed by internal entry type.
+   :return: ``run sid -> [((internal_target_type, target_id, label), marker)]``.
+
+
+.. py:function:: latest_main_run_sids(connection, run_table)
+
+   Return each run lineage's latest main row sid (``alt_kind IS NULL``).
+
+   :param connection: An open read connection.
+   :param run_table: The run family's parent table.
+   :return: ``logical_id -> latest main sid``.
+
+
+.. py:function:: latest_main_condition(run_table, run_alias)
+
+   Return the correlated predicate selecting a run lineage's latest main row.
+
+   The SQL-predicate counterpart of :func:`latest_main_run_sids` for use inside
+   a correlated ``EXISTS`` (e.g. reverse-relationship filtering): ``run_alias``
+   is a main row (``alt_kind IS NULL``) and no newer main row of the same
+   lineage exists. The same constraint the reverse serving path applies through
+   a Python-side max-sid-per-lineage scan.
+
+   :param run_table: The run family's parent table (used to alias the newer-row probe).
+   :param run_alias: The run parent alias being constrained inside the outer query.
+   :return: The ``alt_kind IS NULL`` and latest-of-lineage boolean predicate.
+
+
+.. py:function:: reverse_run_edges(connection, store, family, target_type, target_ids)
+
+   Return the reverse edges pointing at each target id, keyed by target id.
+
+   Only a run lineage's latest main row contributes (``alt_kind IS NULL``,
+   latest sid per lineage); an edge deduped across lineages still yields one
+   reverse identifier per referencing lineage. Because the join back through the
+   child tables has no index, this is a per-page scan of the run edges.
+
+   :param connection: An open read connection to ``store``.
+   :param store: The SQL store backing the run family.
+   :param family: The StrongLink family whose reverse edges are derived.
+   :param target_type: The edge's internal (unprefixed) target entry-type name to match.
+   :param target_ids: The raw stored target ids to match.
+   :return: ``target id -> [(run raw id, edge label, marker)]``, ordered per
+       target by ``(run raw id, field/marker order, edge row order)``.
+
+

@@ -1,0 +1,11 @@
+httk.registry.cli.store
+=======================
+
+.. py:module:: httk.registry.cli.store
+
+.. autoapi-nested-parse::
+
+   Register httk-store's command-line namespace.
+
+
+

@@ -745,7 +745,14 @@ class DeferredFinalizer:
                     base = f"{base}.{self.store._entry_record_types[entry_record][0]}"
                 prefix = f"{base}-{self.ingest._id_series or scheme.series}-"
                 _entry_type, backing_count, backing_index = self.store._entry_record_types[entry_record]
+                # Mirrors SqlStore._entry_id_number: offset + logical_id * B + index
+                # (a bulk row's logical_id is its final sid).  A family that never
+                # had record kinds appended has offset 0 and keeps the exact
+                # historical expression.
+                offset = self.store._entry_id_offset(entry_record)
                 number = f"({own_final}.final_sid * {backing_count} + {backing_index})"
+                if offset:
+                    number = f"({offset} + {own_final}.final_sid * {backing_count} + {backing_index})"
                 if self.connection.dialect.name == "clickhousedb":
                     generated_id = f"concat('{prefix}', toString({number}))"
                 else:

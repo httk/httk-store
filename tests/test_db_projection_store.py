@@ -309,6 +309,13 @@ def test_sid_of_queries_reopened_database(tmp_path):
         assert SqlStore(reopened).sid_of(_root()) == sid
 
 
+def _without_layout_guard(statements: list[str]) -> list[str]:
+    """Drop the one per-write-transaction stale-layout read of the stored declaration."""
+    guard = [statement for statement in statements if "_httk_store_metadata" in statement]
+    assert len(guard) == 1 and statements[0] == guard[0]
+    return [statement for statement in statements if "_httk_store_metadata" not in statement]
+
+
 def test_recursive_metadata_free_type_has_no_dedup_metadata_query():
     leaf = RecursiveNoMetadataRecord(3)
     middle = RecursiveNoMetadataRecord(2, leaf)
@@ -329,7 +336,8 @@ def test_recursive_metadata_free_type_has_no_dedup_metadata_query():
         finally:
             sqlalchemy.event.remove(database.engine, "before_cursor_execute", count_select)
 
-    assert len(statements) == 1
+    assert _without_layout_guard(statements) == statements[1:]
+    assert len(statements) == 2  # the write transaction's stale-layout read, then the content-id lookup
 
 
 def test_dedup_hit_with_no_identity_skip_has_no_metadata_query():
@@ -348,7 +356,8 @@ def test_dedup_hit_with_no_identity_skip_has_no_metadata_query():
         finally:
             sqlalchemy.event.remove(database.engine, "before_cursor_execute", count_select)
 
-    assert len(statements) == 1
+    assert _without_layout_guard(statements) == statements[1:]
+    assert len(statements) == 2  # the write transaction's stale-layout read, then the content-id lookup
 
 
 def test_dedup_hit_checks_metadata_without_reconstructing_or_selecting_the_graph():
@@ -370,7 +379,10 @@ def test_dedup_hit_checks_metadata_without_reconstructing_or_selecting_the_graph
             sqlalchemy.event.remove(database.engine, "before_cursor_execute", count_select)
 
     assert MetadataProbeRecord.constructed == 2
-    assert len(statements) == 2  # content-id lookup plus the one planned metadata column
+    assert _without_layout_guard(statements) == statements[1:]
+    # The write transaction's stale-layout read, the content-id lookup, and the
+    # one planned metadata column.
+    assert len(statements) == 3
     assert all("projection_metadata_probe.value" not in statement for statement in statements)
 
 

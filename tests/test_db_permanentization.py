@@ -509,20 +509,31 @@ def test_transactional_save_has_no_p3_round_trips_except_dedup_promotion() -> No
 
         event.listen(database.engine, "before_cursor_execute", record)
         try:
+            # Every write transaction first takes the SQLite write lock and then
+            # re-reads the stored declaration (the stale-layout guard); neither
+            # is a P3 round trip.
+            def pop_layout_guard() -> None:
+                assert statements.pop(0) == "BEGIN IMMEDIATE"
+                assert "_httk_store_metadata" in statements.pop(0)
+
             store.save(StatementRecord("fresh"))
+            pop_layout_guard()
             # content-id SELECT, INSERT..RETURNING, then the sanctioned same-transaction
             # logical_id fill UPDATE (own sid); role is only an INSERT value.
             assert len(statements) == 3
             statements.clear()
             store.save(StatementRecord("fresh"))
+            pop_layout_guard()
             assert len(statements) == 1  # content-id SELECT hit; it is already main, so no UPDATE.
             statements.clear()
             leaf = RoleLeaf("dependency")
             store.save(RoleRoot(leaf))
             statements.clear()
             store.save(leaf)
+            pop_layout_guard()
             assert len(statements) == 2  # dedup SELECT plus the required dep→main promotion UPDATE.
             assert statements[1].lstrip().upper().startswith("UPDATE")
+            assert not any("_httk_store_metadata" in statement for statement in statements)
         finally:
             event.remove(database.engine, "before_cursor_execute", record)
 

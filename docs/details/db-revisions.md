@@ -63,7 +63,10 @@ serve the latest row of each lineage, while revisions pages serve immutable ids
 and expose the lineage id as `_httk_id`.
 `EntryIdScheme(type_in_base=True)` appends the served entry type to the base.
 For multi-backing families, the number is `logical_id * backing_count + backing_index`, which keeps ids unique across
-the family's backing tables.
+the family's backing tables. After an additive upgrade has appended record kinds
+to a family (see [below](#adding-record-kinds-or-families-to-an-existing-store)),
+the number is `offset + logical_id * backing_count + backing_index`; a family
+whose record list never changed has offset 0 and mints exactly as before.
 Entry-ID ownership is enforced across every backing in a defined family.
 SQL ownership claims share the record transaction. An identity conflict aborts
 that transaction, even if the exception is caught inside its context; earlier
@@ -103,6 +106,132 @@ search = store.searcher(only_latest=True)
 note = search.variable(Note)
 current = [row.note for row in search.results(note=note)]  # one row per lineage
 ```
+
+### Adding record kinds or families to an existing store
+
+Adding a new typed record kind to an existing family (for example a further
+record class in the `records` family) or adding a whole new family is an
+**additive** change: new tables and dispatch columns, never a rebuild. Reopening
+with the extended declaration raises `StorageLayoutUpgradeRequiredError` whose
+`hint` says the change is additive; reopening with `upgrade=True` applies it:
+
+```python
+store = SqlStore(database, entry_families=(extended_family,), entry_ids=scheme, upgrade=True)
+```
+
+The rules:
+
+- **Append only.** Every stored family must still be declared with the same
+  name and family `definition_id`, and its stored record list (record names and
+  record `definition_id`s) must be an order-preserving prefix of the new one.
+  A record's position in its family is its `backing_index`, part of the id
+  numbering, so a reordered, removed, renamed, or re-defined record, a removed
+  family, or a changed family `definition_id` is not additive; the error then
+  names the offending family and record and the store must be rebuilt. A table
+  newly attached to a family must be empty (a class previously saved ad hoc
+  into its own table would bring rows without family identity; rebuild instead).
+- **Numbering offset.** When a family's record list grows, its backing count `B`
+  changes, and `logical_id * B + backing_index` could re-mint an old number. The
+  upgrade therefore records, per grown family, `offset = max(n, previous offset) + 1`
+  where `n` is the largest number carried by any existing `id` or
+  `immutable_id` of any backing and any id series, and later numbers are
+  `offset + logical_id * B + backing_index`. Every such number is at least
+  `offset + B`, larger than every number minted before the upgrade, so no id
+  is ever minted twice, however often record kinds are appended. Existing ids
+  are never rewritten, and the family-wide ownership tables still refuse any
+  collision with `EntryIdConflictError`. Offsets are stored in one optional
+  metadata key, `entry_id_offsets` (canonical JSON `{"<family>": <offset>}`),
+  written only by such an upgrade.
+- **Dispatch.** The family's `_httk_entry_dispatch_*` table is dropped and
+  recreated in its full new shape (one nullable unique sid column per backing
+  and the exactly-one CHECK) and refilled with one row per main row of every
+  backing, the same derivation `store.fsck()` uses to repair it. Old entries
+  keep resolving by content id through `fetch_entry`, and their revision
+  history is untouched.
+- **Crash safety.** The upgrade restamps `entry_schemas`, then the offsets, and
+  the declaration **last**, as a compare-and-set on the old declaration.
+  SQLite (in the transactional profile), DuckDB and PostgreSQL run the whole
+  upgrade in one transaction; independently of that, every step is idempotent
+  and planned against the new layout, so an upgrade interrupted at any point —
+  the degraded, autocommit SQLite profile can stop between any two statements —
+  leaves the old declaration in place and converges when the `upgrade=True` open
+  is retried. A retry after a partial restamp may choose an offset one higher
+  than an uninterrupted run would: offsets only ever move up, which keeps every
+  id unique. Reopening such a store with the *old* declaration reports "a
+  declaration upgrade appears to have been interrupted" with remedy `"reopen"`:
+  only the upgraded declaration (with `upgrade=True`) can finish it.
+  Two concurrent upgraders are serialized: the second waits for the first, then
+  either finds the identical layout already applied and opens it, or raises.
+- **Stale writers and readers.** Every write takes the backend's
+  write-ordering lock and then re-reads the stored declaration, immediately
+  before its first DML, so an upgrade can never commit between that check and
+  the writes: SQLite takes its database write lock (`BEGIN IMMEDIATE`) before
+  the check; DuckDB, which admits one read-write process per file, uses an
+  in-process lock that write scopes hold shared and an upgrading open holds
+  exclusively from before its snapshot until it commits (a waiting upgrade has
+  preference over new write scopes); PostgreSQL uses transaction-scoped advisory
+  locks keyed by the store's metadata table (shared for writers, exclusive for
+  the upgrader); the degraded SQLite profile is serialized by its exclusive
+  writer lease, which an upgrade must also take. Inside `store.transaction()`
+  the lock and the check are taken at the scope's **first write** and held to
+  commit, so a read-only `transaction()` never blocks other writers (on DuckDB
+  the in-process lock is held for the whole scope). A write already in flight
+  finishes first and the upgrade covers its rows; a store instance opened before
+  another instance upgraded the layout raises `StorageLayoutUpgradeRequiredError`
+  ("the store layout changed since this store was opened; reopen it", remedy
+  `"reopen"`) on its next write and changes nothing. A read that misses, or meets
+  a dispatch row it cannot interpret, checks the declaration too and reports the
+  same remedy instead of `None` or a corruption error. An upgrade that cannot get
+  the lock in time fails with remedy `"retry"`; from inside the same thread's own
+  open write scope it can never succeed, and the message says to close the scope
+  first. SQLite waits for a held write lock up to the connection's busy timeout:
+  pysqlite's default is 5 seconds, and `Backend(sqlalchemy.create_engine(url,
+  connect_args={"timeout": seconds}))` sets another. One in-memory
+  `Backend.sqlite()` shares a single connection between every store opened on
+  it, so it must not be used by concurrently writing stores (their transactions
+  would interleave on that connection); use a file database for concurrent
+  writers.
+- **Compatibility.** A store upgraded this way carries the `entry_id_offsets`
+  key, which older httk-store versions do not recognize: they refuse to open it.
+  Keep a backup before any upgrade.
+
+`StorageLayoutUpgradeRequiredError.remedy` tells a tool what to do without
+parsing the message:
+
+- `"upgrade"` — the supplied declaration is an additive extension of the stored
+  one (including finishing an interrupted upgrade): reopen with it and
+  `upgrade=True`. It is advertised only after every read-only check that
+  `upgrade=True` would also run has passed, so if `upgrade=False` reports
+  `"upgrade"`, `upgrade=True` with the same declaration succeeds.
+- `"rebuild"` — the difference cannot be applied in place (including a table
+  newly attached to a family that already holds rows, or an alien reserved
+  `_httk_` object).
+- `"reopen"` — open the store differently: with the newer declaration it was
+  upgraded to (an older client one declaration behind; the hint says "the store
+  was upgraded to a newer declaration"), with the upgraded declaration after an
+  interrupted upgrade (reopening with the old one can never finish it), after
+  another instance upgraded it (a stale handle), after a concurrent upgrade to a
+  different declaration, or with matching `store_timestamps`/write-profile
+  options.
+- `"retry"` — a transient conflict: the store was locked by writers, or a
+  concurrent write conflicted with the upgrade's claim.
+
+The declaration diff's `entry_declaration` entry carries a boolean `additive`
+whenever the declaration differs, and `stored_is_newer: true` for the older
+client case.
+
+In a multi-backing family, only entries stored top-level carry a dispatch row;
+`fetch_entry` resolves a record stored only as a dependency of another record
+directly from its backing table, exactly as a single-backing family does, so
+fresh and upgraded stores agree. A family record first stored by reference also
+creates its family's sibling tables, as a top-level save does. Stores written
+before that, in which such referencing records read as absent, are healed by the
+first write that reaches the family.
+
+Adding a family whose record list is new, without growing an existing family,
+writes no offset: the new family mints exactly like a fresh store. The ClickHouse
+bulk-fenced backend refuses these upgrades, and `MongoStore` does not yet offer
+them.
 
 ### Alternatives
 

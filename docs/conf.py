@@ -133,6 +133,7 @@ nitpick_ignore = [
     ("py:class", "sqlalchemy.Table"),
     ("py:class", "sqlalchemy.ColumnElement"),
     ("py:class", "sqlalchemy.FromClause"),
+    ("py:class", "sqlalchemy.Select"),
     # PEP 695 method type parameters (e.g. SqlStore.fetch[T]) are not classes.
     ("py:class", "T"),
     # module-private TypeVar of the EntryStore Protocol (fetch/fetch_many);

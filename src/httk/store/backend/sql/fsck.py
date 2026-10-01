@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -30,7 +30,7 @@ from httk.store.store_timestamp import FUTURE_TIMESTAMP_SLACK_NS
 if TYPE_CHECKING:
     from httk.store.backend.sql.store import SqlStore
 
-__all__ = ["FsckSummary", "FsckTableSummary", "run_fsck"]
+__all__ = ["FsckSummary", "FsckTableSummary", "dispatch_derivation", "run_fsck"]
 
 
 @dataclass(frozen=True)
@@ -282,16 +282,12 @@ def _repair_dispatches(
                 counters[name].deleted += 1
         if not repair:
             continue
-        for record_name, record in zip(family.record_names, family.records, strict=True):
-            backing = store._table(resolve_schema(record).table_name)
-            if backing.name not in present:
-                continue
-            column = backing_dispatch_column_name(record_name)
-            for sid, content in connection.execute(
-                sqlalchemy.select(backing.c[SID_COLUMN], backing.c[CONTENT_ID_COLUMN]).where(
-                    backing.c[ROLE_COLUMN] == 1
-                )
-            ):
+        backings = [
+            (record_name, store._table(resolve_schema(record).table_name))
+            for record_name, record in zip(family.record_names, family.records, strict=True)
+        ]
+        for column, selection in dispatch_derivation([item for item in backings if item[1].name in present]):
+            for content, sid in connection.execute(selection):
                 if (
                     connection.execute(
                         sqlalchemy.select(dispatch.c[CONTENT_ID_COLUMN]).where(dispatch.c[CONTENT_ID_COLUMN] == content)
@@ -304,6 +300,30 @@ def _repair_dispatches(
                 values[column] = sid
                 connection.execute(sqlalchemy.insert(dispatch).values(values))
                 counters[name].repaired += 1
+
+
+def dispatch_derivation(
+    backings: Sequence[tuple[str, sqlalchemy.Table]],
+) -> tuple[tuple[str, sqlalchemy.Select[tuple[str, int]]], ...]:
+    """Derive an entry family's dispatch associations from its backing tables.
+
+    A dispatch row exists exactly for every *main* (``_httk_role = 1``) row of a
+    backing: a top-level save writes one, a dependency-only row has none.  This
+    derivation is the single definition shared by :func:`run_fsck`'s repair and
+    by the additive declaration upgrade, which rebuilds a family's dispatch
+    table set-wise from it.
+
+    :param backings: ``(stable record name, physical backing table)`` pairs of the
+        backings to derive from, in the family's record order.
+    :return: One ``(dispatch sid column, SELECT content_id, sid)`` pair per backing.
+    """
+    return tuple(
+        (
+            backing_dispatch_column_name(record_name),
+            sqlalchemy.select(table.c[CONTENT_ID_COLUMN], table.c[SID_COLUMN]).where(table.c[ROLE_COLUMN] == 1),
+        )
+        for record_name, table in backings
+    )
 
 
 def _lineage_ids(

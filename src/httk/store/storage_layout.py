@@ -9,11 +9,12 @@ import dataclasses
 import json
 import sys
 import typing
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from types import MappingProxyType
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from httk.core import EntryTypeDefinition, PropertyDefinition
+from httk.core.entry_ids import parse_alternative_id, parse_entry_id, parse_immutable_id
 from httk.core.register import (
     entry_family_info,
     entry_record_info,
@@ -27,21 +28,30 @@ from httk.core.storage import IdentitySkip, Indexed, Unique, storage_identity_na
 from httk.store.backend.schema import ChildTableSpec, ColumnSpec, FieldSpec, SchemaError, TableSchema, resolve_schema
 
 __all__ = [
+    "ADDITIVE_DECLARATION_UPGRADE_HINT",
     "ADDITIVE_UPGRADE_HINT",
     "DECLARATION_PROTOCOL_VERSION",
+    "ENTRY_ID_OFFSETS_KEY",
     "AdditiveUpgradePlan",
+    "DeclarationUpgradePlan",
     "EntryFamilyDeclaration",
     "EntryFamilyLayout",
     "EntryLayoutBindingError",
     "EntryRecordDeclaration",
     "StorageLayout",
     "StorageLayoutUpgradeRequiredError",
+    "classify_declaration_upgrade",
     "classify_schema_upgrade",
+    "declaration_is_superseded",
     "declaration_json",
+    "entry_id_number",
+    "entry_id_offsets_json",
     "family_entry_type_definition",
+    "next_entry_id_offset",
     "normalize_entry_families",
     "normalize_entry_records",
     "normalize_entry_types",
+    "parse_entry_id_offsets",
     "schema_fingerprint_diff",
     "schema_fingerprint_json",
     "validate_entry_id_fields",
@@ -61,6 +71,20 @@ ADDITIVE_UPGRADE_HINT: Final = (
 )
 """The reopen hint appended when an additive-only schema mismatch is not applied."""
 
+ADDITIVE_DECLARATION_UPGRADE_HINT: Final = (
+    "the declaration change is purely additive (record kinds appended to existing families and/or new "
+    "families); reopen with upgrade=True to apply it"
+)
+"""The reopen hint appended when an additive declaration change is not applied."""
+
+ENTRY_ID_OFFSETS_KEY: Final = "entry_id_offsets"
+"""The optional store-metadata key holding the per-family entry-id numbering offsets.
+
+Its value is the canonical JSON object ``{family name: offset}`` (sorted keys,
+compact separators) with positive integer offsets.  Only an additive declaration
+upgrade writes it; an absent key means every offset is zero.
+"""
+
 
 class StorageLayoutUpgradeRequiredError(RuntimeError):
     """A database does not exactly implement the current persisted store layout.
@@ -74,16 +98,40 @@ class StorageLayoutUpgradeRequiredError(RuntimeError):
     several independent declaration mismatches are reported together; the
     exception message names the mismatched aspects.
 
+    ``remedy`` is the machine-readable action a caller should take, so a tool
+    (``httk collect --upgrade``, say) never has to parse ``hint``:
+
+    - ``"upgrade"`` — the difference is additive (or an additive upgrade was
+      interrupted); reopen with the target declaration and ``upgrade=True``;
+    - ``"rebuild"`` — the difference cannot be applied in place; rebuild the store;
+    - ``"reopen"`` — this handle is out of date or was opened with mismatching
+      options (another instance upgraded the layout, a concurrent upgrade won
+      with a different layout, or ``store_timestamps``/write profile differ);
+      reopen it with the right declaration and options;
+    - ``"retry"`` — a transient conflict (the store was locked by writers, or a
+      concurrent write conflicted with the upgrade's claim); retry the same call.
+
+    SQL stores set it on every raise; ``None`` means the raising backend does
+    not classify the difference (currently the Mongo store).
+
     :param diff: The immutable JSON-shaped category-keyed difference.
     :param hint: An optional remediation appended to the message and exposed as
         :attr:`hint` (e.g. that a purely additive schema change can be applied
         with ``upgrade=True``).
+    :param remedy: The machine-readable remedy, exposed as :attr:`remedy`.
     """
 
-    def __init__(self, diff: Mapping[str, object], *, hint: str | None = None) -> None:
+    def __init__(
+        self,
+        diff: Mapping[str, object],
+        *,
+        hint: str | None = None,
+        remedy: Literal["upgrade", "rebuild", "reopen", "retry"] | None = None,
+    ) -> None:
         frozen = _freeze_mapping(diff)
         self.diff: Mapping[str, object] = frozen
         self.hint: str | None = hint
+        self.remedy: Literal["upgrade", "rebuild", "reopen", "retry"] | None = remedy
         categories = ", ".join(frozen) or "unknown layout difference"
         details = frozen.get("declaration")
         detail_names = f": {', '.join(details)}" if isinstance(details, Mapping) else ""
@@ -942,6 +990,236 @@ def _added_parent_columns(table: str, field: str, field_doc: Mapping[str, Any]) 
         )
         for column in field_doc["columns"]
     ]
+
+
+@dataclasses.dataclass(frozen=True)
+class DeclarationUpgradePlan:
+    """The families an additive declaration upgrade touches.
+
+    :param changed_families: Names of stored families whose record list gained
+        appended record kinds; their dispatch tables are rebuilt and their
+        entry-id numbering offsets advanced.
+    :param new_families: Names of families present only in the target declaration.
+    """
+
+    changed_families: tuple[str, ...]
+    new_families: tuple[str, ...]
+
+
+def _stored_declaration_families(value: str) -> dict[str, tuple[str | None, tuple[tuple[str, str | None], ...]]] | None:
+    """Parse the names-only format-2 declaration, or return ``None`` when it is malformed."""
+    try:
+        document = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict) or set(document) != {"families", "format"} or document["format"] != 2:
+        return None
+    families = document["families"]
+    if not isinstance(families, list):
+        return None
+    parsed: dict[str, tuple[str | None, tuple[tuple[str, str | None], ...]]] = {}
+    for item in families:
+        if not isinstance(item, dict) or set(item) != {"definition_id", "records", "family"}:
+            return None
+        name, definition_id, records = item["family"], item["definition_id"], item["records"]
+        if not isinstance(name, str) or name in parsed or not isinstance(records, list) or not records:
+            return None
+        if definition_id is not None and not isinstance(definition_id, str):
+            return None
+        entries: list[tuple[str, str | None]] = []
+        for record in records:
+            if not isinstance(record, dict) or set(record) != {"definition_id", "record"}:
+                return None
+            record_name, record_definition_id = record["record"], record["definition_id"]
+            if not isinstance(record_name, str):
+                return None
+            if record_definition_id is not None and not isinstance(record_definition_id, str):
+                return None
+            entries.append((record_name, record_definition_id))
+        parsed[name] = (definition_id, tuple(entries))
+    return parsed
+
+
+def classify_declaration_upgrade(stored: str | None, target: StorageLayout) -> DeclarationUpgradePlan | str:
+    """Classify a persisted-declaration mismatch as an additive upgrade plan or a rejection.
+
+    The change is additive iff every stored family is still declared under the
+    same name with the same family ``definition_id``, and the stored record list
+    of every such family (registry names *and* record ``definition_id`` values)
+    is an order-preserving prefix of the target family's record list, so record
+    kinds are only ever appended.  New families are allowed.  Record order is
+    part of the entry-id numbering scheme (a record's position is its backing
+    index), which is why a reorder is never additive.  The comparison works on
+    the names-only persisted declaration, so it is shared by every backend.
+
+    :param stored: The persisted ``entry_declaration`` JSON, or ``None`` when absent.
+    :param target: The declaration the store is being reopened with.
+    :return: A :class:`DeclarationUpgradePlan` when the change is additive,
+        otherwise a human-readable rejection naming the offending family and record.
+    """
+    parsed = None if stored is None else _stored_declaration_families(stored)
+    if parsed is None:
+        return "stored entry declaration is not parseable"
+    targets = {
+        family.name: (family.definition_id, tuple(zip(family.record_names, family.record_definition_ids, strict=True)))
+        for family in target.families
+    }
+    return _classify_declaration_families(parsed, targets)
+
+
+def declaration_is_superseded(stored: str | None, supplied: StorageLayout) -> bool:
+    """Whether the persisted declaration is an additive extension of ``supplied``.
+
+    That is the situation of a client one declaration behind: the store was
+    already upgraded (record kinds appended or families added) by a newer
+    declaration, and ``supplied`` is the older one.  The store is healthy; the
+    remedy is to open it with the newer declaration, never to rebuild it.
+
+    :param stored: The persisted ``entry_declaration`` JSON, or ``None`` when absent.
+    :param supplied: The declaration the store is being opened with.
+    :return: ``True`` when ``supplied`` → stored is an additive change.
+    """
+    parsed = None if stored is None else _stored_declaration_families(stored)
+    if parsed is None:
+        return False
+    older = {
+        family.name: (family.definition_id, tuple(zip(family.record_names, family.record_definition_ids, strict=True)))
+        for family in supplied.families
+    }
+    return isinstance(_classify_declaration_families(older, parsed), DeclarationUpgradePlan)
+
+
+def _classify_declaration_families(
+    stored: Mapping[str, tuple[str | None, tuple[tuple[str, str | None], ...]]],
+    target: Mapping[str, tuple[str | None, tuple[tuple[str, str | None], ...]]],
+) -> DeclarationUpgradePlan | str:
+    """Apply the append-only rule to two names-only declarations (see :func:`classify_declaration_upgrade`)."""
+    changed: list[str] = []
+    for name, (definition_id, stored_records) in sorted(stored.items()):
+        found = target.get(name)
+        if found is None:
+            return f"family {name!r} was removed from the declaration"
+        target_definition, target_records = found
+        if target_definition != definition_id:
+            return f"family {name!r} changed its definition_id from {definition_id!r} to {target_definition!r}"
+        target_names = [record_name for record_name, _definition in target_records]
+        for position, (record_name, record_definition_id) in enumerate(stored_records):
+            if position >= len(target_records):
+                return f"family {name!r} no longer declares record {record_name!r}"
+            target_name, target_definition_id = target_records[position]
+            if target_name == record_name:
+                if target_definition_id != record_definition_id:
+                    return (
+                        f"family {name!r} record {record_name!r} changed its definition_id from "
+                        f"{record_definition_id!r} to {target_definition_id!r}"
+                    )
+                continue
+            if record_name in target_names:
+                return (
+                    f"family {name!r} moved record {record_name!r} from position {position}; "
+                    "record kinds may only be appended"
+                )
+            return (
+                f"family {name!r} no longer declares record {record_name!r} at position {position} "
+                f"(found {target_name!r}); record kinds may only be appended"
+            )
+        if len(target_records) > len(stored_records):
+            changed.append(name)
+    new = sorted(name for name in target if name not in stored)
+    return DeclarationUpgradePlan(tuple(changed), tuple(new))
+
+
+def entry_id_number(value: object) -> int | None:
+    """Return the numeric suffix of an entry, immutable, or alternative identifier.
+
+    Identifiers are parsed exactly as the store mints and validates them
+    (:func:`httk.core.entry_ids.parse_entry_id` and its immutable/alternative
+    siblings).  An identifier outside the recommended ``<base>-<series>-<number>``
+    form carries no store-mintable number and yields ``None``: it can never
+    collide with a minted identifier.
+
+    :param value: A stored ``id`` or ``immutable_id`` value (``None`` allowed).
+    :return: The embedded entry number, or ``None``.
+    """
+    if not isinstance(value, str):
+        return None
+    parsed = parse_entry_id(value)
+    if parsed is not None:
+        return parsed[2]
+    embedded: str | None = None
+    immutable = parse_immutable_id(value)
+    if immutable is not None:
+        embedded = immutable[0]
+    else:
+        alternative = parse_alternative_id(value)
+        if alternative is not None:
+            embedded = alternative[0]
+    if embedded is None:
+        return None
+    parsed = parse_entry_id(embedded)
+    return None if parsed is None else parsed[2]
+
+
+def next_entry_id_offset(numbers: Iterable[int], previous: int) -> int:
+    """Return a family's entry-id numbering offset after its record list changes.
+
+    Store-minted numbers are ``offset + logical_id * B + backing_index`` with
+    ``logical_id >= 1`` and ``0 <= backing_index < B``, so every number minted
+    under the returned offset is at least ``offset + B``.  The offset is one
+    more than the largest number any existing identifier of the family carries
+    (over every backing and every id series) and than the previous offset, so
+    every later number exceeds every earlier one: identifiers minted before the
+    change can never be re-minted after it, whatever ``B`` becomes, and repeated
+    upgrades keep the property.  A family with neither existing numbers nor a
+    previous offset keeps offset ``0`` and so mints exactly like a fresh store.
+
+    :param numbers: The numeric suffixes of the family's existing identifiers.
+    :param previous: The family's current offset (``0`` when none is recorded).
+    :return: The new offset.
+    """
+    highest = max(numbers, default=0)
+    if highest == 0 and previous == 0:
+        return 0
+    return max(highest, previous) + 1
+
+
+def entry_id_offsets_json(offsets: Mapping[str, int]) -> str:
+    """Serialize per-family entry-id offsets in their canonical persisted form.
+
+    :param offsets: Family name mapped to its positive offset (zero offsets are omitted).
+    :return: The canonical JSON object persisted under :data:`ENTRY_ID_OFFSETS_KEY`.
+    """
+    return json.dumps(
+        {name: offset for name, offset in offsets.items() if offset}, sort_keys=True, separators=(",", ":")
+    )
+
+
+def parse_entry_id_offsets(value: str, layout: StorageLayout) -> dict[str, int]:
+    """Parse and validate the persisted per-family entry-id offsets.
+
+    :param value: The persisted :data:`ENTRY_ID_OFFSETS_KEY` value.
+    :param layout: The layout whose families the offsets must name.
+    :return: Family name mapped to its positive offset.
+    :raises ValueError: If the value is not the canonical encoding of a mapping
+        from declared family names to positive integers.
+    """
+    try:
+        document = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("entry_id_offsets is not valid JSON") from error
+    if not isinstance(document, dict):
+        raise ValueError("entry_id_offsets must be a JSON object")
+    names = {family.name for family in layout.families}
+    offsets: dict[str, int] = {}
+    for name, offset in document.items():
+        if name not in names:
+            raise ValueError(f"entry_id_offsets names undeclared family {name!r}")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset <= 0:
+            raise ValueError(f"entry_id_offsets[{name!r}] must be a positive integer")
+        offsets[name] = offset
+    if entry_id_offsets_json(offsets) != value:
+        raise ValueError("entry_id_offsets is not in its canonical encoding")
+    return offsets
 
 
 def _layout_from_declaration(value: str) -> StorageLayout:

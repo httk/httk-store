@@ -1787,6 +1787,10 @@ class _Merger:
             prefix = f"{base}-{self._ingest._id_series or scheme.series}-"
             _entry_type, backing_count, backing_index = self._store._entry_record_types[record_type]
             number = table.c[SID_COLUMN] * backing_count + backing_index
+            # Mirrors SqlStore._entry_id_number; offset 0 keeps the historical expression.
+            offset = self._store._entry_id_offset(record_type)
+            if offset:
+                number = number + offset
             generated = sqlalchemy.literal(prefix).op("||")(sqlalchemy.cast(number, sqlalchemy.Text))
             entry_id = sqlalchemy.case((table.c.id.is_(None), generated), else_=table.c.id)
         self._connection.execute(

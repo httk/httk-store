@@ -418,6 +418,11 @@ class BulkIngest:
         self._transaction = transaction
         self._connection = connection
         try:
+            # The parity context's spanning write transaction gets the same
+            # stale-layout guard as SqlStore's write transactions (the deferred
+            # profile checks when its finalize transaction begins).
+            if transaction is not None:
+                store._lock_and_verify_layout(connection)
             if self._parallel:
                 self._require_empty_store(connection)
         except BaseException:
@@ -1582,6 +1587,7 @@ class BulkIngest:
         finalizer: Any = None
         finalizer_cleaned = False
         try:
+            self._store._lock_and_verify_layout(self._connection)
             # Register and create schema-faithful ordinary tables only now,
             # after staging is complete.  There are no physical FKs, so table
             # insertion order is intentionally unconstrained.

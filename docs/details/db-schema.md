@@ -103,8 +103,12 @@ key one: a field that participates in content identity would change the
 dispatch, and federation identity, so such an added field is rejected (the error
 names the field and tells you to mark it `IdentitySkip` or rebuild). Added child,
 derived (`stored_property`), non-nullable, removed, or retyped fields, changed
-table attributes, and any protocol or declaration difference all still raise;
-`upgrade=True` never widens or drops.
+table attributes, and any protocol difference all still raise; `upgrade=True`
+never widens or drops. The one additive *declaration* change is appending
+record kinds to an existing family or adding a family; see
+[Adding record kinds or families to an existing store](db-revisions.md#adding-record-kinds-or-families-to-an-existing-store)
+for its append-only rule, entry-id numbering offset, crash safety and stale-writer
+guard.
 
 The apply creates every not-yet-created declared table whole (so a pre-existing
 row that references a *new* table no longer reads as absent), adds each new

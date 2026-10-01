@@ -35,10 +35,12 @@ lookups fall back to the database.
 import contextlib
 import datetime
 import json
+import os
 import threading
 import time
 import typing
 import uuid
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Self, cast
@@ -71,6 +73,7 @@ from httk.store.backend.codecs import (
 )
 from httk.store.backend.schema import FieldSpec, LinkSpec, SchemaError, TableSchema, resolve_schema
 from httk.store.backend.sql.engine import Backend, connection_uses_autocommit
+from httk.store.backend.sql.fsck import dispatch_derivation
 from httk.store.backend.sql.graph import LogicalEdgeGraph
 from httk.store.backend.sql.layout import (
     METADATA_TABLE_NAME,
@@ -114,12 +117,21 @@ from httk.store.backend.sql.mapping import (
 from httk.store.backend.sql.rows import RowHydrator, StaleResultError, decode_field, is_lazy_row, lazy_row_identity
 from httk.store.backend.sql.searcher import SqlSearcher
 from httk.store.storage_layout import (
+    ADDITIVE_DECLARATION_UPGRADE_HINT,
     ADDITIVE_UPGRADE_HINT,
+    ENTRY_ID_OFFSETS_KEY,
     AdditiveUpgradePlan,
+    DeclarationUpgradePlan,
     EntryFamilyDeclaration,
     EntryLayoutBindingError,
+    classify_declaration_upgrade,
     classify_schema_upgrade,
+    declaration_is_superseded,
+    entry_id_number,
+    entry_id_offsets_json,
     family_entry_type_definition,
+    next_entry_id_offset,
+    parse_entry_id_offsets,
     schema_fingerprint_diff,
     schema_fingerprint_json,
 )
@@ -173,6 +185,109 @@ class _DegradedWriteCrash(BaseException):
     def __init__(self, point: str) -> None:
         self.point = point
         super().__init__(f"injected degraded hard crash after {point}")
+
+
+type _Remedy = Literal["upgrade", "rebuild", "reopen", "retry"]
+
+_INTERRUPTED_UPGRADE_HINT = (
+    "a declaration upgrade appears to have been interrupted; reopen with the upgraded declaration and upgrade=True"
+)
+_STALE_LAYOUT_HINT = "the store layout changed since this store was opened; reopen it"
+_NEWER_STORE_HINT = (
+    "the store was upgraded to a newer declaration; open it with that declaration (a newer httk), not this older one"
+)
+# How long an upgrading DuckDB open waits for in-process writers to drain.
+_UPGRADE_LOCK_TIMEOUT = 30.0
+# The PostgreSQL advisory-lock key: a constant namespace plus the OID of the
+# store's own metadata table, so clients whose search_path differs but which
+# resolve the same tables compute the same key (advisory locks are per database).
+_POSTGRES_LAYOUT_LOCK_KEY = (
+    "hashtextextended('httk.store.layout:' || '\"_httk_store_metadata\"'::regclass::oid::text, 0)"
+)
+
+
+class _UpgradeLockRequired(Exception):
+    """Restart a DuckDB open under the exclusive layout lock before its snapshot begins."""
+
+
+class _LayoutLock:
+    """An in-process shared/exclusive lock serializing DuckDB writers against a declaration upgrade.
+
+    DuckDB admits one read-write process per database file, so every writer
+    that could race an upgrade lives in this process.  Writers hold it shared
+    for the duration of each write transaction; an upgrading open holds it
+    exclusively from before its transaction snapshot until after its commit.
+    A waiting upgrader has preference over *new* writers, so a steady stream of
+    overlapping write scopes cannot starve it; shared acquisition stays
+    reentrant per thread (a thread already holding it never waits, so it cannot
+    deadlock against the upgrader it is blocking), and the upgrader's wait is
+    bounded by its timeout.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._shared: dict[int, int] = {}
+        self._exclusive: int | None = None
+        self._exclusive_waiting = 0
+
+    def acquire_shared(self) -> None:
+        me = threading.get_ident()
+        with self._condition:
+            self._condition.wait_for(
+                lambda: (
+                    self._exclusive == me
+                    or me in self._shared
+                    or (self._exclusive is None and not self._exclusive_waiting)
+                )
+            )
+            self._shared[me] = self._shared.get(me, 0) + 1
+
+    def release_shared(self) -> None:
+        me = threading.get_ident()
+        with self._condition:
+            remaining = self._shared[me] - 1
+            if remaining:
+                self._shared[me] = remaining
+            else:
+                del self._shared[me]
+            self._condition.notify_all()
+
+    def acquire_exclusive(self, timeout: float) -> Literal["acquired", "own-scope", "timeout"]:
+        me = threading.get_ident()
+        with self._condition:
+            if self._shared.get(me) or self._exclusive == me:
+                return "own-scope"  # this thread's own write scope would never drain
+            self._exclusive_waiting += 1
+            try:
+                acquired = self._condition.wait_for(lambda: self._exclusive is None and not self._shared, timeout)
+            finally:
+                self._exclusive_waiting -= 1
+                self._condition.notify_all()
+            if acquired:
+                self._exclusive = me
+                return "acquired"
+            return "timeout"
+
+    def release_exclusive(self) -> None:
+        with self._condition:
+            self._exclusive = None
+            self._condition.notify_all()
+
+
+_DUCKDB_LAYOUT_LOCKS: "weakref.WeakValueDictionary[str, _LayoutLock]" = weakref.WeakValueDictionary()
+_DUCKDB_LAYOUT_LOCKS_GUARD = threading.Lock()
+
+
+def _duckdb_layout_lock(engine: sqlalchemy.Engine) -> _LayoutLock:
+    """Return the process-wide layout lock of one DuckDB database (file path, or engine for ``:memory:``)."""
+    database = engine.url.database
+    key = f"memory:{id(engine)}" if not database or database == ":memory:" else os.path.realpath(database)
+    with _DUCKDB_LAYOUT_LOCKS_GUARD:
+        lock = _DUCKDB_LAYOUT_LOCKS.get(key)
+        if lock is None:
+            lock = _LayoutLock()
+            _DUCKDB_LAYOUT_LOCKS[key] = lock
+        return lock
 
 
 class _TransactionToken:
@@ -229,10 +344,15 @@ class SqlStore:
     ``entry_families``. The store stamps
     the canonical JSON declaration and protocol version, then trusts that
     declaration on reopen: a supplied declaration must be byte-identical, and
-    mismatches raise :class:`~httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError`.
-    Reopening does not diff or migrate record schemas. Read paths never issue
+    mismatches raise :class:`~httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError`,
+    unless the change is additive and ``upgrade=True`` applies it (record kinds
+    appended to existing families, new families, new nullable identity-skipped
+    columns, new tables). Nothing is ever migrated or rewritten. Read paths never issue
     DDL; missing ordinary tables behave as empty results or missing rows, while
-    table creation happens only through writes or :meth:`ensure_tables`.
+    table creation happens only through writes or :meth:`ensure_tables`. A
+    write through an instance whose layout another instance has since upgraded
+    raises :class:`~httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError`;
+    reopen the store.
 
     :param database: The database used for storage.
     :param entry_records: The required entry-family declaration when first opening a database.
@@ -243,9 +363,11 @@ class SqlStore:
     :param store_timestamp_resolution: Nanoseconds represented by one stored unit.
     :param allow_clock_regression: Whether to disable the process-local clock guard.
     :param clock_regression_grace: Whether to wait briefly for sub-millisecond regressions.
-    :param upgrade: Whether to apply a purely additive schema-fingerprint change
-        (new nullable columns, new lazily created tables) on reopen instead of
-        raising; non-additive or non-schema differences still raise.
+    :param upgrade: Whether to apply a purely additive change on reopen instead
+        of raising: a schema-fingerprint change (new nullable identity-skipped
+        columns, new tables) and/or a declaration change that only appends record
+        kinds to existing families or adds families. Non-additive or other
+        differences still raise.
     :raises TypeError: If the first open omits both declaration forms.
     :raises httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError: If the trusted declaration or protocol does not match.
     """
@@ -295,6 +417,11 @@ class SqlStore:
         self._backend_facts: BackendFacts | None = None
         self._metadata = sqlalchemy.MetaData()
         self._layout: StorageLayout | None = None
+        # The persisted declaration this instance opened (or upgraded to); every
+        # write transaction re-reads it to refuse a stale writer.
+        self._opened_declaration: str | None = None
+        # Per-family entry-id numbering offsets (absent family = 0).
+        self._entry_id_offsets: dict[str, int] = {}
         self._managed_table_names: frozenset[str] = frozenset()
         self._known_record_types: set[type] = set()
         self._tables_present: set[str] = set()
@@ -311,6 +438,9 @@ class SqlStore:
         self._mutation_lock = threading.RLock()
         self._lease_callback_registered = False
         self._lease_lifecycle_generation: int | None = None
+        # DuckDB only: the in-process lock ordering writers against declaration upgrades.
+        self._layout_lock = _duckdb_layout_lock(database.engine) if database.engine.dialect.name == "duckdb" else None
+        self._holds_upgrade_lock = False
         # A deterministic test seam.  Production instances leave this unset;
         # returning true simulates a process death *after* the named durable
         # write, deliberately preserving any dirty marker.
@@ -329,6 +459,12 @@ class SqlStore:
             for family in self.layout.families
             if family.definition_id is not None
             for backing_index, record in enumerate(family.records)
+        }
+        self._entry_id_offset_by_record: dict[type, int] = {
+            record: self._entry_id_offsets.get(family.name, 0)
+            for family in self.layout.families
+            if family.definition_id is not None
+            for record in family.records
         }
 
     def __repr__(self) -> str:
@@ -378,10 +514,27 @@ class SqlStore:
         return entry_type
 
     def _entry_id_number(self, record_type: type, logical_id: int) -> int:
-        """Return the family-unique numeric component for a record lineage."""
-        # ponytail: number = logical_id*B+index keeps family-wide uniqueness with no allocator table; switch to a per-family sequence table if backings can be added to a family after data exists
+        """Return the family-unique numeric component for a record lineage.
+
+        The number is ``offset + logical_id * B + backing_index``: ``B`` is the
+        family's backing count, ``backing_index`` the record's position in the
+        family, and ``offset`` the family's persisted numbering offset (``0``
+        unless an additive upgrade appended record kinds to the family).
+        """
+        # Uniqueness: within one (offset, B) epoch distinct (logical_id, index)
+        # pairs give distinct numbers because 0 <= index < B.  An upgrade that
+        # changes B sets offset = max(every existing id number, previous offset)
+        # + 1, and every later number is >= offset + B (logical_id >= 1), so it
+        # exceeds every number minted before the upgrade; repeated upgrades
+        # keep the property.  A family whose record list never changes has
+        # offset 0 and mints exactly as it always did.  The ownership tables
+        # still refuse any collision loudly (EntryIdConflictError).
         _entry_type, backing_count, backing_index = self._entry_record_types[record_type]
-        return logical_id * backing_count + backing_index
+        return self._entry_id_offset(record_type) + logical_id * backing_count + backing_index
+
+    def _entry_id_offset(self, record_type: type) -> int:
+        """Return the persisted entry-id numbering offset of ``record_type``'s family (``0`` when none)."""
+        return self._entry_id_offset_by_record.get(record_type, 0)
 
     @property
     def layout(self) -> StorageLayout:
@@ -445,6 +598,32 @@ class SqlStore:
 
     def _initialize_layout(self, supplied: StorageLayout | None) -> None:
         try:
+            self._initialize_layout_attempt(supplied)
+        except _UpgradeLockRequired:
+            # A DuckDB declaration upgrade must read under the exclusive layout
+            # lock from its first statement: its transaction snapshot would
+            # otherwise miss rows committed by writers it waited for.
+            assert self._layout_lock is not None
+            outcome = self._layout_lock.acquire_exclusive(_UPGRADE_LOCK_TIMEOUT)
+            if outcome != "acquired":
+                hint = (
+                    "cannot upgrade from inside an open write scope on this store (this thread holds a "
+                    "transaction or bulk_ingest on this database); close it first, then retry"
+                    if outcome == "own-scope"
+                    else "the store is busy with writers in this process; retry the upgrade when they have finished"
+                )
+                raise StorageLayoutUpgradeRequiredError(
+                    {"declaration": {"entry_declaration": {"lock": outcome}}}, hint=hint, remedy="retry"
+                ) from None
+            self._holds_upgrade_lock = True
+            try:
+                self._initialize_layout_attempt(supplied)
+            finally:
+                self._holds_upgrade_lock = False
+                self._layout_lock.release_exclusive()
+
+    def _initialize_layout_attempt(self, supplied: StorageLayout | None) -> None:
+        try:
             with self._degraded_lifecycle_guard(), self._database.engine.begin() as connection:
                 self._initialize_layout_on_connection(connection, supplied)
         except BaseException:
@@ -458,6 +637,8 @@ class SqlStore:
                 self._cleanup_initialization_tables(created_tables)
             self._metadata = sqlalchemy.MetaData()
             self._layout = None
+            self._opened_declaration = None
+            self._entry_id_offsets = {}
             self._managed_table_names = frozenset()
             self._tables_present.clear()
             # The memo maps class-sets to names registered in _metadata; a hit
@@ -552,7 +733,8 @@ class SqlStore:
                     "actual": None,
                 },
                 "schema": schema,
-            }
+            },
+            remedy="rebuild",
         )
 
     def _open_existing_layout_on_connection(
@@ -584,10 +766,10 @@ class SqlStore:
                 time.sleep(0.05)
         if read_error is not None:
             raise StorageLayoutUpgradeRequiredError(
-                {"declaration": {"metadata": "malformed", "error": str(read_error)}}
+                {"declaration": {"metadata": "malformed", "error": str(read_error)}}, remedy="rebuild"
             ) from read_error
         if stored is None:
-            raise StorageLayoutUpgradeRequiredError({"declaration": {"metadata": "missing"}})
+            raise StorageLayoutUpgradeRequiredError({"declaration": {"metadata": "missing"}}, remedy="rebuild")
         if "ingest_state" in stored:
             raise StoreUnderConstructionError(
                 "ingest_state marker from an interrupted bulk ingest is present; "
@@ -620,7 +802,8 @@ class SqlStore:
                                 },
                             }
                         }
-                    }
+                    },
+                    remedy="reopen",
                 )
             return
         if profile == "bulk-fenced":
@@ -633,12 +816,14 @@ class SqlStore:
                                 "actual": connection.dialect.name,
                             }
                         }
-                    }
+                    },
+                    remedy="reopen",
                 )
             return
         if autocommit:
             raise StorageLayoutUpgradeRequiredError(
-                {"declaration": {"write_profile": "transactional profile rejects an SQLite autocommit engine"}}
+                {"declaration": {"write_profile": "transactional profile rejects an SQLite autocommit engine"}},
+                remedy="reopen",
             )
 
     def _open_marked_layout(
@@ -654,7 +839,7 @@ class SqlStore:
             "store_timestamps",
             _IDENTITY_OWNERSHIP_KEY,
         }
-        persistent_optional_keys = {"write_profile"}
+        persistent_optional_keys = {"write_profile", ENTRY_ID_OFFSETS_KEY}
         recognized_runtime_keys = {"ingest_state", "lease"}
         allowed_keys = required_keys | persistent_optional_keys | recognized_runtime_keys
         diff: dict[str, object] = {}
@@ -712,15 +897,47 @@ class SqlStore:
                 "message": "open the store with a Backend selecting the persisted write profile",
             }
         persisted: StorageLayout | None = None
+        # An additive declaration upgrade makes ``persisted`` the *target*
+        # layout from here on: the schema diff, the reserved-object expectations
+        # and the eventual install all use it, so a re-run after a crash that
+        # left target objects behind is not refused (see _apply_declaration_upgrade).
+        declaration_upgrade: DeclarationUpgradePlan | None = None
+        declaration_rejection: str | None = None
         stored_declaration = stored.get("entry_declaration")
         if supplied is not None and isinstance(stored_declaration, str):
             if stored_declaration == declaration_json(supplied):
                 persisted = supplied
             else:
-                declaration_diff()["entry_declaration"] = {
-                    "expected": stored_declaration,
-                    "actual": declaration_json(supplied),
-                }
+                classified = classify_declaration_upgrade(stored_declaration, supplied)
+                if isinstance(classified, DeclarationUpgradePlan):
+                    # Read-only: a table the upgrade would newly attach must be
+                    # empty, so upgrade=False never advertises an additive change
+                    # that upgrade=True would then refuse.
+                    foreign = self._attached_tables_with_rows(connection, stored_declaration, supplied, classified)
+                    if foreign is not None:
+                        classified = foreign
+                if isinstance(classified, DeclarationUpgradePlan):
+                    persisted = supplied
+                    declaration_upgrade = classified
+                elif declaration_is_superseded(stored_declaration, supplied):
+                    # A client one declaration behind: the store is healthy and
+                    # newer; rebuilding it would be exactly wrong.
+                    declaration_rejection = _NEWER_STORE_HINT
+                    declaration_diff()["entry_declaration"] = {
+                        "expected": stored_declaration,
+                        "actual": declaration_json(supplied),
+                        "additive": False,
+                        "stored_is_newer": True,
+                        "reason": classified,
+                    }
+                else:
+                    declaration_rejection = f"{classified}; the declaration change is not additive, rebuild the store"
+                    declaration_diff()["entry_declaration"] = {
+                        "expected": stored_declaration,
+                        "actual": declaration_json(supplied),
+                        "additive": False,
+                        "reason": classified,
+                    }
         else:
             try:
                 persisted = self._layout_from_stored_declaration(stored_declaration)
@@ -732,32 +949,152 @@ class SqlStore:
                     "actual": stored_declaration,
                     "error": str(error),
                 }
+        entry_id_offsets: dict[str, int] = {}
+        if persisted is not None and ENTRY_ID_OFFSETS_KEY in stored:
+            try:
+                entry_id_offsets = parse_entry_id_offsets(stored[ENTRY_ID_OFFSETS_KEY], persisted)
+            except ValueError as error:
+                declaration_diff()[ENTRY_ID_OFFSETS_KEY] = {"actual": stored[ENTRY_ID_OFFSETS_KEY], "error": str(error)}
+        schema_plan: AdditiveUpgradePlan | str | None = None
         if persisted is not None and "entry_schemas" in stored:
             # Absence of the key is already reported by required_keys above.
-            schema_diff = schema_fingerprint_diff(stored["entry_schemas"], schema_fingerprint_json(persisted))
+            current_schemas = schema_fingerprint_json(persisted)
+            schema_diff = schema_fingerprint_diff(stored["entry_schemas"], current_schemas)
             if schema_diff:
                 diff["schema"] = schema_diff
+                schema_plan = classify_schema_upgrade(stored["entry_schemas"], current_schemas)
+
+        def pending_declaration_diff(reason: str | None = None) -> None:
+            # Report a pending declaration change beside whatever else keeps
+            # the store from opening; ``reason`` names a non-additive schema part.
+            if declaration_upgrade is not None:
+                assert persisted is not None
+                entry = {
+                    "expected": stored_declaration,
+                    "actual": declaration_json(persisted),
+                    "additive": reason is None,
+                }
+                if reason is not None:
+                    entry["reason"] = reason
+                declaration_diff()["entry_declaration"] = entry
+
+        def remedy() -> _Remedy:
+            # rebuild dominates (nothing else can fix it), then reopen (fix the
+            # declaration or options first), then upgrade (everything left is additive).
+            aspects = cast("dict[str, object]", diff.get("declaration", {}))
+            declaration_entry = aspects.get("entry_declaration")
+            newer_store = isinstance(declaration_entry, Mapping) and declaration_entry.get("stored_is_newer") is True
+            rebuild = (
+                "protocol" in diff
+                or isinstance(schema_plan, str)
+                or any(key in aspects for key in ("metadata_keys", _IDENTITY_OWNERSHIP_KEY, ENTRY_ID_OFFSETS_KEY))
+                or (
+                    isinstance(declaration_entry, Mapping)
+                    and declaration_entry.get("additive") is not True
+                    and not newer_store
+                )
+            )
+            if rebuild:
+                return "rebuild"
+            if newer_store or "store_timestamps" in aspects or "write_profile" in aspects:
+                return "reopen"
+            return "upgrade"
+
         upgrade_plan: AdditiveUpgradePlan | None = None
-        if set(diff) == {"schema"}:
+        additive_diff: dict[str, object] = {}
+        additive_hint = ADDITIVE_UPGRADE_HINT if declaration_upgrade is None else ADDITIVE_DECLARATION_UPGRADE_HINT
+        if set(diff) == {"schema"} or (declaration_upgrade is not None and set(diff) <= {"schema"}):
             assert persisted is not None
-            plan = classify_schema_upgrade(stored["entry_schemas"], schema_fingerprint_json(persisted))
+            plan = schema_plan if schema_plan is not None else AdditiveUpgradePlan({})
+            if isinstance(plan, str) and declaration_upgrade is not None:
+                pending_declaration_diff(plan)
+                raise StorageLayoutUpgradeRequiredError(
+                    diff, hint=f"{plan}; the layout change is not additive, rebuild the store", remedy="rebuild"
+                )
             if isinstance(plan, AdditiveUpgradePlan):
                 if self.backend_facts.metadata_backend == "keepermap":
+                    pending_declaration_diff()
                     raise StorageLayoutUpgradeRequiredError(
-                        diff, hint="additive schema upgrade is not supported on the ClickHouse bulk-fenced backend"
+                        diff,
+                        hint="additive upgrades are not supported on the ClickHouse bulk-fenced backend; rebuild the store",
+                        remedy="rebuild",
                     )
-                if not self._upgrade:
-                    raise StorageLayoutUpgradeRequiredError(diff, hint=ADDITIVE_UPGRADE_HINT)
-                # The apply is deferred until every other verification below has
-                # passed: SQLite DDL escapes the open transaction, so a later
-                # failing check must not be able to strand a half-applied upgrade.
+                # Neither advertised (upgrade=False) nor applied (upgrade=True)
+                # until the read-only physical checks below have passed, so
+                # remedy "upgrade" is never emitted for a store upgrade=True
+                # would refuse; the apply itself is deferred past every check
+                # because SQLite DDL escapes the open transaction.
                 upgrade_plan = plan
+                additive_diff = diff
                 diff = {}
         if diff:
-            raise StorageLayoutUpgradeRequiredError(diff)
+            pending_declaration_diff()
+            rejection_hint = declaration_rejection
+            chosen = remedy()
+            if (
+                rejection_hint is None
+                and set(diff) == {"schema"}
+                and declaration_upgrade is None
+                and persisted is not None
+                and self._schema_is_ahead(stored["entry_schemas"], schema_fingerprint_json(persisted))
+            ):
+                # The stored fingerprint already carries backing tables this
+                # (older) declaration lacks: a declaration upgrade's partial
+                # restamp.  Only the upgraded declaration can finish it, so the
+                # remedy is to reopen with that one ("upgrade" would loop).
+                rejection_hint, chosen = _INTERRUPTED_UPGRADE_HINT, "reopen"
+            raise StorageLayoutUpgradeRequiredError(diff, hint=rejection_hint, remedy=chosen)
         assert persisted is not None
         assert persisted_profile in {"transactional", "degraded", "bulk-fenced"}
         self._write_profile = cast(Literal["transactional", "degraded", "bulk-fenced"], persisted_profile)
+        names_before = self._check_physical_layout(connection, stored, persisted, ownership_upgrade_pending)
+        if upgrade_plan is not None and not self._upgrade:
+            diff = additive_diff
+            pending_declaration_diff()
+            raise StorageLayoutUpgradeRequiredError(diff, hint=additive_hint, remedy="upgrade")
+        if ownership_upgrade_pending:
+            self._identity_ownership_ready = False
+            if self._upgrade:
+                self._upgrade_identity_ownership(connection, persisted)
+                self._identity_ownership_ready = True
+                names_before = actual_table_names(connection)
+        if upgrade_plan is not None and declaration_upgrade is not None:
+            assert isinstance(stored_declaration, str)
+            entry_id_offsets = self._apply_declaration_upgrade(
+                connection, stored_declaration, persisted, declaration_upgrade, upgrade_plan, entry_id_offsets
+            )
+            names_before = actual_table_names(connection)
+        elif upgrade_plan is not None:
+            self._apply_additive_upgrade(connection, persisted, upgrade_plan)
+            names_before = actual_table_names(connection)
+        self._entry_id_offsets = entry_id_offsets
+        self._install_layout(
+            persisted,
+            expected_metadata(persisted, store_timestamps=self._store_timestamps),
+            names_before,
+        )
+        self._initialize_store_timestamp_mark(connection)
+
+    def _check_physical_layout(
+        self,
+        connection: sqlalchemy.Connection,
+        stored: Mapping[str, str],
+        layout: StorageLayout,
+        ownership_upgrade_pending: bool,
+    ) -> frozenset[str]:
+        """Run the read-only physical checks of a reopen against ``layout`` (the target while upgrading).
+
+        Write-profile connection, ``dirty:`` markers, reserved ``_httk_``
+        objects and the identity-ownership tables.  They run before an additive
+        change is advertised or applied.
+
+        :param connection: The open initialization connection.
+        :param stored: The persisted metadata rows.
+        :param layout: The layout the store will be opened with (the target while upgrading).
+        :param ownership_upgrade_pending: Whether the ownership capability is still to be installed.
+        :return: The application base-table names present now.
+        :raises StorageLayoutUpgradeRequiredError: On the first problem found.
+        """
         self._validate_write_profile_connection(connection, self._write_profile)
         objects_before = actual_schema_objects(connection)
         names_before = frozenset(name for name, kinds in objects_before.items() if "table" in kinds)
@@ -766,14 +1103,19 @@ class SqlStore:
         )
         if invalid_dirty:
             raise StorageLayoutUpgradeRequiredError(
-                {"declaration": {"metadata_keys": {"invalid_dirty": tuple(invalid_dirty)}}}
+                {"declaration": {"metadata_keys": {"invalid_dirty": tuple(invalid_dirty)}}}, remedy="rebuild"
             )
         declaration_owned = {
             METADATA_TABLE_NAME,
             "_httk_sid_counters",
             ENTRY_ID_OWNERS_TABLE_NAME,
             IMMUTABLE_ID_OWNERS_TABLE_NAME,
-            *(entry_dispatch_table_name(family.name) for family in persisted.families if len(family.records) > 1),
+            *(entry_dispatch_table_name(family.name) for family in layout.families if len(family.records) > 1),
+        }
+        # Dispatch tables of families this layout declares with one backing: the
+        # residue of an interrupted 1→N declaration upgrade.
+        interrupted_dispatch = {
+            entry_dispatch_table_name(family.name) for family in layout.families if len(family.records) == 1
         }
         object_problems: dict[str, object] = {}
         for name, kinds in objects_before.items():
@@ -799,24 +1141,17 @@ class SqlStore:
                     "message": "unexpected schema object uses the SqlStore-reserved _httk_ prefix",
                 }
         if object_problems:
-            raise StorageLayoutUpgradeRequiredError({"schema": object_problems})
+            if set(object_problems) <= interrupted_dispatch and all(
+                objects_before[name] == {"table"} for name in object_problems
+            ):
+                # Only the upgraded declaration can finish (or own) this residue.
+                raise StorageLayoutUpgradeRequiredError(
+                    {"schema": object_problems}, hint=_INTERRUPTED_UPGRADE_HINT, remedy="reopen"
+                )
+            raise StorageLayoutUpgradeRequiredError({"schema": object_problems}, remedy="rebuild")
         if not ownership_upgrade_pending and self.backend_facts.metadata_backend != "keepermap":
             self._validate_identity_owner_tables(connection)
-        if ownership_upgrade_pending:
-            self._identity_ownership_ready = False
-            if self._upgrade:
-                self._upgrade_identity_ownership(connection, persisted)
-                self._identity_ownership_ready = True
-                names_before = actual_table_names(connection)
-        if upgrade_plan is not None:
-            self._apply_additive_upgrade(connection, persisted, upgrade_plan)
-            names_before = actual_table_names(connection)
-        self._install_layout(
-            persisted,
-            expected_metadata(persisted, store_timestamps=self._store_timestamps),
-            names_before,
-        )
-        self._initialize_store_timestamp_mark(connection)
+        return names_before
 
     @staticmethod
     def _layout_from_stored_declaration(value: str | None) -> StorageLayout:
@@ -827,6 +1162,22 @@ class SqlStore:
         if value is None:
             raise ValueError("metadata is missing entry_declaration")
         return _layout_from_declaration(value)
+
+    @staticmethod
+    def _schema_is_ahead(stored: str, current: str) -> bool:
+        """Whether the stored fingerprint additively extends ``current`` with further entry backing tables.
+
+        That is what a declaration upgrade's partial restamp leaves behind when
+        the store is reopened with the pre-upgrade declaration.
+        """
+        if not isinstance(classify_schema_upgrade(current, stored), AdditiveUpgradePlan):
+            return False
+        try:
+            stored_tables = set(json.loads(stored)["entry_id_tables"])
+            current_tables = set(json.loads(current)["entry_id_tables"])
+        except (TypeError, KeyError, ValueError):
+            return False
+        return stored_tables > current_tables
 
     def _stamp_layout(
         self,
@@ -873,6 +1224,16 @@ class SqlStore:
         :param plan: The additive upgrade plan of per-table added parent columns.
         :return: None.
         """
+        self._create_additive_objects(connection, layout, plan)
+        table = metadata_table_for(sqlalchemy.MetaData())
+        connection.execute(
+            sqlalchemy.update(table).where(table.c.key == "entry_schemas").values(value=schema_fingerprint_json(layout))
+        )
+
+    def _create_additive_objects(
+        self, connection: sqlalchemy.Connection, layout: StorageLayout, plan: AdditiveUpgradePlan
+    ) -> None:
+        """Idempotently create every missing declared table and the plan's added nullable columns."""
         expected_metadata(layout, store_timestamps=self._store_timestamps).create_all(connection, checkfirst=True)
         for table_name, columns in plan.added_columns.items():
             present_columns = actual_columns(connection, table_name)
@@ -884,10 +1245,317 @@ class SqlStore:
                     statements = statements[1:]
                 for statement in statements:
                     connection.execute(sqlalchemy.text(statement))
+
+    def _after_upgrade_step(self, step: str, connection: sqlalchemy.Connection) -> None:
+        """Test seam after each durable step of an additive declaration upgrade.
+
+        Production leaves it a no-op.  The crash-convergence tests raise from it
+        (optionally after committing ``connection``) to simulate a process death
+        between the steps named ``prepared``, ``claimed``, ``tables``,
+        ``dispatch``, ``offsets``, ``restamp-schemas``, ``restamp-offsets`` and
+        ``restamped``.
+        """
+
+    def _attached_tables_with_rows(
+        self,
+        connection: sqlalchemy.Connection,
+        stored_declaration: str,
+        target: StorageLayout,
+        plan: DeclarationUpgradePlan,
+    ) -> str | None:
+        """Name a table the upgrade would newly attach to a family that already holds rows, if any.
+
+        Such rows were stored outside the family (an ad-hoc save of the class)
+        and would enter it without family identity, so the change is not
+        additive.  Read-only (``SELECT … LIMIT 1`` per present table).
+        """
+        families = {family.name: family for family in target.families}
+        # Already validated by classify_declaration_upgrade.
+        stored_counts = {item["family"]: len(item["records"]) for item in json.loads(stored_declaration)["families"]}
+        attached: list[tuple[str, type]] = []
+        for name in plan.changed_families:
+            attached.extend((name, record) for record in families[name].records[stored_counts[name] :])
+        for name in plan.new_families:
+            attached.extend((name, record) for record in families[name].records)
+        present = actual_table_names(connection)
+        for family_name, record in attached:
+            schema = resolve_schema(record)
+            if schema.table_name not in present:
+                continue
+            backing = table_for(schema, sqlalchemy.MetaData(), store_timestamps=self._store_timestamps)
+            if connection.execute(sqlalchemy.select(backing.c[SID_COLUMN]).limit(1)).first() is not None:
+                return (
+                    f"table {schema.table_name!r} of record {record.__name__} newly declared in family "
+                    f"{family_name!r} already holds rows stored outside the family"
+                )
+        return None
+
+    def _apply_declaration_upgrade(
+        self,
+        connection: sqlalchemy.Connection,
+        stored_declaration: str,
+        target: StorageLayout,
+        declaration_plan: DeclarationUpgradePlan,
+        schema_plan: AdditiveUpgradePlan,
+        stored_offsets: Mapping[str, int],
+    ) -> dict[str, int]:
+        """Apply an additive declaration upgrade (appended record kinds, new families) crash-convergently.
+
+        The steps, in order:
+
+        0. *lock and claim* — order the upgrade against writers (SQLite: the
+           claim's ``UPDATE`` takes the database write lock and opens the DBAPI
+           transaction, so the DDL below stays inside it; DuckDB: the open runs
+           under the in-process exclusive layout lock from before its snapshot;
+           PostgreSQL: an exclusive transaction-scoped advisory lock), then a
+           no-op compare-and-set ``UPDATE`` of the stored declaration onto
+           itself verifies nothing restamped the store since this open read it.
+           A lost claim is a no-op when the store already holds the identical
+           target and raises (remedy ``"reopen"``) otherwise; a lock timeout or
+           a write conflict raises with remedy ``"retry"``;
+        1. re-check that no table being newly attached to a family holds rows
+           (the open already refused that read-only);
+        2. create every missing declared table and the schema plan's nullable
+           columns (``checkfirst`` / reflected, idempotent);
+        3. for every family whose record list grew, rebuild its dispatch table:
+           drop it if present, create it under its real name with the full
+           target shape (one nullable unique sid column per backing and the
+           exactly-one CHECK), and insert one row per main row of every
+           backing (:func:`~httk.store.backend.sql.fsck.dispatch_derivation`,
+           the fsck repair derivation).  One routine covers 1→N and N→N+1 on
+           every dialect;
+        4. compute each grown family's entry-id numbering offset
+           (:func:`~httk.store.storage_layout.next_entry_id_offset` over every
+           existing ``id``/``immutable_id`` number of every backing and every
+           ownership claim of the family);
+        5. restamp ``entry_schemas``, then the offsets key, then — last — the
+           declaration as a compare-and-set on its old value.
+
+        DuckDB, PostgreSQL and transactional SQLite run all of it in one
+        transaction.  Independently, every step is idempotent and planned
+        against the *target* layout, and the declaration is written last, so a
+        crash at any point (the degraded autocommit SQLite profile can stop
+        between any two statements) leaves the old declaration in place and a
+        re-run with ``upgrade=True`` converges.  A partial restamp is safe: an
+        early offset only raises later numbers, and a re-run only ever moves an
+        offset up (it takes the maximum with the stored one).
+
+        :param connection: The open initialization connection/transaction.
+        :param stored_declaration: The persisted declaration this open read.
+        :param target: The upgraded (target) layout.
+        :param declaration_plan: The additive declaration classification.
+        :param schema_plan: The additive schema plan for the target fingerprint.
+        :param stored_offsets: The persisted entry-id offsets.
+        :return: The entry-id offsets now in force.
+        :raises StorageLayoutUpgradeRequiredError: If a concurrent upgrade
+            restamped a different layout, the store is busy, or an appended
+            table already holds foreign rows.
+        """
+        dialect = connection.dialect.name
+        if self._layout_lock is not None and not self._holds_upgrade_lock:
+            raise _UpgradeLockRequired
+        self._ensure_degraded_lease(connection)
+        self._after_upgrade_step("prepared", connection)
         table = metadata_table_for(sqlalchemy.MetaData())
-        connection.execute(
-            sqlalchemy.update(table).where(table.c.key == "entry_schemas").values(value=schema_fingerprint_json(layout))
+        target_declaration = declaration_json(target)
+        target_schemas = schema_fingerprint_json(target)
+        try:
+            prior_lock_timeout: str | None = None
+            if dialect == "postgresql":
+                # Bounded, so an upgrade attempted while this very thread holds a
+                # write transaction fails (remedy "retry") instead of hanging.
+                prior_lock_timeout = connection.execute(
+                    sqlalchemy.text("SELECT current_setting('lock_timeout')")
+                ).scalar_one()
+                timeout_ms = int(_UPGRADE_LOCK_TIMEOUT * 1000)
+                connection.execute(sqlalchemy.text(f"SET LOCAL lock_timeout = {timeout_ms}"))
+                connection.execute(sqlalchemy.text(f"SELECT pg_advisory_xact_lock({_POSTGRES_LAYOUT_LOCK_KEY})"))
+            claimed = self._compare_and_set_declaration(connection, stored_declaration, stored_declaration)
+            if prior_lock_timeout is not None:
+                # Every writer is now ordered behind us; the DDL below (the
+                # dispatch DROP TABLE) must not time out with a raw error.
+                connection.execute(
+                    sqlalchemy.text("SELECT set_config('lock_timeout', :value, true)"), {"value": prior_lock_timeout}
+                )
+        except SQLAlchemyError as error:
+            if dialect == "duckdb":
+                hint = "a concurrent write conflicted with the upgrade's claim; retry the upgrade"
+            else:
+                hint = "the store is locked by writers; retry the upgrade when they have finished"
+            raise StorageLayoutUpgradeRequiredError(
+                {"declaration": {"entry_declaration": {"expected": stored_declaration, "error": str(error)}}},
+                hint=hint,
+                remedy="retry",
+            ) from error
+        if not claimed:
+            return self._resolve_lost_declaration_upgrade(connection, stored_declaration, target)
+        self._after_upgrade_step("claimed", connection)
+
+        foreign = self._attached_tables_with_rows(connection, stored_declaration, target, declaration_plan)
+        if foreign is not None:
+            raise StorageLayoutUpgradeRequiredError(
+                {
+                    "declaration": {
+                        "entry_declaration": {
+                            "expected": stored_declaration,
+                            "actual": target_declaration,
+                            "additive": False,
+                            "reason": foreign,
+                        }
+                    }
+                },
+                hint=f"{foreign}; the declaration change is not additive, rebuild the store",
+                remedy="rebuild",
+            )
+
+        families = {family.name: family for family in target.families}
+        self._create_additive_objects(connection, target, schema_plan)
+        self._after_upgrade_step("tables", connection)
+
+        for name in declaration_plan.changed_families:
+            self._rebuild_entry_dispatch(connection, families[name])
+        self._after_upgrade_step("dispatch", connection)
+
+        offsets = dict(stored_offsets)
+        for name in declaration_plan.changed_families:
+            family = families[name]
+            if family.definition_id is None:
+                continue  # no store-minted ids in a family without a definition id
+            offset = next_entry_id_offset(self._existing_entry_id_numbers(connection, family), offsets.get(name, 0))
+            if offset:
+                offsets[name] = offset
+        self._after_upgrade_step("offsets", connection)
+
+        # Declaration last: any partial restamp leaves the old declaration, so a
+        # retry re-enters this routine (never the schema-only path).
+        if not self._compare_and_set_declaration(connection, stored_declaration, stored_declaration):
+            return self._resolve_lost_declaration_upgrade(connection, stored_declaration, target)
+        connection.execute(sqlalchemy.update(table).where(table.c.key == "entry_schemas").values(value=target_schemas))
+        self._after_upgrade_step("restamp-schemas", connection)
+        encoded_offsets = entry_id_offsets_json(offsets)
+        written = connection.execute(
+            sqlalchemy.update(table)
+            .where(table.c.key == ENTRY_ID_OFFSETS_KEY)
+            .values(value=encoded_offsets)
+            .returning(table.c.key)
+        ).first()
+        if written is None and offsets:
+            connection.execute(sqlalchemy.insert(table).values(key=ENTRY_ID_OFFSETS_KEY, value=encoded_offsets))
+        self._after_upgrade_step("restamp-offsets", connection)
+        if not self._compare_and_set_declaration(connection, stored_declaration, target_declaration):
+            # Unreachable while the lock/lease is held; our schema and offset
+            # writes roll back with the raise on every transactional backend.
+            current = self._stored_declaration(connection)
+            raise StorageLayoutUpgradeRequiredError(
+                {"declaration": {"entry_declaration": {"expected": stored_declaration, "actual": current}}},
+                hint="the store layout changed concurrently during the upgrade's restamp; retry the upgrade",
+                remedy="retry" if current == target_declaration else "reopen",
+            )
+        self._after_upgrade_step("restamped", connection)
+        return offsets
+
+    @staticmethod
+    def _compare_and_set_declaration(connection: sqlalchemy.Connection, expected: str, value: str) -> bool:
+        """Set the stored declaration to ``value`` only if it is still ``expected``; report success.
+
+        ``RETURNING`` rather than ``rowcount`` makes the match count exact on
+        SQLite, DuckDB and PostgreSQL alike.
+        """
+        table = metadata_table_for(sqlalchemy.MetaData())
+        return (
+            connection.execute(
+                sqlalchemy.update(table)
+                .where(table.c.key == "entry_declaration", table.c.value == expected)
+                .values(value=value)
+                .returning(table.c.key)
+            ).first()
+            is not None
         )
+
+    def _resolve_lost_declaration_upgrade(
+        self, connection: sqlalchemy.Connection, stored_declaration: str, target: StorageLayout
+    ) -> dict[str, int]:
+        """Settle a lost declaration compare-and-set: a no-op if a concurrent upgrader reached the same target."""
+        current = read_store_metadata(connection) or {}
+        if current.get("entry_declaration") == declaration_json(target) and current.get(
+            "entry_schemas"
+        ) == schema_fingerprint_json(target):
+            offsets = current.get(ENTRY_ID_OFFSETS_KEY)
+            try:
+                return {} if offsets is None else parse_entry_id_offsets(offsets, target)
+            except ValueError as error:
+                raise StorageLayoutUpgradeRequiredError(
+                    {"declaration": {ENTRY_ID_OFFSETS_KEY: {"actual": offsets, "error": str(error)}}},
+                    remedy="rebuild",
+                ) from error
+        raise StorageLayoutUpgradeRequiredError(
+            {
+                "declaration": {
+                    "entry_declaration": {
+                        "expected": stored_declaration,
+                        "actual": current.get("entry_declaration"),
+                    }
+                }
+            },
+            hint="a concurrent upgrade changed the store layout to a different declaration; reopen it",
+            remedy="reopen",
+        )
+
+    def _rebuild_entry_dispatch(self, connection: sqlalchemy.Connection, family: EntryFamilyLayout) -> None:
+        """Drop and recreate one family's dispatch table in its full shape, derived from its backings.
+
+        Idempotent from any prior state (absent, old shape, partially filled),
+        so it serves both 1→N and N→N+1 record-list growth.  Only the table's
+        own name carries the reserved ``_httk_`` prefix; its constraints use
+        the normal ``ck_``/unique naming.
+        """
+        metadata = sqlalchemy.MetaData()
+        schemas = tuple(resolve_schema(record) for record in family.records)
+        backings = tuple(
+            (name, table_for(schema, metadata, store_timestamps=self._store_timestamps))
+            for name, schema in zip(family.record_names, schemas, strict=True)
+        )
+        dispatch = dispatch_table_for(family.name, tuple(zip(family.record_names, schemas, strict=True)), metadata)
+        connection.execute(sqlalchemy.schema.DropTable(dispatch, if_exists=True))
+        dispatch.create(connection, checkfirst=False)
+        for column_name, selection in dispatch_derivation(backings):
+            connection.execute(
+                sqlalchemy.insert(dispatch).from_select(
+                    [dispatch.c[DISPATCH_CONTENT_ID_COLUMN], dispatch.c[column_name]], selection
+                )
+            )
+
+    def _existing_entry_id_numbers(self, connection: sqlalchemy.Connection, family: EntryFamilyLayout) -> Iterator[int]:
+        """Yield the numeric suffix of every id ``family`` has stored or claimed.
+
+        Covers every ``id``/``immutable_id`` of every backing plus every entry
+        and immutable id claimed for the family in the ownership tables, so an
+        orphan claim left by crash residue can never be re-minted either.
+        """
+        present = actual_table_names(connection)
+        entry_owners, immutable_owners = identity_owner_tables(sqlalchemy.MetaData())
+        for owners, column in ((entry_owners, "entry_id"), (immutable_owners, "immutable_id")):
+            if owners.name not in present:
+                continue
+            for (value,) in connection.execute(
+                sqlalchemy.select(owners.c[column]).where(owners.c.family == family.name)
+            ):
+                number = entry_id_number(value)
+                if number is not None:
+                    yield number
+        metadata = sqlalchemy.MetaData()
+        for record in family.records:
+            schema = resolve_schema(record)
+            if schema.table_name not in present:
+                continue
+            table = table_for(schema, metadata, store_timestamps=self._store_timestamps)
+            for column in ("id", "immutable_id"):
+                for (value,) in connection.execute(
+                    sqlalchemy.select(table.c[column]).where(table.c[column].is_not(None)).distinct()
+                ):
+                    number = entry_id_number(value)
+                    if number is not None:
+                        yield number
 
     def _upgrade_identity_ownership(self, connection: sqlalchemy.Connection, layout: StorageLayout) -> None:
         """Validate existing entry ids, create claims, then mark the capability complete."""
@@ -1037,7 +1705,7 @@ class SqlStore:
             }
             if table.name not in present or actual_columns(connection, table.name) != frozenset(table.c.keys()):
                 raise StorageLayoutUpgradeRequiredError(
-                    {"schema": {table.name: {"identity_ownership": "missing or malformed table"}}}
+                    {"schema": {table.name: {"identity_ownership": "missing or malformed table"}}}, remedy="rebuild"
                 )
             if connection.dialect.name == "duckdb":
                 constraints = connection.execute(
@@ -1054,7 +1722,7 @@ class SqlStore:
                 actual.update(tuple(item["column_names"]) for item in inspector.get_unique_constraints(table.name))
             if not expected <= actual:
                 raise StorageLayoutUpgradeRequiredError(
-                    {"schema": {table.name: {"identity_ownership": "missing unique constraint"}}}
+                    {"schema": {table.name: {"identity_ownership": "missing unique constraint"}}}, remedy="rebuild"
                 )
 
     def _claim_identity_values(
@@ -1221,6 +1889,7 @@ class SqlStore:
         table_names: Iterable[str],
     ) -> None:
         self._layout = layout
+        self._opened_declaration = declaration_json(layout)
         self._metadata = metadata
         self._managed_table_names = frozenset(metadata.tables)
         self._tables_present = set(table_names)
@@ -1256,16 +1925,26 @@ class SqlStore:
             )
 
     def _claim_bulk_context(self) -> None:
-        """Atomically reserve this store for one bulk context."""
+        """Atomically reserve this store for one bulk context.
+
+        On DuckDB the context also holds the layout lock shared until
+        :meth:`_release_bulk_context`, covering its parity or deferred-finalize
+        write transaction against a concurrent declaration upgrade.
+        """
         with self._bulk_state_lock:
             if self._bulk_active:
                 raise RuntimeError("this SqlStore already has an open bulk_ingest context")
             self._bulk_active = True
+        if self._layout_lock is not None:
+            self._layout_lock.acquire_shared()
 
     def _release_bulk_context(self) -> None:
         """Release the short-lived in-memory bulk admission state."""
         with self._bulk_state_lock:
+            was_active = self._bulk_active
             self._bulk_active = False
+        if was_active and self._layout_lock is not None:
+            self._layout_lock.release_shared()
 
     def _check_mutation_policy(self, operation: str, *, empty_deferred_bulk: bool = False) -> None:
         """Apply the single public mutation policy for backend capability gates."""
@@ -1280,6 +1959,7 @@ class SqlStore:
                     }
                 },
                 hint="reopen with upgrade=True to validate and install durable entry-id ownership before writing",
+                remedy="upgrade",
             )
         if self.backend_facts.supports_incremental_save:
             return
@@ -1375,6 +2055,16 @@ class SqlStore:
     def transaction(self) -> contextlib.AbstractContextManager[None]:
         """Return a context manager for one database transaction.
 
+        The write-ordering lock (SQLite: the database write lock via ``BEGIN
+        IMMEDIATE``; PostgreSQL: a shared advisory lock) and the stale-layout
+        check are taken at the scope's first write, immediately before its
+        first DML, and held until commit; a read-only scope takes neither, so
+        it never blocks other writers.  On DuckDB the in-process layout lock is
+        held shared for the whole scope.  SQLite waits for a held write lock up
+        to the connection's busy timeout (pysqlite's default is 5 seconds; pass
+        an engine built with ``connect_args={"timeout": seconds}`` to
+        :class:`~httk.store.backend.sql.engine.Backend` to change it).
+
         :return: A transaction context manager that commits on normal exit and rolls back on failure.
         """
         return self._transaction_scope()
@@ -1398,8 +2088,13 @@ class SqlStore:
         self._local.transaction_token = token
         try:
             with self._mutation_lock:
-                with self._database.engine.begin() as connection:
+                with self._layout_write_scope(), self._database.engine.begin() as connection:
+                    # The lease (degraded) is taken at entry, but the write-ordering
+                    # lock and the stale-layout check are taken lazily by the first
+                    # write (see _write_connection): a read-only transaction() must
+                    # not hold SQLite's database write lock for its whole duration.
                     self._ensure_degraded_lease(connection)
+                    self._local.layout_guard_pending = connection
                     stack.append(connection)
                     try:
                         self._local.store_timestamp_transaction = timestamp_state
@@ -1413,6 +2108,7 @@ class SqlStore:
                             raise
                     finally:
                         self._local.store_timestamp_transaction = None
+                        self._local.layout_guard_pending = None
                         stack.pop()
                 self._advance_store_timestamp_mark(timestamp_state["captured"])
                 self._tables_present.update(pending)
@@ -1452,6 +2148,13 @@ class SqlStore:
         if current is not None:
             with self._mutation_lock, self._degraded_lifecycle_guard():
                 self._ensure_degraded_lease(current)
+                guard_pending: sqlalchemy.Connection | None = getattr(self._local, "layout_guard_pending", None)
+                if guard_pending is not None and guard_pending is current:
+                    # First write of an open transaction(): lock, then check,
+                    # immediately before its first DML.  Cleared only on success,
+                    # so a caught refusal is raised again by every later write.
+                    self._lock_and_verify_layout(guard_pending)
+                    self._local.layout_guard_pending = None
                 started = self._begin_degraded_operation(current)
                 try:
                     yield current
@@ -1471,8 +2174,8 @@ class SqlStore:
         pending = self._pending_table_names()
         try:
             with self._mutation_lock, self._degraded_lifecycle_guard():
-                with self._database.engine.begin() as connection:
-                    self._ensure_degraded_lease(connection)
+                with self._layout_write_scope(), self._database.engine.begin() as connection:
+                    self._begin_write(connection)
                     started = self._begin_degraded_operation(connection)
                     stack = self._connection_stack()
                     stack.append(connection)
@@ -1513,6 +2216,7 @@ class SqlStore:
             stack = self._connection_stack()
             stack.append(connection)
             try:
+                self._verify_layout_current(connection)
                 yield connection
             except BaseException:
                 connection.rollback()
@@ -1521,6 +2225,106 @@ class SqlStore:
                 connection.commit()
             finally:
                 stack.pop()
+
+    def _begin_write(self, connection: sqlalchemy.Connection) -> None:
+        """The single start-of-write-transaction guard: the degraded lease, then the locked stale-layout check."""
+        self._ensure_degraded_lease(connection)
+        self._lock_and_verify_layout(connection)
+
+    @contextlib.contextmanager
+    def _layout_write_scope(self) -> Iterator[None]:
+        """Hold the in-process DuckDB layout lock shared around one whole write transaction (no-op elsewhere)."""
+        if self._layout_lock is None:
+            yield
+            return
+        self._layout_lock.acquire_shared()
+        try:
+            yield
+        finally:
+            self._layout_lock.release_shared()
+
+    def _lock_and_verify_layout(self, connection: sqlalchemy.Connection) -> None:
+        """Order this write transaction against declaration upgrades, then refuse it if the layout moved.
+
+        The lock comes first, so an upgrade can never commit between the check
+        and this transaction's writes:
+
+        - SQLite (transactional profile): ``BEGIN IMMEDIATE`` takes the database
+          write lock before the check (pysqlite would otherwise not open the
+          transaction until the first DML).  Inside ``transaction()`` this runs
+          at the first write, not at entry; earlier reads ran outside any
+          DBAPI transaction (pysqlite legacy mode opens none for ``SELECT``),
+          so there is no read transaction to upgrade and no BUSY snapshot
+          conflict.  If the DBAPI connection is already in a transaction, a
+          DML of this same transaction opened it and the lock is already held.  The degraded autocommit profile has
+          no transaction; it is serialized by its exclusive writer lease, which
+          an upgrading open must acquire too.
+        - DuckDB: the caller holds :meth:`_layout_write_scope` (shared), which an
+          upgrading open holds exclusively from before its snapshot to its
+          commit.  DuckDB admits one read-write process per file, so no writer
+          exists outside this process.
+        - PostgreSQL: a transaction-scoped shared advisory lock, which the
+          upgrader takes exclusively.
+
+        :param connection: The connection of the write transaction being started.
+        :return: None.
+        """
+        dialect = connection.dialect.name
+        if dialect == "sqlite" and self._write_profile == "transactional":
+            if not connection.connection.driver_connection.in_transaction:  # type: ignore[union-attr]
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+        elif dialect == "postgresql":
+            connection.execute(sqlalchemy.text(f"SELECT pg_advisory_xact_lock_shared({_POSTGRES_LAYOUT_LOCK_KEY})"))
+        self._verify_layout_current(connection)
+        self._after_write_guard(connection)
+
+    def _after_write_guard(self, connection: sqlalchemy.Connection) -> None:
+        """Test seam between the locked stale-layout check and a write transaction's first DML (no-op)."""
+
+    def _stored_declaration(self, connection: sqlalchemy.Connection) -> str | None:
+        """Read the persisted ``entry_declaration`` value."""
+        table = metadata_table_for(self._metadata)
+        return connection.execute(
+            sqlalchemy.select(table.c.value).where(table.c.key == "entry_declaration")
+        ).scalar_one_or_none()
+
+    def _stale_layout_error(self, current: str | None) -> StorageLayoutUpgradeRequiredError:
+        """Build the remedy-``reopen`` error for a handle whose layout another instance changed."""
+        return StorageLayoutUpgradeRequiredError(
+            {
+                "declaration": {
+                    "entry_declaration": {"expected": self._opened_declaration, "actual": current, "stale": True}
+                }
+            },
+            hint=_STALE_LAYOUT_HINT,
+            remedy="reopen",
+        )
+
+    def _raise_if_layout_moved(self, connection: sqlalchemy.Connection) -> None:
+        """On a read path's integrity failure, report a stale handle (remedy ``"reopen"``) instead of corruption."""
+        if self.backend_facts.metadata_backend == "keepermap":
+            return
+        current = self._stored_declaration(connection)
+        if current != self._opened_declaration:
+            raise self._stale_layout_error(current)
+
+    def _verify_layout_current(self, connection: sqlalchemy.Connection) -> None:
+        """Refuse a write from an instance whose layout another instance has since upgraded.
+
+        Callers take the backend's write-ordering lock first
+        (:meth:`_lock_and_verify_layout`).  The ClickHouse bulk-fenced backend
+        never upgrades a declaration.
+
+        :param connection: The connection of the write transaction being started.
+        :return: None.
+        :raises StorageLayoutUpgradeRequiredError: If the declaration changed
+            since this store was opened (remedy ``"reopen"``).
+        """
+        if self.backend_facts.metadata_backend == "keepermap":
+            return
+        current = self._stored_declaration(connection)
+        if current != self._opened_declaration:
+            raise self._stale_layout_error(current)
 
     def _ensure_degraded_lease(self, connection: sqlalchemy.Connection) -> None:
         """Acquire once and verify on every degraded mutation operation.
@@ -1777,14 +2581,31 @@ class SqlStore:
             finally:
                 stack.pop()
 
-    def _candidate_metadata(self, classes: Iterable[type]) -> sqlalchemy.MetaData:
+    def _families_reached(self, candidate: sqlalchemy.MetaData) -> tuple[EntryFamilyLayout, ...]:
+        """Families with a backing among ``candidate``'s tables, including records reached only by reference.
+
+        A family's backings and dispatch table are created together, so a
+        family record first stored as a dependency of an ordinary record
+        (never top-level) does not leave its siblings uncreated — which every
+        read of it would otherwise treat as an absent row.
+        """
+        return tuple(
+            family
+            for family in self.layout.families
+            if any(resolve_schema(record).table_name in candidate.tables for record in family.records)
+        )
+
+    def _candidate_metadata(self, classes: Iterable[type], *, reach_families: bool = True) -> sqlalchemy.MetaData:
         candidate = sqlalchemy.MetaData()
         requested = tuple(classes)
         for cls in requested:
             table_for(resolve_schema(cls), candidate, store_timestamps=self._store_timestamps)
-        for family in self.layout.families:
-            if not any(record in family.records for record in requested):
-                continue
+        families = (
+            self._families_reached(candidate)
+            if reach_families
+            else tuple(family for family in self.layout.families if any(r in family.records for r in requested))
+        )
+        for family in families:
             schemas = tuple(resolve_schema(record) for record in family.records)
             for schema in schemas:
                 table_for(schema, candidate, store_timestamps=self._store_timestamps)
@@ -1792,15 +2613,20 @@ class SqlStore:
                 dispatch_table_for(family.name, tuple(zip(family.record_names, schemas, strict=True)), candidate)
         return candidate
 
-    def _register_tables(self, classes: Iterable[type]) -> sqlalchemy.MetaData:
+    def _register_tables(self, classes: Iterable[type], *, reach_families: bool = True) -> sqlalchemy.MetaData:
+        """Register the tables of ``classes`` (and of every family they reach) and return a candidate set.
+
+        Writes create the ``reach_families`` candidate, which includes the
+        sibling backings and dispatch table of families reached only by
+        reference.  Reads pass ``reach_families=False`` so a store written
+        before siblings were created that way keeps reading as before.
+        """
         requested = tuple(classes)
         self._known_record_types.update(requested)
-        candidate = self._candidate_metadata(requested)
+        candidate = self._candidate_metadata(requested, reach_families=reach_families)
         for cls in requested:
             table_for(resolve_schema(cls), self._metadata, store_timestamps=self._store_timestamps)
-        for family in self.layout.families:
-            if not any(record in family.records for record in requested):
-                continue
+        for family in self._families_reached(candidate):
             schemas = tuple(resolve_schema(record) for record in family.records)
             for schema in schemas:
                 table_for(schema, self._metadata, store_timestamps=self._store_timestamps)
@@ -1898,7 +2724,7 @@ class SqlStore:
             # The name set is a pure function of the class-set given the fixed
             # layout and _store_timestamps; _register_tables also idempotently
             # populates _metadata so later _table() lookups resolve on a hit.
-            candidate_names = frozenset(self._register_tables(key).tables)
+            candidate_names = frozenset(self._register_tables(key, reach_families=False).tables)
             self._candidate_names[key] = candidate_names
         self._validate_table_names(candidate_names)
         pending = self._pending_table_names()
@@ -2964,19 +3790,36 @@ class SqlStore:
         A lazy row is returned by default; pass ``eager=True`` to fully
         materialize it.
 
+        Only records stored top-level carry a dispatch row; a record stored
+        only as a dependency of another record is resolved directly from its
+        backing table, exactly as in a single-backing family.  A write that
+        reaches a family record by reference creates the family's sibling
+        backings and dispatch table, so a store written before httk-store did
+        that — whose referencing records then read as absent — is healed by the
+        first such write.
+
         :param family_cls: The configured entry-family class.
         :param content_id: The entry content identity to find.
         :param eager: Whether to fully materialize the record instead of returning a lazy row.
         :return: The concrete stored record, or ``None`` when no row matches.
         :raises ValueError: If ``family_cls`` is not configured for this store.
         :raises EntryDispatchIntegrityError: If a dispatch row is inconsistent with its backing row.
+        :raises httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError: If the lookup misses or meets a dispatch row
+            this handle cannot interpret because another instance has since upgraded the
+            declaration (remedy ``"reopen"``).
         """
         family = next((item for item in self.layout.families if item.family is family_cls), None)
         if family is None:
             raise ValueError(f"{family_cls.__name__} is not a configured entry family in this SqlStore")
         with self._read_connection() as connection:
+            present: frozenset[str] | None = None
             if self._missing_tables_for_read(family.records):
-                return None
+                if len(family.records) == 1:
+                    self._raise_if_layout_moved(connection)
+                    return None
+                # Lazily created tables: some backings (or the dispatch table)
+                # may not exist yet while another backing holds rows.
+                present = actual_table_names(connection)
             if len(family.records) == 1:
                 backing = family.records[0]
                 schema = resolve_schema(backing)
@@ -2984,32 +3827,58 @@ class SqlStore:
                 sid = connection.execute(
                     sqlalchemy.select(table.c[SID_COLUMN]).where(table.c[CONTENT_ID_COLUMN] == content_id)
                 ).scalar_one_or_none()
-                return None if sid is None else self._fetch_result(connection, backing, int(sid), eager=eager)
+                if sid is None:
+                    # A stale single-backing handle cannot see an entry stored in
+                    # a backing appended since it was opened: say so, not None.
+                    self._raise_if_layout_moved(connection)
+                    return None
+                return self._fetch_result(connection, backing, int(sid), eager=eager)
             table = self._table(entry_dispatch_table_name(family.name))
             row = (
-                connection.execute(sqlalchemy.select(table).where(table.c[DISPATCH_CONTENT_ID_COLUMN] == content_id))
+                None
+                if present is not None and table.name not in present
+                else connection.execute(
+                    sqlalchemy.select(table).where(table.c[DISPATCH_CONTENT_ID_COLUMN] == content_id)
+                )
                 .mappings()
                 .one_or_none()
             )
             if row is None:
+                # Only main rows (_httk_role = 1) carry a dispatch row; a
+                # dependency-only row resolves directly, exactly as in a
+                # single-backing family, so fresh and upgraded stores agree.
                 for backing in family.records:
                     backing_table = self._table(resolve_schema(backing).table_name)
+                    if present is not None and backing_table.name not in present:
+                        continue
                     found = connection.execute(
-                        sqlalchemy.select(backing_table.c[SID_COLUMN])
+                        sqlalchemy.select(backing_table.c[SID_COLUMN], backing_table.c[ROLE_COLUMN])
                         .where(backing_table.c[CONTENT_ID_COLUMN] == content_id)
                         .limit(1)
                     ).first()
-                    if found is not None:
-                        raise EntryDispatchIntegrityError(
-                            f"entry dispatch {family.name!r} is missing for stored content_id {content_id!r}"
-                        )
+                    if found is None:
+                        continue
+                    if int(found[1]) == 0:
+                        return self._fetch_result(connection, backing, int(found[0]), eager=eager)
+                    self._raise_if_layout_moved(connection)
+                    raise EntryDispatchIntegrityError(
+                        f"entry dispatch {family.name!r} is missing for stored content_id {content_id!r}"
+                    )
+                self._raise_if_layout_moved(connection)
                 return None
-            backing, sid = self._dispatch_target(family, row, content_id)
+            try:
+                backing, sid = self._dispatch_target(family, row, content_id)
+            except EntryDispatchIntegrityError:
+                # A handle opened before another instance appended record kinds
+                # sees dispatch columns it does not know: that is staleness.
+                self._raise_if_layout_moved(connection)
+                raise
             backing_table = self._table(resolve_schema(backing).table_name)
             backing_content_id = connection.execute(
                 sqlalchemy.select(backing_table.c[CONTENT_ID_COLUMN]).where(backing_table.c[SID_COLUMN] == sid)
             ).scalar_one_or_none()
             if backing_content_id != content_id:
+                self._raise_if_layout_moved(connection)
                 raise EntryDispatchIntegrityError(
                     f"entry dispatch {family.name!r} maps content_id {content_id!r} to backing sid {sid} "
                     f"whose content_id is {backing_content_id!r}"

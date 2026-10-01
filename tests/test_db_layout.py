@@ -360,10 +360,10 @@ def test_read_candidate_metadata_is_memoized_per_class_set(database: Backend, mo
     calls: list[frozenset[type]] = []
     original = SqlStore._candidate_metadata
 
-    def spy(self: SqlStore, classes: object) -> object:
+    def spy(self: SqlStore, classes: object, **options: bool) -> object:
         materialized = tuple(classes)  # type: ignore[call-overload]
         calls.append(frozenset(materialized))
-        return original(self, materialized)
+        return original(self, materialized, **options)
 
     monkeypatch.setattr(SqlStore, "_candidate_metadata", spy)
     assert store.fetch_by_content_id(LayoutSingle, "missing") is None

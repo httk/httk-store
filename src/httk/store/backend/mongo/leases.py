@@ -19,10 +19,12 @@ from .mapping import METADATA_COLLECTION
 
 __all__ = [
     "FsckLease",
+    "FsckLeasePresentError",
     "Lease",
     "LeaseLostError",
     "LeaseTiming",
     "StoreLockedError",
+    "WriterDrainTimeoutError",
     "WriterLease",
     "acquire_fsck",
     "acquire_writer",
@@ -38,6 +40,18 @@ class LeaseLostError(StoreLockedError):
     """A lease owner tried to refresh after its lease was displaced."""
 
 
+class FsckLeasePresentError(StoreLockedError):
+    """The singleton fsck lease (held by an fsck or a declaration upgrade) already exists.
+
+    If its owner died, the lease stays until an administrator clears it with
+    :func:`clear_stale_lock` once it is stale.
+    """
+
+
+class WriterDrainTimeoutError(StoreLockedError):
+    """Fresh writer leases did not drain within :attr:`LeaseTiming.drain_budget`."""
+
+
 @dataclass(frozen=True)
 class LeaseTiming:
     """Server-clock lease timings.
@@ -46,12 +60,17 @@ class LeaseTiming:
     :param stale_multiplier: Number of refresh intervals before a writer is stale.
     :param poll_initial: Initial fsck writer-drain sleep.
     :param poll_max: Maximum fsck writer-drain sleep.
+    :param drain_budget: Seconds the fsck singleton waits for fresh writers to
+        drain before giving up (releasing the singleton and raising
+        :class:`WriterDrainTimeoutError`); ``None`` waits indefinitely, which is
+        what :meth:`~httk.store.backend.mongo.store.MongoStore.fsck` does by design.
     """
 
     refresh_interval: float = 2.0
     stale_multiplier: int = 4
     poll_initial: float = 0.02
     poll_max: float = 0.25
+    drain_budget: float | None = None
 
     @property
     def stale_after(self) -> float:
@@ -90,9 +109,17 @@ class Lease:
 
 @dataclass
 class WriterLease(Lease):
-    """A writer registration plus the generation seen during acquisition."""
+    """A writer registration plus the layout generation and declaration seen during acquisition.
+
+    Both are read only after the writer's registration is durable, so an
+    additive declaration upgrade (which drains writers behind the fsck lease)
+    has either finished before ``declaration`` was read or waits for this
+    writer to release: a writer compares ``declaration`` with the one its store
+    opened to refuse a stale write.
+    """
 
     generation: int = 0
+    declaration: str | None = None
 
 
 @dataclass
@@ -143,7 +170,9 @@ def acquire_writer(database: Any, *, timing: LeaseTiming = DEFAULT_TIMING) -> Wr
     try:
         documents = {
             document["_id"]: document
-            for document in collection.find({"_id": {"$in": ["lease/fsck", "layout"]}}, {"_id": 1, "generation": 1})
+            for document in collection.find(
+                {"_id": {"$in": ["lease/fsck", "layout"]}}, {"_id": 1, "generation": 1, "entry_declaration": 1}
+            )
         }
         if "lease/fsck" in documents:
             raise StoreLockedError("MongoStore is locked by an fsck lease")
@@ -151,6 +180,8 @@ def acquire_writer(database: Any, *, timing: LeaseTiming = DEFAULT_TIMING) -> Wr
         if layout is None or not isinstance(layout.get("generation"), int):
             raise RuntimeError("MongoStore metadata layout document is missing its generation counter")
         lease.generation = int(layout["generation"])
+        declaration = layout.get("entry_declaration")
+        lease.declaration = declaration if isinstance(declaration, str) else None
         return lease
     except BaseException:
         lease.release()
@@ -163,6 +194,10 @@ def acquire_fsck(database: Any, *, force: bool = False, timing: LeaseTiming = DE
     ``force`` may replace a pre-existing fsck lease and may proceed past stale
     writer residue.  It is an administrative assertion that those owners are
     dead; using it against a still-running owner can corrupt the store.
+
+    An existing singleton raises :class:`FsckLeasePresentError`; with
+    ``timing.drain_budget`` set, writers that do not drain in time raise
+    :class:`WriterDrainTimeoutError` after the singleton is released again.
     """
     owner = _owner()
     collection = database[METADATA_COLLECTION]
@@ -170,7 +205,7 @@ def acquire_fsck(database: Any, *, force: bool = False, timing: LeaseTiming = DE
         collection.insert_one({"_id": "lease/fsck", "owner": owner, "heartbeat": None})
     except DuplicateKeyError:
         if not force:
-            raise StoreLockedError("MongoStore already has an fsck lease") from None
+            raise FsckLeasePresentError("MongoStore already has an fsck lease") from None
         cutoff_ms = int(timing.stale_after * 1000)
         replaced = collection.find_one_and_update(
             {
@@ -187,8 +222,13 @@ def acquire_fsck(database: Any, *, force: bool = False, timing: LeaseTiming = DE
     try:
         lease.refresh_heartbeat(force=True)
         delay = timing.poll_initial
+        started = time.monotonic()
         while True:
             fresh = _fresh_writer_documents(database, timing)
+            if fresh and timing.drain_budget is not None and time.monotonic() - started > timing.drain_budget:
+                raise WriterDrainTimeoutError(
+                    f"{len(fresh)} live writer lease(s) did not drain within {timing.drain_budget:g} s"
+                )
             if not fresh:
                 stale = _stale_writer_documents(database, timing)
                 if stale and not force:

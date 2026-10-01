@@ -117,7 +117,19 @@ re-stamp (done last, after every other check passes, since Mongo has no
 transaction to roll a bad open back); old documents read back with the new
 fields as `None` and keep their `content_id`. Non-additive or non-schema
 differences still raise, and a hint points at `upgrade=True` when the difference
-is exactly additive.
+is exactly additive. Appending record kinds to a family or adding families is
+the same additive upgrade as on `SqlStore`; see
+[Adding record kinds or families to an existing store](db-revisions.md#adding-record-kinds-or-families-to-an-existing-store)
+for the rules, the remedies and the Mongo-specific mechanics (fsck-lease
+exclusion, `collMod` of the dispatch validator, back-fill, restamp order).
+
+Collection DDL is lease-ordered: `ensure_collections` (and the implicit
+collection preparation of `link`/`unlink`) takes a writer lease for the duration
+of its DDL when the calling thread holds none, exactly as a write does. It can
+therefore raise `StoreLockedError` while an fsck or a declaration upgrade holds
+the store, `StorageLayoutUpgradeRequiredError` (remedy `"reopen"`) when another
+instance has upgraded the declaration, and `RuntimeError` if the layout
+document lacks its generation counter.
 
 Application-private families can instead use the same explicit
 `EntryFamilyDeclaration`/`EntryRecordDeclaration` and `entry_families=` API as

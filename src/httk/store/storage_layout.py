@@ -784,15 +784,19 @@ def schema_fingerprint_diff(stored: str | None, current: str) -> dict[str, objec
     :return: A mapping of table name to ``{"expected", "actual"}`` for each table
         that differs; ``{}`` when the two fingerprints are byte-equal.  A stored
         value that is not a parseable fingerprint yields a single
-        ``"<fingerprint>"`` entry.
+        ``"<fingerprint>"`` entry, and differing ``entry_id_tables`` (the backing
+        tables of defined families) an ``"<entry_id_tables>"`` entry — they
+        differ even when every table is unchanged, e.g. when a record kind whose
+        table was already reachable by reference is appended to a family.
     """
     current_document = json.loads(current)
     current_tables = current_document["tables"]
     try:
-        stored_tables = json.loads(stored)["tables"] if stored is not None else None
+        stored_document = json.loads(stored) if stored is not None else None
+        stored_tables = stored_document["tables"] if isinstance(stored_document, dict) else None
     except (TypeError, KeyError, json.JSONDecodeError):
-        stored_tables = None
-    if not isinstance(stored_tables, dict):
+        stored_document, stored_tables = None, None
+    if not isinstance(stored_tables, dict) or not isinstance(stored_document, dict):
         return {"<fingerprint>": {"expected": "schema fingerprint", "actual": stored}}
     diff: dict[str, object] = {}
     for name in sorted(set(stored_tables) | set(current_tables)):
@@ -800,6 +804,10 @@ def schema_fingerprint_diff(stored: str | None, current: str) -> dict[str, objec
         current_table = current_tables.get(name)
         if stored_table != current_table:
             diff[name] = {"expected": stored_table, "actual": current_table}
+    stored_entry_tables = stored_document.get("entry_id_tables")
+    current_entry_tables = current_document.get("entry_id_tables")
+    if stored_entry_tables is not None and stored_entry_tables != current_entry_tables:
+        diff["<entry_id_tables>"] = {"expected": stored_entry_tables, "actual": current_entry_tables}
     return diff
 
 
@@ -902,7 +910,8 @@ def classify_schema_upgrade(stored: str | None, current: str) -> AdditiveUpgrade
     content-identity-excluded (``IdentitySkip``) field whose parent columns are
     all nullable.  Identity participation is required so a pre-existing row's
     ``content_id`` (and therefore dedup, dispatch, and federation identity) is
-    unchanged by the upgrade.
+    unchanged by the upgrade.  ``entry_id_tables`` may grow (a declaration
+    upgrade attaches backings) but never lose a table.
 
     :param stored: The persisted fingerprint JSON, or ``None`` when absent.
     :param current: The fingerprint recomputed from the persisted layout.
@@ -913,11 +922,17 @@ def classify_schema_upgrade(stored: str | None, current: str) -> AdditiveUpgrade
     current_tables = current_document["tables"]
     entry_id_tables = frozenset(current_document.get("entry_id_tables", ()))
     try:
-        stored_tables = json.loads(stored)["tables"] if stored is not None else None
+        stored_document = json.loads(stored) if stored is not None else None
+        stored_tables = stored_document["tables"] if isinstance(stored_document, dict) else None
     except (TypeError, KeyError, json.JSONDecodeError):
-        stored_tables = None
-    if not isinstance(stored_tables, dict):
+        stored_document, stored_tables = None, None
+    if not isinstance(stored_tables, dict) or not isinstance(stored_document, dict):
         return "stored schema fingerprint is not parseable"
+    # Entry-id tables may only be gained (record kinds appended, families
+    # added), never lost: losing one is a declaration shrink, not additive.
+    lost = sorted(set(stored_document.get("entry_id_tables", ())) - entry_id_tables)
+    if lost:
+        return f"entry-id tables {lost!r} are no longer declared"
     added: dict[str, tuple[ColumnSpec, ...]] = {}
     for name in sorted(set(stored_tables) | set(current_tables)):
         stored_table = stored_tables.get(name)

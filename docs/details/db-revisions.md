@@ -230,8 +230,46 @@ first write that reaches the family.
 
 Adding a family whose record list is new, without growing an existing family,
 writes no offset: the new family mints exactly like a fresh store. The ClickHouse
-bulk-fenced backend refuses these upgrades, and `MongoStore` does not yet offer
-them.
+bulk-fenced backend refuses these upgrades.
+
+`MongoStore` offers the same upgrade with the same rules, offsets, remedies and
+error diffs; only the mechanics differ. The upgrade runs under the singleton
+**fsck lease**, which drains every live writer lease and refuses new writers
+until it is released. Writers that do not finish within 30 seconds make the
+upgrade give up with remedy `"retry"` (the lease is released again, nothing is
+changed); `fsck()` itself keeps waiting for writers indefinitely. A grown
+family's dispatch collection keeps its documents (`{_id: content_id, record,
+sid}` does not depend on the number of backings): its validator's `record` enum is
+widened with `collMod` (or the collection is created for a one-to-many growth) and
+the missing dispatch documents are back-filled from the main documents of every
+backing with unordered inserts that accept already-present identical documents.
+The offsets live in the `entry_id_offsets` field of the layout document, and the
+restamp writes `entry_schemas`, then `entry_id_offsets`, then the declaration last
+(a `find_one_and_update` conditioned on the old declaration, which also advances
+`generation`). MongoDB has no transactional DDL, so every step is durable as it
+happens; each is idempotent and planned against the new layout, so an
+interrupted upgrade converges on a retried `upgrade=True` open. Unlike on SQL, a
+process that *dies* mid-upgrade leaves its fsck lease (`lease/fsck`) behind, and
+the retry then fails with remedy `"retry"` and a hint naming the cure: once that
+lease is stale (8 seconds after its last heartbeat by default) and its owner is
+verified dead, clear it with the module-level
+`httk.store.backend.mongo.clear_stale_lock(database)` (no `MongoStore` needs to
+be constructible for that), then retry. After an interrupted N→N+1 upgrade, a
+handle with the old declaration can still open (its dispatch collection is
+expected) and its first collection preparation narrows the dispatch validator
+again; that is harmless, because the newly attached collection is guaranteed
+empty, and the retried upgrade widens it once more. Stale writers are excluded by the writer-lease protocol rather than by a
+per-write lock: a writer registers its lease durably *before* reading the layout
+document, and the upgrade drains every fresh registration before touching
+anything, so a writer either saw the new declaration (and is refused with remedy
+`"reopen"`) or finished before the upgrade began. That covers `save`, `replace`,
+`transaction()` (whose lease is taken at entry, so a stale handle is refused
+there), `link`/`unlink`, and collection preparation (`ensure_collections`), so a
+stale handle can never `collMod` a grown dispatch validator back to its old enum.
+The protocol's one residual assumption is the lease freshness interval: a writer
+whose lease went stale without heartbeats (8 seconds by default) makes the
+upgrade refuse with remedy `"retry"`, and only an administrator's forced
+override could let an upgrade run past a writer that is in fact still alive.
 
 ### Alternatives
 

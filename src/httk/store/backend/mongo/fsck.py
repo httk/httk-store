@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -19,9 +19,11 @@ from .leases import acquire_fsck
 from .mapping import COUNTERS_COLLECTION, METADATA_COLLECTION, collection_name_for, entry_dispatch_table_name
 
 if TYPE_CHECKING:
+    from httk.store.storage_layout import EntryFamilyLayout
+
     from .store import MongoStore
 
-__all__ = ["FsckCollectionSummary", "FsckSummary", "run_fsck"]
+__all__ = ["FsckCollectionSummary", "FsckSummary", "main_backing_documents", "run_fsck"]
 
 _LOGGER = logging.getLogger("httk.store.backend.mongo")
 _BATCH_SIZE = 500
@@ -192,44 +194,60 @@ def _integrity_pass(
 
         # A dependency backing is deliberately not considered here.  It may be
         # a family record reached from another record and has no entry identity.
-        for backing, record_name in zip(family.records, family.record_names, strict=True):
-            collection_name = collection_name_for(resolve_schema(backing))
-            collection = database[collection_name]
-            for document in collection.find(
-                {"_httk_role": "main", "content_id": {"$exists": True}}, {"_id": 1, "content_id": 1}
-            ):
-                counters[collection_name].examined += 1
-                assert document is not None
-                sid = document["_id"]
-                content_id = document.get("content_id")
-                if not isinstance(content_id, str):
-                    _record_violation(
-                        violations,
-                        counters,
-                        collection_name,
-                        f"main backing {collection_name!r}/{sid!r} has a non-string content_id {content_id!r}",
-                    )
-                    continue
-                existing = dispatch.find_one({"_id": content_id}, {"_id": 1})
-                if existing is not None:
-                    continue
-                try:
-                    dispatch.insert_one({"_id": content_id, "record": record_name, "sid": sid})
-                except DuplicateKeyError:
-                    # Another raw writer can race only outside the advisory
-                    # lease protocol; retain it as an integrity conflict.
-                    _record_violation(
-                        violations,
-                        counters,
-                        dispatch_name,
-                        f"dispatch {dispatch_name!r} changed while repairing content_id {content_id!r}",
-                    )
-                else:
-                    _record_repair(
-                        counters,
-                        dispatch_name,
-                        f"inserted missing dispatch for {collection_name!r}/{sid!r}",
-                    )
+        for collection_name, record_name, document in main_backing_documents(database, family):
+            counters[collection_name].examined += 1
+            assert document is not None
+            sid = document["_id"]
+            content_id = document.get("content_id")
+            if not isinstance(content_id, str):
+                _record_violation(
+                    violations,
+                    counters,
+                    collection_name,
+                    f"main backing {collection_name!r}/{sid!r} has a non-string content_id {content_id!r}",
+                )
+                continue
+            existing = dispatch.find_one({"_id": content_id}, {"_id": 1})
+            if existing is not None:
+                continue
+            try:
+                dispatch.insert_one({"_id": content_id, "record": record_name, "sid": sid})
+            except DuplicateKeyError:
+                # Another raw writer can race only outside the advisory
+                # lease protocol; retain it as an integrity conflict.
+                _record_violation(
+                    violations,
+                    counters,
+                    dispatch_name,
+                    f"dispatch {dispatch_name!r} changed while repairing content_id {content_id!r}",
+                )
+            else:
+                _record_repair(
+                    counters,
+                    dispatch_name,
+                    f"inserted missing dispatch for {collection_name!r}/{sid!r}",
+                )
+
+
+def main_backing_documents(database: Any, family: EntryFamilyLayout) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
+    """Yield the backing documents of ``family`` that carry a dispatch document.
+
+    A dispatch document exists exactly for every *main* (``_httk_role``
+    ``"main"``) document of a backing: a top-level save writes one, a
+    dependency-only document has none.  This derivation is the single
+    definition shared by :func:`run_fsck`'s repair and by the additive
+    declaration upgrade, which back-fills a grown family's dispatch from it.
+
+    :param database: The PyMongo database.
+    :param family: The entry family whose backings are scanned, in record order.
+    :yield: ``(collection name, stable record name, {_id, content_id})`` triples.
+    """
+    for backing, record_name in zip(family.records, family.record_names, strict=True):
+        collection_name = collection_name_for(resolve_schema(backing))
+        for document in database[collection_name].find(
+            {"_httk_role": "main", "content_id": {"$exists": True}}, {"_id": 1, "content_id": 1}
+        ):
+            yield collection_name, record_name, document
 
 
 def _mark(
@@ -486,6 +504,9 @@ def run_fsck(
     with store._write_lock:
         lease = acquire_fsck(store._database.database, force=force)
         try:
+            # A stale handle would judge dispatch documents of record kinds
+            # appended since it opened as conflicts (and could delete them).
+            store._raise_if_layout_moved()
             layout = store._database.database[METADATA_COLLECTION].find_one_and_update(
                 {"_id": "layout"},
                 {"$inc": {"generation": 1}},

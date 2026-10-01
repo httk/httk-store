@@ -31,17 +31,20 @@ from httk.store.backend.sql.mapping import (
 from httk.store.storage_layout import (
     ADDITIVE_DECLARATION_UPGRADE_HINT,
     ENTRY_ID_OFFSETS_KEY,
+    AdditiveUpgradePlan,
     DeclarationUpgradePlan,
     EntryFamilyDeclaration,
     EntryRecordDeclaration,
     StorageLayoutUpgradeRequiredError,
     classify_declaration_upgrade,
+    classify_schema_upgrade,
     declaration_json,
     entry_id_number,
     entry_id_offsets_json,
     next_entry_id_offset,
     normalize_entry_families,
     parse_entry_id_offsets,
+    schema_fingerprint_diff,
     schema_fingerprint_json,
 )
 
@@ -1368,3 +1371,74 @@ def test_duckdb_layout_lock_prefers_a_waiting_upgrader_without_deadlocking_reent
     waiter.join(5)
     assert outcome == ["acquired"]
     lock.release_exclusive()
+
+
+class HolderFamily:
+    type = "decl_up_holders"
+
+
+@dataclass(frozen=True)
+class HolderC:
+    """A declared (definition-free) family record that makes ``UpC``'s table reachable by reference."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        storage_name="decl_up_holder_c", identity_name="decl_up_holder_c"
+    )
+    tag: int
+    c: UpC
+
+
+HOLDERS = EntryFamilyDeclaration(
+    name="decl-up-holders",
+    family=HolderFamily,
+    records=(EntryRecordDeclaration(name="decl-up-holder-c", record=HolderC),),
+)
+
+
+@pytest.mark.parametrize("step", ["restamp-schemas", "restamp-offsets"])
+def test_partial_restamp_is_visible_when_the_appended_table_was_already_reachable(
+    database: Backend, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """Old and new fingerprints differ only in ``entry_id_tables``; the old declaration must still be told to reopen.
+
+    N→N+1 (2→3), so the dispatch table is legitimately present for the old
+    declaration too: only the fingerprint can reveal the interrupted upgrade.
+    """
+    old_layout = normalize_entry_families((family(UpA, UpB), HOLDERS))
+    new_layout = normalize_entry_families((family(UpA, UpB, UpC), HOLDERS))
+    old_fingerprint = json.loads(schema_fingerprint_json(old_layout))
+    new_fingerprint = json.loads(schema_fingerprint_json(new_layout))
+    assert old_fingerprint["tables"] == new_fingerprint["tables"]
+    assert old_fingerprint["entry_id_tables"] != new_fingerprint["entry_id_tables"]
+
+    store = opened(database, UpA, UpB, extra=(HOLDERS,))
+    for value in (1, 2):
+        store.save(UpA(value))
+        store.save(UpB(value))
+    _commit_crash_at(monkeypatch, step)
+    with pytest.raises(Crash):
+        opened(database, UpA, UpB, UpC, extra=(HOLDERS,), upgrade=True)
+    monkeypatch.undo()
+    for upgrade in (False, True):
+        with pytest.raises(StorageLayoutUpgradeRequiredError) as error:
+            opened(database, UpA, UpB, extra=(HOLDERS,), upgrade=upgrade)
+        assert error.value.remedy == "reopen"
+        assert error.value.hint is not None and "interrupted" in error.value.hint
+    with pytest.raises(StorageLayoutUpgradeRequiredError) as target_reopen:
+        opened(database, UpA, UpB, UpC, extra=(HOLDERS,))
+    assert target_reopen.value.remedy == "upgrade"
+    upgraded = opened(database, UpA, UpB, UpC, extra=(HOLDERS,), upgrade=True)
+    for value in (10, 11):
+        for cls in (UpA, UpB, UpC):
+            upgraded.save(cls(value))
+    assert_unique_numbers(database, (UpA, UpB, UpC))
+    assert_fsck_clean(upgraded)
+
+
+def test_entry_id_tables_may_grow_but_never_shrink() -> None:
+    old = schema_fingerprint_json(normalize_entry_families((family(UpA, UpB), HOLDERS)))
+    new = schema_fingerprint_json(normalize_entry_families((family(UpA, UpB, UpC), HOLDERS)))
+    assert set(schema_fingerprint_diff(old, new)) == {"<entry_id_tables>"}
+    assert classify_schema_upgrade(old, new) == AdditiveUpgradePlan({})
+    reason = classify_schema_upgrade(new, old)
+    assert isinstance(reason, str) and "decl_up_c" in reason

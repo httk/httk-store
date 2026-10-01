@@ -4,6 +4,7 @@ import contextlib
 import dataclasses
 import datetime
 import functools
+import json
 import logging
 import threading
 import time
@@ -21,17 +22,20 @@ from httk.core.entry_ids import (
     format_immutable_id,
 )
 from httk.core.storage import StorageProjectionCycleError, resolve_storage_record
-from pymongo import IndexModel
-from pymongo.errors import CollectionInvalid, DuplicateKeyError, PyMongoError
+from pymongo import IndexModel, ReturnDocument
+from pymongo.errors import BulkWriteError, CollectionInvalid, DuplicateKeyError, PyMongoError
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
 from httk.store.backend.codecs import codec_named, decode_fracvector_exact
 from httk.store.backend.schema import LinkSpec, SchemaError, TableSchema, resolve_schema
 from httk.store.storage_layout import (
+    ADDITIVE_DECLARATION_UPGRADE_HINT,
     ADDITIVE_UPGRADE_HINT,
     DECLARATION_PROTOCOL_VERSION,
+    ENTRY_ID_OFFSETS_KEY,
     AdditiveUpgradePlan,
+    DeclarationUpgradePlan,
     EntryFamilyDeclaration,
     EntryFamilyLayout,
     EntryLayoutBindingError,
@@ -39,11 +43,17 @@ from httk.store.storage_layout import (
     StorageLayoutUpgradeRequiredError,
     _layout_from_declaration,
     _merge_storage_layouts,
+    classify_declaration_upgrade,
     classify_schema_upgrade,
+    declaration_is_superseded,
     declaration_json,
+    entry_id_number,
+    entry_id_offsets_json,
     family_entry_type_definition,
+    next_entry_id_offset,
     normalize_entry_families,
     normalize_entry_records,
+    parse_entry_id_offsets,
     schema_fingerprint_diff,
     schema_fingerprint_json,
     validate_entry_id_fields,
@@ -71,8 +81,17 @@ from httk.store.store_timestamp import (
 
 from .database import MongoDatabase, TransactionConflictError, TransactionsUnavailableError
 from .documents import decode_record, encode_record, preflight_document
-from .fsck import FsckSummary
-from .leases import WriterLease, acquire_fsck, acquire_writer, clear_stale_lock
+from .fsck import FsckSummary, main_backing_documents
+from .leases import (
+    DEFAULT_TIMING,
+    FsckLeasePresentError,
+    StoreLockedError,
+    WriterDrainTimeoutError,
+    WriterLease,
+    acquire_fsck,
+    acquire_writer,
+    clear_stale_lock,
+)
 from .mapping import (
     COUNTERS_COLLECTION,
     METADATA_COLLECTION,
@@ -107,12 +126,40 @@ _METADATA_KEYS = frozenset(
         "identity_ownership",
     }
 )
+_INTERRUPTED_UPGRADE_HINT = (
+    "a declaration upgrade appears to have been interrupted; reopen with the upgraded declaration and upgrade=True"
+)
+_NEWER_STORE_HINT = (
+    "the store was upgraded to a newer declaration; open it with that declaration (a newer httk), not this older one"
+)
+_STALE_LAYOUT_HINT = "the store layout changed since this store was opened; reopen it"
+_DISPATCH_BATCH = 500
+# How long a declaration upgrade waits for live writers to drain (SQL parity
+# with its _UPGRADE_LOCK_TIMEOUT); fsck() itself keeps waiting indefinitely.
+_UPGRADE_DRAIN_BUDGET = 30.0
+type _Remedy = typing.Literal["upgrade", "rebuild", "reopen", "retry"]
 _LOGGER = logging.getLogger("httk.store.backend.mongo")
 _TRANSACTION_ATTEMPTS = 5
 _MISSING = object()
 _BOUND_STORE = "_httk_bound_store"
 _BOUND_LID = "_httk_bound_lid"
 _BOUND_LINKS = "_httk_bound_links"
+
+
+def _schema_is_ahead(stored: str, current: str) -> bool:
+    """Whether the stored fingerprint additively extends ``current`` with further entry backing tables.
+
+    That is what a declaration upgrade's partial restamp leaves behind when the
+    store is reopened with the pre-upgrade declaration.
+    """
+    if not isinstance(classify_schema_upgrade(current, stored), AdditiveUpgradePlan):
+        return False
+    try:
+        stored_tables = set(json.loads(stored)["entry_id_tables"])
+        current_tables = set(json.loads(current)["entry_id_tables"])
+    except (TypeError, KeyError, ValueError):
+        return False
+    return stored_tables > current_tables
 
 
 def _iter_link_targets(targets: object) -> typing.Iterator[Any]:
@@ -275,10 +322,13 @@ class MongoStore:
     :param store_timestamp_resolution: Nanoseconds represented by one stored unit.
     :param allow_clock_regression: Whether to disable the process-local clock guard.
     :param clock_regression_grace: Whether to wait briefly for sub-millisecond regressions.
-    :param upgrade: Whether to apply a purely additive schema-fingerprint change
-        on reopen instead of raising.  Documents are schemaless, so the physical
-        apply is a no-op and only the stored fingerprint is re-stamped;
-        non-additive or non-schema differences still raise.
+    :param upgrade: Whether to apply a purely additive change on reopen instead
+        of raising: a schema-fingerprint change (documents are schemaless, so
+        only the stored fingerprint is re-stamped) and/or a declaration change
+        that only appends record kinds to existing families or adds families
+        (dispatch validators widened and back-filled, entry-id offsets
+        recorded, all under the exclusive fsck lease).  Non-additive or other
+        differences still raise; every refusal carries a typed ``remedy``.
     :raises TypeError: If the first open omits both declaration forms.
     :raises ~httk.store.storage_layout.StorageLayoutUpgradeRequiredError: If the
         persisted layout is not trusted by this implementation.
@@ -317,6 +367,11 @@ class MongoStore:
         self._clock = time.time_ns
         self._store_timestamp_mark: int | None = None
         self._layout: StorageLayout | None = None
+        # The persisted declaration this instance opened (or upgraded to); every
+        # writer-lease acquisition compares it to refuse a stale writer.
+        self._opened_declaration: str | None = None
+        # Per-family entry-id numbering offsets (absent family = 0).
+        self._entry_id_offsets: dict[str, int] = {}
         self._collections_ready: set[str] = set()
         # Layout declarations describe the persistent roots; this additional
         # set lets fsck also attribute arbitrary record classes saved through
@@ -354,6 +409,12 @@ class MongoStore:
             if family.definition_id is not None
             for backing_index, record in enumerate(family.records)
         }
+        self._entry_id_offset_by_record: dict[type, int] = {
+            record: self._entry_id_offsets.get(family.name, 0)
+            for family in self.layout.families
+            if family.definition_id is not None
+            for record in family.records
+        }
         self._last_generation = self._layout_generation()
         self._initialize_store_timestamp_mark()
 
@@ -369,9 +430,21 @@ class MongoStore:
         return entry_type
 
     def _entry_id_number(self, record_type: type, logical_id: int) -> int:
-        """Return the family-unique numeric component for a record lineage."""
+        """Return the family-unique numeric component for a record lineage.
+
+        The number is ``offset + logical_id * B + backing_index`` exactly as in
+        :class:`~httk.store.backend.sql.store.SqlStore`: ``offset`` is ``0``
+        unless an additive upgrade appended record kinds to the family, so a
+        family whose record list never changed mints exactly as before.
+        """
+        # Uniqueness: within one (offset, B) epoch distinct (logical_id, index)
+        # pairs give distinct numbers because 0 <= index < B.  An upgrade that
+        # changes B sets offset = max(every existing id number and ownership
+        # claim, previous offset) + 1, and every later number is >= offset + B
+        # (logical_id >= 1), so it exceeds every number minted before; the
+        # ownership collection still refuses any collision loudly.
         _entry_type, backing_count, backing_index = self._entry_record_types[record_type]
-        return logical_id * backing_count + backing_index
+        return self._entry_id_offset_by_record.get(record_type, 0) + logical_id * backing_count + backing_index
 
     @property
     def layout(self) -> StorageLayout:
@@ -464,9 +537,13 @@ class MongoStore:
             return typing.cast("dict[str, object]", diff.setdefault("declaration", {}))
 
         ownership_pending = "identity_ownership" not in stored
-        if set(stored) != (_METADATA_KEYS - {"identity_ownership"} if ownership_pending else _METADATA_KEYS):
+        # ``entry_id_offsets`` is the one optional key; only an additive
+        # declaration upgrade writes it (older httk-store refuses it).
+        present_keys = set(stored) - {ENTRY_ID_OFFSETS_KEY}
+        if present_keys != (_METADATA_KEYS - {"identity_ownership"} if ownership_pending else _METADATA_KEYS):
             declaration_diff()["metadata_keys"] = {
                 "expected": tuple(sorted(_METADATA_KEYS)),
+                "optional": (ENTRY_ID_OFFSETS_KEY,),
                 "actual": tuple(sorted(stored)),
             }
         if not ownership_pending and stored.get("identity_ownership") != _IDENTITY_VERSION:
@@ -501,15 +578,46 @@ class MongoStore:
             }
 
         persisted: StorageLayout | None = None
+        # An additive declaration upgrade makes ``persisted`` the *target*
+        # layout from here on: the schema diff, the reserved-collection
+        # expectations and the install all use it, so a re-run after a crash
+        # that left target collections behind is not refused.
+        declaration_upgrade: DeclarationUpgradePlan | None = None
+        declaration_rejection: str | None = None
         declaration = stored.get("entry_declaration")
         if supplied is not None and isinstance(declaration, str):
             if declaration == declaration_json(supplied):
                 persisted = supplied
             else:
-                declaration_diff()["entry_declaration"] = {
-                    "expected": declaration,
-                    "actual": declaration_json(supplied),
-                }
+                classified = classify_declaration_upgrade(declaration, supplied)
+                if isinstance(classified, DeclarationUpgradePlan):
+                    # Read-only: a collection the upgrade would newly attach must
+                    # be empty, so upgrade=False never advertises an additive
+                    # change that upgrade=True would then refuse.
+                    foreign = self._attached_collections_with_documents(declaration, supplied, classified)
+                    if foreign is not None:
+                        classified = foreign
+                if isinstance(classified, DeclarationUpgradePlan):
+                    persisted = supplied
+                    declaration_upgrade = classified
+                elif declaration_is_superseded(declaration, supplied):
+                    # A client one declaration behind: the store is healthy and newer.
+                    declaration_rejection = _NEWER_STORE_HINT
+                    declaration_diff()["entry_declaration"] = {
+                        "expected": declaration,
+                        "actual": declaration_json(supplied),
+                        "additive": False,
+                        "stored_is_newer": True,
+                        "reason": classified,
+                    }
+                else:
+                    declaration_rejection = f"{classified}; the declaration change is not additive, rebuild the store"
+                    declaration_diff()["entry_declaration"] = {
+                        "expected": declaration,
+                        "actual": declaration_json(supplied),
+                        "additive": False,
+                        "reason": classified,
+                    }
         else:
             try:
                 if not isinstance(declaration, str):
@@ -525,32 +633,145 @@ class MongoStore:
                     "actual": declaration,
                     "error": str(error),
                 }
+        entry_id_offsets: dict[str, int] = {}
+        if persisted is not None and ENTRY_ID_OFFSETS_KEY in stored:
+            raw_offsets = stored[ENTRY_ID_OFFSETS_KEY]
+            try:
+                if not isinstance(raw_offsets, str):
+                    raise ValueError("entry_id_offsets must be a JSON string")
+                entry_id_offsets = parse_entry_id_offsets(raw_offsets, persisted)
+            except ValueError as error:
+                declaration_diff()[ENTRY_ID_OFFSETS_KEY] = {"actual": raw_offsets, "error": str(error)}
+        schema_plan: AdditiveUpgradePlan | str | None = None
         if persisted is not None and "entry_schemas" in stored:
             # Absence of the key is already reported by the exact key-set check.
-            schema_diff = schema_fingerprint_diff(stored["entry_schemas"], schema_fingerprint_json(persisted))
+            current_schemas = schema_fingerprint_json(persisted)
+            schema_diff = schema_fingerprint_diff(stored["entry_schemas"], current_schemas)
             if schema_diff:
                 diff["schema"] = schema_diff
+                schema_plan = classify_schema_upgrade(stored["entry_schemas"], current_schemas)
+
+        def pending_declaration_diff(reason: str | None = None) -> None:
+            # Report a pending declaration change beside whatever else keeps
+            # the store from opening; ``reason`` names a non-additive schema part.
+            if declaration_upgrade is not None:
+                assert persisted is not None
+                entry = {"expected": declaration, "actual": declaration_json(persisted), "additive": reason is None}
+                if reason is not None:
+                    entry["reason"] = reason
+                declaration_diff()["entry_declaration"] = entry
+
+        def remedy() -> _Remedy:
+            # rebuild dominates (nothing else can fix it), then reopen (fix the
+            # declaration or options first), then upgrade (everything left is additive).
+            aspects = typing.cast("dict[str, object]", diff.get("declaration", {}))
+            declaration_entry = aspects.get("entry_declaration")
+            newer_store = isinstance(declaration_entry, Mapping) and declaration_entry.get("stored_is_newer") is True
+            rebuild = (
+                "protocol" in diff
+                or isinstance(schema_plan, str)
+                or any(key in aspects for key in ("metadata_keys", "identity_ownership", ENTRY_ID_OFFSETS_KEY))
+                or (
+                    isinstance(declaration_entry, Mapping)
+                    and declaration_entry.get("additive") is not True
+                    and not newer_store
+                )
+            )
+            if rebuild:
+                return "rebuild"
+            if newer_store or "store_timestamps" in aspects:
+                return "reopen"
+            return "upgrade"
+
         upgrade_pending = False
-        if set(diff) == {"schema"}:
+        additive_diff: dict[str, object] = {}
+        additive_hint = ADDITIVE_UPGRADE_HINT if declaration_upgrade is None else ADDITIVE_DECLARATION_UPGRADE_HINT
+        if set(diff) == {"schema"} or (declaration_upgrade is not None and set(diff) <= {"schema"}):
             assert persisted is not None
-            plan = classify_schema_upgrade(stored["entry_schemas"], schema_fingerprint_json(persisted))
+            plan = schema_plan if schema_plan is not None else AdditiveUpgradePlan({})
+            if isinstance(plan, str) and declaration_upgrade is not None:
+                pending_declaration_diff(plan)
+                raise StorageLayoutUpgradeRequiredError(
+                    diff, hint=f"{plan}; the layout change is not additive, rebuild the store", remedy="rebuild"
+                )
             if isinstance(plan, AdditiveUpgradePlan):
-                if not self._upgrade:
-                    raise StorageLayoutUpgradeRequiredError(diff, hint=ADDITIVE_UPGRADE_HINT)
-                # Documents are schemaless, so the only physical effect is the
-                # fingerprint re-stamp — deferred until every check below passes,
-                # since Mongo has no transaction to roll a bad open back.
+                # Neither advertised (upgrade=False) nor applied (upgrade=True)
+                # until the read-only physical checks below have passed, so
+                # remedy "upgrade" is never emitted for a store upgrade=True
+                # would refuse; Mongo has no transaction to roll a bad open back.
                 upgrade_pending = True
+                additive_diff = diff
                 diff = {}
         if diff:
-            raise StorageLayoutUpgradeRequiredError(diff)
+            pending_declaration_diff()
+            rejection_hint = declaration_rejection
+            chosen = remedy()
+            if (
+                rejection_hint is None
+                and set(diff) == {"schema"}
+                and declaration_upgrade is None
+                and persisted is not None
+                and _schema_is_ahead(stored["entry_schemas"], schema_fingerprint_json(persisted))
+            ):
+                # The stored fingerprint already carries backing collections this
+                # (older) declaration lacks: a declaration upgrade's partial
+                # restamp.  Only the upgraded declaration can finish it.
+                rejection_hint, chosen = _INTERRUPTED_UPGRADE_HINT, "reopen"
+            raise StorageLayoutUpgradeRequiredError(diff, hint=rejection_hint, remedy=chosen)
         assert persisted is not None
         self._validate_layout_names(persisted)
+        self._check_physical_layout(persisted, collection_names, ownership_pending)
+        if upgrade_pending and not self._upgrade:
+            diff = additive_diff
+            pending_declaration_diff()
+            raise StorageLayoutUpgradeRequiredError(diff, hint=additive_hint, remedy="upgrade")
+        self._install_layout(persisted)
+        self._identity_ownership_ready = not ownership_pending
+        if ownership_pending and self._upgrade:
+            lease = acquire_fsck(self._database.database)
+            try:
+                self._ensure_identity_owners()
+                self._sync_identity_ownership(lease)
+                self._database.database[METADATA_COLLECTION].update_one(
+                    {"_id": "layout"},
+                    {"$set": {"identity_ownership": _IDENTITY_VERSION}},
+                )
+                self._identity_ownership_ready = True
+            finally:
+                lease.release()
+        if upgrade_pending and declaration_upgrade is not None:
+            assert isinstance(declaration, str)
+            entry_id_offsets = self._apply_declaration_upgrade(
+                declaration, persisted, declaration_upgrade, entry_id_offsets
+            )
+        elif upgrade_pending:
+            self._restamp_entry_schemas(persisted)
+        self._entry_id_offsets = entry_id_offsets
+
+    def _check_physical_layout(
+        self, layout: StorageLayout, collection_names: set[str], ownership_pending: bool
+    ) -> None:
+        """Run the read-only physical checks of a reopen against ``layout`` (the target while upgrading).
+
+        Reserved ``_httk_`` collections and the identity-ownership indexes.
+        They run before an additive change is advertised or applied.
+
+        :param layout: The layout the store will be opened with.
+        :param collection_names: The database's collection names.
+        :param ownership_pending: Whether the ownership capability is still to be installed.
+        :return: None.
+        :raises StorageLayoutUpgradeRequiredError: On the first problem found.
+        """
         expected_reserved = {
             METADATA_COLLECTION,
             COUNTERS_COLLECTION,
             _IDENTITY_OWNERS,
-            *(entry_dispatch_table_name(family.name) for family in persisted.families if len(family.records) > 1),
+            *(entry_dispatch_table_name(family.name) for family in layout.families if len(family.records) > 1),
+        }
+        # Dispatch collections of families this layout declares with one
+        # backing: the residue of an interrupted 1→N declaration upgrade.
+        interrupted_dispatch = {
+            entry_dispatch_table_name(family.name) for family in layout.families if len(family.records) == 1
         }
         problems: dict[str, object] = {}
         for name in collection_names:
@@ -566,43 +787,361 @@ class MongoStore:
                     "message": "unexpected collection uses the MongoStore-reserved _httk_ prefix",
                 }
         if problems:
-            raise StorageLayoutUpgradeRequiredError({"schema": problems})
-        self._install_layout(persisted)
-        self._identity_ownership_ready = not ownership_pending
-        if not ownership_pending:
-            indexes = self._database.database[_IDENTITY_OWNERS].index_information()
-            expected_indexes = {
-                "identity_value": [("family", 1), ("kind", 1), ("value", 1)],
-                "identity_owner": [
-                    ("family", 1),
-                    ("kind", 1),
-                    ("backing", 1),
-                    ("owner", 1),
-                ],
-            }
-            if any(
-                indexes.get(name, {}).get("key") != keys
-                or not indexes.get(name, {}).get("unique")
-                or "partialFilterExpression" in indexes.get(name, {})
-                for name, keys in expected_indexes.items()
-            ):
+            if set(problems) <= interrupted_dispatch:
+                # Only the upgraded declaration can finish (or own) this residue.
                 raise StorageLayoutUpgradeRequiredError(
-                    {"schema": {_IDENTITY_OWNERS: "missing identity uniqueness indexes"}}
+                    {"schema": problems}, hint=_INTERRUPTED_UPGRADE_HINT, remedy="reopen"
                 )
-        if ownership_pending and self._upgrade:
-            lease = acquire_fsck(self._database.database)
+            raise StorageLayoutUpgradeRequiredError({"schema": problems}, remedy="rebuild")
+        if ownership_pending:
+            return
+        indexes = self._database.database[_IDENTITY_OWNERS].index_information()
+        expected_indexes = {
+            "identity_value": [("family", 1), ("kind", 1), ("value", 1)],
+            "identity_owner": [
+                ("family", 1),
+                ("kind", 1),
+                ("backing", 1),
+                ("owner", 1),
+            ],
+        }
+        if any(
+            indexes.get(name, {}).get("key") != keys
+            or not indexes.get(name, {}).get("unique")
+            or "partialFilterExpression" in indexes.get(name, {})
+            for name, keys in expected_indexes.items()
+        ):
+            raise StorageLayoutUpgradeRequiredError(
+                {"schema": {_IDENTITY_OWNERS: "missing identity uniqueness indexes"}}, remedy="rebuild"
+            )
+
+    def _attached_collections_with_documents(
+        self, stored_declaration: str, target: StorageLayout, plan: DeclarationUpgradePlan
+    ) -> str | None:
+        """Name a collection the upgrade would newly attach to a family that already holds documents, if any.
+
+        Such documents were stored outside the family (an ad-hoc save of the
+        class) and would enter it without family identity, so the change is not
+        additive.  Read-only (``find_one`` per attached collection).
+        """
+        families = {family.name: family for family in target.families}
+        # Already validated by classify_declaration_upgrade.
+        stored_counts = {item["family"]: len(item["records"]) for item in json.loads(stored_declaration)["families"]}
+        attached: list[tuple[str, type]] = []
+        for name in plan.changed_families:
+            attached.extend((name, record) for record in families[name].records[stored_counts[name] :])
+        for name in plan.new_families:
+            attached.extend((name, record) for record in families[name].records)
+        database = self._database.database
+        for family_name, record in attached:
+            collection_name = collection_name_for(resolve_schema(record))
+            if database[collection_name].find_one({}, {"_id": 1}) is not None:
+                return (
+                    f"collection {collection_name!r} of record {record.__name__} newly declared in family "
+                    f"{family_name!r} already holds documents stored outside the family"
+                )
+        return None
+
+    def _after_upgrade_step(self, step: str) -> None:
+        """Test seam after each durable step of an additive declaration upgrade.
+
+        Production leaves it a no-op.  The crash-convergence tests raise from it
+        to simulate a process death after the steps named ``prepared``,
+        ``claimed``, ``dispatch``, ``offsets``, ``restamp-schemas``,
+        ``restamp-offsets`` and ``restamped``.  Every Mongo step is durable as it
+        happens (there is no DDL transaction), so each seam is a real crash point.
+        """
+
+    def _apply_declaration_upgrade(
+        self,
+        stored_declaration: str,
+        target: StorageLayout,
+        plan: DeclarationUpgradePlan,
+        stored_offsets: Mapping[str, int],
+    ) -> dict[str, int]:
+        """Apply an additive declaration upgrade (appended record kinds, new families) crash-convergently.
+
+        The steps mirror :class:`~httk.store.backend.sql.store.SqlStore`'s:
+
+        0. *exclude writers and claim* — take the singleton fsck lease, which
+           drains every fresh writer lease and refuses new ones for the whole
+           upgrade (a busy store raises remedy ``"retry"``), then re-read the
+           layout document: if its declaration is no longer the one this open
+           read, the store already holds the identical target (adopt it) or a
+           different one (remedy ``"reopen"``);
+        1. re-check that no collection being newly attached to a family holds
+           documents (the open already refused that read-only);
+        2. for every family whose record list grew, ``collMod`` (or create) its
+           dispatch collection with the full target validator and index, then
+           back-fill one dispatch document per main backing document
+           (:func:`~httk.store.backend.mongo.fsck.main_backing_documents`, the
+           fsck repair derivation) with unordered inserts that tolerate
+           already-present identical documents;
+        3. compute each grown family's entry-id numbering offset over every
+           stored ``f.id``/``f.immutable_id`` and every ownership claim;
+        4. restamp ``entry_schemas``, then ``entry_id_offsets``, then — last —
+           the declaration with ``find_one_and_update`` conditioned on its old
+           value (also advancing ``generation``, so live handles drop caches).
+
+        Every step is idempotent and planned against the target layout, and
+        the declaration is written last, so a crash at any point leaves the old
+        declaration and a re-run with ``upgrade=True`` converges; a re-run after
+        the offsets were written only raises the offset further.
+
+        :param stored_declaration: The persisted declaration this open read.
+        :param target: The upgraded (target) layout.
+        :param plan: The additive declaration classification.
+        :param stored_offsets: The persisted entry-id offsets.
+        :return: The entry-id offsets now in force.
+        :raises StorageLayoutUpgradeRequiredError: If the store is busy, a
+            concurrent upgrade restamped a different layout, or an attached
+            collection already holds foreign documents.
+        """
+        database = self._database.database
+        metadata = database[METADATA_COLLECTION]
+        target_declaration = declaration_json(target)
+        try:
+            lease = acquire_fsck(
+                database, timing=dataclasses.replace(DEFAULT_TIMING, drain_budget=_UPGRADE_DRAIN_BUDGET)
+            )
+        except StoreLockedError as error:
+            if isinstance(error, FsckLeasePresentError):
+                hint = (
+                    "an fsck or upgrade lease is present; if its owner is dead, clear it once it is stale "
+                    f"(default {DEFAULT_TIMING.stale_after:g} s) with "
+                    "httk.store.backend.mongo.clear_stale_lock(database), then retry"
+                )
+            elif isinstance(error, WriterDrainTimeoutError):
+                hint = (
+                    f"live writers did not finish within {_UPGRADE_DRAIN_BUDGET:g} s; retry the upgrade when they have"
+                )
+            else:
+                hint = f"{error}; retry the upgrade once those writers have finished or been verified dead"
+            raise StorageLayoutUpgradeRequiredError(
+                {"declaration": {"entry_declaration": {"expected": stored_declaration, "error": str(error)}}},
+                hint=hint,
+                remedy="retry",
+            ) from error
+        try:
+            self._after_upgrade_step("prepared")
+            current = metadata.find_one({"_id": "layout"}, {"entry_declaration": 1})
+            if current is None or current.get("entry_declaration") != stored_declaration:
+                return self._resolve_lost_declaration_upgrade(stored_declaration, target)
+            self._after_upgrade_step("claimed")
+
+            foreign = self._attached_collections_with_documents(stored_declaration, target, plan)
+            if foreign is not None:
+                raise StorageLayoutUpgradeRequiredError(
+                    {
+                        "declaration": {
+                            "entry_declaration": {
+                                "expected": stored_declaration,
+                                "actual": target_declaration,
+                                "additive": False,
+                                "reason": foreign,
+                            }
+                        }
+                    },
+                    hint=f"{foreign}; the declaration change is not additive, rebuild the store",
+                    remedy="rebuild",
+                )
+
+            families = {family.name: family for family in target.families}
+            for name in plan.changed_families:
+                self._rebuild_entry_dispatch(families[name], lease)
+            self._after_upgrade_step("dispatch")
+
+            offsets = dict(stored_offsets)
+            for name in plan.changed_families:
+                family = families[name]
+                if family.definition_id is None:
+                    continue  # no store-minted ids in a family without a definition id
+                offset = next_entry_id_offset(self._existing_entry_id_numbers(family, lease), offsets.get(name, 0))
+                if offset:
+                    offsets[name] = offset
+            self._after_upgrade_step("offsets")
+
+            # Declaration last: any partial restamp leaves the old declaration,
+            # so a retry re-enters this routine (never the schema-only path).
+            if metadata.find_one({"_id": "layout", "entry_declaration": stored_declaration}, {"_id": 1}) is None:
+                return self._resolve_lost_declaration_upgrade(stored_declaration, target)
+            metadata.update_one({"_id": "layout"}, {"$set": {"entry_schemas": schema_fingerprint_json(target)}})
+            self._after_upgrade_step("restamp-schemas")
+            if offsets:
+                metadata.update_one({"_id": "layout"}, {"$set": {ENTRY_ID_OFFSETS_KEY: entry_id_offsets_json(offsets)}})
+            self._after_upgrade_step("restamp-offsets")
+            won = metadata.find_one_and_update(
+                {"_id": "layout", "entry_declaration": stored_declaration},
+                {"$set": {"entry_declaration": target_declaration}, "$inc": {"generation": 1}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if won is None:
+                # Unreachable while the fsck lease is held.
+                now = metadata.find_one({"_id": "layout"}, {"entry_declaration": 1})
+                actual = None if now is None else now.get("entry_declaration")
+                raise StorageLayoutUpgradeRequiredError(
+                    {"declaration": {"entry_declaration": {"expected": stored_declaration, "actual": actual}}},
+                    hint="the store layout changed concurrently during the upgrade's restamp; retry the upgrade",
+                    remedy="retry" if actual == target_declaration else "reopen",
+                )
+            self._after_upgrade_step("restamped")
+            return offsets
+        finally:
+            lease.release()
+
+    def _resolve_lost_declaration_upgrade(self, stored_declaration: str, target: StorageLayout) -> dict[str, int]:
+        """Settle a declaration that moved under the upgrade: a no-op for the identical target, else reopen."""
+        current = self._database.database[METADATA_COLLECTION].find_one({"_id": "layout"}) or {}
+        if current.get("entry_declaration") == declaration_json(target) and current.get(
+            "entry_schemas"
+        ) == schema_fingerprint_json(target):
+            offsets = current.get(ENTRY_ID_OFFSETS_KEY)
             try:
-                self._ensure_identity_owners()
-                self._sync_identity_ownership(lease)
-                self._database.database[METADATA_COLLECTION].update_one(
-                    {"_id": "layout"},
-                    {"$set": {"identity_ownership": _IDENTITY_VERSION}},
-                )
-                self._identity_ownership_ready = True
-            finally:
-                lease.release()
-        if upgrade_pending:
-            self._restamp_entry_schemas(persisted)
+                if offsets is not None and not isinstance(offsets, str):
+                    raise ValueError("entry_id_offsets must be a JSON string")
+                return {} if offsets is None else parse_entry_id_offsets(offsets, target)
+            except ValueError as error:
+                raise StorageLayoutUpgradeRequiredError(
+                    {"declaration": {ENTRY_ID_OFFSETS_KEY: {"actual": offsets, "error": str(error)}}},
+                    remedy="rebuild",
+                ) from error
+        raise StorageLayoutUpgradeRequiredError(
+            {
+                "declaration": {
+                    "entry_declaration": {
+                        "expected": stored_declaration,
+                        "actual": current.get("entry_declaration"),
+                    }
+                }
+            },
+            hint="a concurrent upgrade changed the store layout to a different declaration; reopen it",
+            remedy="reopen",
+        )
+
+    def _rebuild_entry_dispatch(self, family: EntryFamilyLayout, lease: Any) -> None:
+        """Bring one grown family's dispatch collection to the target shape and back-fill it idempotently.
+
+        Dispatch documents (``{_id: content_id, record, sid}``) do not depend
+        on the number of backings, so nothing is dropped: the validator's
+        ``record`` enum is widened by ``collMod`` (or the collection created for
+        a 1→N growth), its unique ``(record, sid)`` index ensured, and one
+        document inserted per main backing document that lacks one.
+        """
+        name = entry_dispatch_table_name(family.name)
+        database = self._database.database
+        self._ensure_collection(name, dispatch_validator_for(family))
+        models = []
+        for spec in dispatch_index_specs(family):
+            options: dict[str, Any] = {"name": spec.name, "unique": spec.unique}
+            if spec.partial_filter_expression is not None:
+                options["partialFilterExpression"] = spec.partial_filter_expression
+            models.append(IndexModel(list(spec.keys), **options))
+        if models:
+            database[name].create_indexes(models)
+        batch: list[dict[str, Any]] = []
+        for _collection_name, record_name, document in main_backing_documents(database, family):
+            content_id = document.get("content_id")
+            if not isinstance(content_id, str):
+                continue  # reported by fsck; it can have no dispatch document
+            batch.append({"_id": content_id, "record": record_name, "sid": document["_id"]})
+            if len(batch) >= _DISPATCH_BATCH:
+                self._insert_dispatch_batch(family, database[name], batch)
+                batch = []
+                lease.refresh_heartbeat()
+        if batch:
+            self._insert_dispatch_batch(family, database[name], batch)
+
+    @staticmethod
+    def _insert_dispatch_batch(family: EntryFamilyLayout, dispatch: Any, batch: list[dict[str, Any]]) -> None:
+        """Insert dispatch documents unordered, accepting only already-present *identical* documents."""
+        try:
+            dispatch.insert_many(batch, ordered=False)
+        except BulkWriteError as error:
+            if error.details.get("writeConcernErrors"):
+                # pymongo raises for write-concern errors even with no write
+                # error: the back-fill may be rolled back by a failover, so the
+                # upgrade must not restamp on top of it.
+                raise
+            for write_error in error.details.get("writeErrors", ()):
+                if write_error.get("code") != 11000:
+                    raise
+                wanted = batch[int(write_error["index"])]
+                existing = dispatch.find_one({"_id": wanted["_id"]})
+                if (
+                    existing is None
+                    or existing.get("record") != wanted["record"]
+                    or existing.get("sid") != wanted["sid"]
+                ):
+                    raise EntryDispatchIntegrityError(
+                        f"entry dispatch {family.name!r} already maps content_id {wanted['_id']!r} or backing sid "
+                        f"{wanted['sid']} to a different association; run fsck(repair_conflicts=True) or rebuild"
+                    ) from error
+
+    def _existing_entry_id_numbers(self, family: EntryFamilyLayout, lease: Any) -> typing.Iterator[int]:
+        """Yield the numeric suffix of every id ``family`` has stored or claimed.
+
+        Covers every ``f.id``/``f.immutable_id`` of every backing plus every
+        ownership claim of the family, so an orphan claim left by a failed
+        non-transactional write can never be re-minted either.
+        """
+        database = self._database.database
+        for record in family.records:
+            collection = database[collection_name_for(resolve_schema(record))]
+            for document in collection.find({}, {"f.id": 1, "f.immutable_id": 1}):
+                lease.refresh_heartbeat()
+                fields = document.get("f") or {}
+                for value in (fields.get("id"), fields.get("immutable_id")):
+                    number = entry_id_number(value)
+                    if number is not None:
+                        yield number
+        for claim in database[_IDENTITY_OWNERS].find({"family": family.name}, {"value": 1}):
+            number = entry_id_number(claim.get("value"))
+            if number is not None:
+                yield number
+
+    def _stored_declaration(self) -> str | None:
+        """Read the persisted ``entry_declaration`` value."""
+        document = self._database.database[METADATA_COLLECTION].find_one({"_id": "layout"}, {"entry_declaration": 1})
+        value = None if document is None else document.get("entry_declaration")
+        return value if isinstance(value, str) else None
+
+    def _stale_layout_error(self, current: str | None) -> StorageLayoutUpgradeRequiredError:
+        """Build the remedy-``reopen`` error for a handle whose layout another instance changed."""
+        return StorageLayoutUpgradeRequiredError(
+            {
+                "declaration": {
+                    "entry_declaration": {"expected": self._opened_declaration, "actual": current, "stale": True}
+                }
+            },
+            hint=_STALE_LAYOUT_HINT,
+            remedy="reopen",
+        )
+
+    def _raise_if_layout_moved(self) -> None:
+        """On a read miss or integrity failure, report a stale handle (remedy ``"reopen"``) instead."""
+        current = self._stored_declaration()
+        if current != self._opened_declaration:
+            raise self._stale_layout_error(current)
+
+    def _acquire_writer_lease(self) -> WriterLease:
+        """Acquire a writer lease and refuse it when the layout moved since this store was opened.
+
+        The lease protocol orders this check against declaration upgrades:
+        the writer's registration is durable before it reads the layout, and an
+        upgrade drains every fresh registration behind the fsck singleton before
+        it touches anything.  So either the upgrade finished before this read
+        (the new declaration is seen and the write refused) or it waits for this
+        writer to release.
+
+        :return: The live writer lease.
+        :raises StorageLayoutUpgradeRequiredError: If the declaration changed
+            since this store was opened (remedy ``"reopen"``).
+        """
+        lease = acquire_writer(self._database.database)
+        if lease.declaration != self._opened_declaration:
+            lease.release()
+            raise self._stale_layout_error(lease.declaration)
+        return lease
 
     def _require_identity_ownership(self) -> None:
         if not self._identity_ownership_ready:
@@ -616,6 +1155,7 @@ class MongoStore:
                     }
                 },
                 hint="reopen with upgrade=True to validate durable entry-id ownership before writing",
+                remedy="upgrade",
             )
 
     def _ensure_identity_owners(self) -> None:
@@ -707,7 +1247,8 @@ class MongoStore:
                     "actual": None,
                 },
                 "schema": schema,
-            }
+            },
+            remedy="rebuild",
         )
 
     @staticmethod
@@ -747,6 +1288,7 @@ class MongoStore:
 
     def _install_layout(self, layout: StorageLayout) -> None:
         self._layout = layout
+        self._opened_declaration = declaration_json(layout)
 
     def _restamp_entry_schemas(self, layout: StorageLayout) -> None:
         """Re-stamp the metadata layout document's fingerprint after an additive upgrade."""
@@ -758,11 +1300,20 @@ class MongoStore:
     def ensure_collections(self, *classes: type) -> None:
         r"""Synchronously create or update record collections and their indexes.
 
+        Collection DDL is lease-ordered: when this thread holds no writer lease
+        (outside :meth:`transaction` and :meth:`save`) and there is DDL to do, a
+        writer lease is taken for its duration, exactly as for a write.
+
         :param \*classes: Storable record classes whose collections should be
             prepared.  A configured multi-record family also prepares its
             dispatch collection.
         :return: None.
         :raises ValueError: If a requested physical name is reserved.
+        :raises ~httk.store.storage_layout.StorageLayoutUpgradeRequiredError: If another
+            instance has since upgraded the declaration (remedy ``"reopen"``).
+        :raises ~httk.store.backend.mongo.leases.StoreLockedError: If an fsck or a declaration
+            upgrade holds the store.
+        :raises RuntimeError: If the metadata layout document lacks its generation counter.
         """
         self._require_identity_ownership()
         requested: list[tuple[str, dict[str, Any], list[Any]]] = []
@@ -808,6 +1359,24 @@ class MongoStore:
                 )
                 seen.add(dispatch_name)
 
+        pending = [item for item in requested if item[0] not in self._collections_ready]
+        if not pending:
+            return
+        holds_lease = self._current_transaction() is not None or getattr(self._local, "writer_lease", None) is not None
+        # Collection DDL rewrites validators (a dispatch validator's ``record``
+        # enum in particular), so it is ordered against declaration upgrades
+        # like any write: under a writer lease whose declaration must still be
+        # the one this store opened.  A stale handle must never collMod a grown
+        # family's dispatch validator back to its old, narrower enum.
+        lease = None if holds_lease else self._acquire_writer_lease()
+        try:
+            self._prepare_collections(pending)
+        finally:
+            if lease is not None:
+                lease.release()
+
+    def _prepare_collections(self, requested: list[tuple[str, dict[str, Any], list[Any]]]) -> None:
+        """Create or update the requested collections and indexes (caller holds a writer lease)."""
         for name, validator, specs in requested:
             if name in self._collections_ready:
                 continue
@@ -984,7 +1553,7 @@ class MongoStore:
         if not self._database.supports_transactions:
             raise TransactionsUnavailableError("MongoDB transactions require a replica-set deployment")
         with self._write_lock:
-            lease = acquire_writer(self._database.database)
+            lease = self._acquire_writer_lease()
             try:
                 self._observe_generation(lease.generation)
                 with self._database.client.start_session(causal_consistency=True) as session:
@@ -1192,7 +1761,7 @@ class MongoStore:
             )
             return sid
         with self._write_lock:
-            lease = acquire_writer(self._database.database)
+            lease = self._acquire_writer_lease()
             previous_lease = getattr(self._local, "writer_lease", None)
             self._local.writer_lease = lease
             try:
@@ -2029,34 +2598,56 @@ class MongoStore:
         The ``eager`` flag is accepted for backend transparency; Mongo always
         returns a materialized record (see :meth:`fetch`).
 
+        Only records stored top-level carry a dispatch document; a record stored
+        only as a dependency of another record is resolved directly from its
+        backing collection, exactly as in a single-backing family.
+
         :param family_cls: The configured entry-family class.
         :param content_id: The entry content identity.
         :param eager: Accepted for interface parity; a materialized record is always returned.
         :return: The backing record or ``None``.
         :raises ValueError: If the family is not configured.
         :raises ~httk.store.store_common.EntryDispatchIntegrityError: If dispatch and backing disagree.
+        :raises ~httk.store.storage_layout.StorageLayoutUpgradeRequiredError: If the lookup misses or
+            meets a dispatch document this handle cannot interpret because another instance has since
+            upgraded the declaration (remedy ``"reopen"``).
         """
         family = next((item for item in self.layout.families if item.family is family_cls), None)
         if family is None:
             raise ValueError(f"{family_cls.__name__} is not a configured entry family in this MongoStore")
         if len(family.records) == 1:
-            return self.fetch_by_content_id(family.records[0], content_id)
+            found_single = self.fetch_by_content_id(family.records[0], content_id)
+            if found_single is None:
+                # A stale single-backing handle cannot see an entry stored in a
+                # backing appended since it was opened: say so, not None.
+                self._raise_if_layout_moved()
+            return found_single
         dispatch = self._database.database[entry_dispatch_table_name(family.name)]
         row = dispatch.find_one({"_id": content_id}, **self._session_kwargs())
         if row is None:
             for backing in family.records:
                 found = self._database.database[collection_name_for(resolve_schema(backing))].find_one(
-                    {"content_id": content_id}, {"_id": 1}, **self._session_kwargs()
+                    {"content_id": content_id}, {"_id": 1, "_httk_role": 1}, **self._session_kwargs()
                 )
-                if found is not None:
-                    raise EntryDispatchIntegrityError(
-                        f"entry dispatch {family.name!r} is missing for stored content_id {content_id!r}"
-                    )
+                if found is None:
+                    continue
+                if found.get("_httk_role") == "dep":
+                    # Dependency-only documents carry no dispatch (fsck's rule):
+                    # resolve directly, as a single-backing family does.
+                    return self.fetch(backing, int(found["_id"]))
+                self._raise_if_layout_moved()
+                raise EntryDispatchIntegrityError(
+                    f"entry dispatch {family.name!r} is missing for stored content_id {content_id!r}"
+                )
+            self._raise_if_layout_moved()
             return None
         record_name = row.get("record")
         try:
             index = family.record_names.index(record_name)
         except ValueError:
+            # A handle opened before another instance appended record kinds
+            # meets a backing name it does not know: that is staleness.
+            self._raise_if_layout_moved()
             raise EntryDispatchIntegrityError(
                 f"entry dispatch {family.name!r} names an unknown backing {record_name!r}"
             ) from None
@@ -2071,6 +2662,7 @@ class MongoStore:
         )
         backing_key = None if backing_document is None else backing_document.get("content_id")
         if backing_key != content_id:
+            self._raise_if_layout_moved()
             raise EntryDispatchIntegrityError(
                 f"entry dispatch {family.name!r} maps content_id {content_id!r} to backing sid {sid} "
                 f"whose content_id is {backing_key!r}"

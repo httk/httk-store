@@ -50,7 +50,10 @@ def test_exact_codec_projections_and_shallow_checker_output() -> None:
         "_httk_custom_created": "timestamp",
         "_httk_custom_matrix": "list",
     }
-    assert definition.properties["_httk_custom_matrix"].dimensions == {"names": ["rows", "cols"], "sizes": [2, 2]}
+    assert definition.properties["_httk_custom_matrix"].dimensions == {
+        "names": ["_httk_dim_rows", "_httk_dim_cols"],
+        "sizes": [2, 2],
+    }
 
     mismatches = check_record_matches_definition(DeepCodecRecord, definition, property_keys=property_keys)
     assert mismatches == [

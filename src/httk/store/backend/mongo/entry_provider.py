@@ -95,7 +95,7 @@ def auto_definition(entry_type: str, schema: TableSchema, prefix: str) -> EntryT
         if spec.role == "fixed_array":
             assert spec.shape is not None
             dimensions = {
-                "names": ["rows", "cols"],
+                "names": [f"{prefix}dim_rows", f"{prefix}dim_cols"],
                 "sizes": [spec.shape.rows, spec.shape.cols],
             }
         kind = "stored property" if spec.derived else "stored field"

@@ -244,6 +244,15 @@ identity of every `DataRecord` (an empty `product_of` is still content) and the
 `core_data_record` layout, so a store created before this change that holds
 data records must be rebuilt rather than reopened.
 
+`DerivedDataRecord` is the sibling record for derivation-qualified values (for
+example the standard error of a property): it shares the `records` family and the
+`product_of` strong link, and its `derivation` is part of its content identity, so
+it never changes any `DataRecord` identity. A store declared with only
+`DataRecord` gains it additively: declare
+`entry_records={DataRecordEntry: (DataRecord, DerivedDataRecord)}` and reopen with
+`upgrade=True` (without it the schema-change error names that remedy); existing
+records keep their ids.
+
 **Mounted ids.** `StoredEntryFederation(source_inventory=...)` resolves relationship
 ids using the target family's mount in the same store. `adapter_from_stores`
 supplies this inventory automatically. Explicit `StoredEntrySource.relationship_sources`

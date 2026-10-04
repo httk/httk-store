@@ -166,7 +166,10 @@ def auto_definition(entry_type: str, schema: TableSchema, prefix: str) -> EntryT
         dimensions: dict[str, Any] | None = None
         if spec.role == "fixed_array":
             assert spec.shape is not None
-            dimensions = {"names": ["rows", "cols"], "sizes": [spec.shape.rows, spec.shape.cols]}
+            dimensions = {
+                "names": [f"{prefix}dim_rows", f"{prefix}dim_cols"],
+                "sizes": [spec.shape.rows, spec.shape.cols],
+            }
         extra[name] = PropertyDefinition.from_simple(
             name,
             description=f"The {kind} '{spec.field}' of {cls.__name__}.",

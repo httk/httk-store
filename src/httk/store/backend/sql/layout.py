@@ -9,6 +9,7 @@ import sqlalchemy
 
 from httk.store.backend.schema import TableSchema, resolve_schema
 from httk.store.backend.sql.mapping import (
+    _MAX_IDENTIFIER_LENGTH,
     dispatch_table_for,
     entry_dispatch_table_name,
     identity_owner_tables,
@@ -371,13 +372,52 @@ def read_store_metadata(connection: sqlalchemy.Connection) -> Mapping[str, str] 
     return MappingProxyType(result)
 
 
+class _TruncatedNames:
+    """Reject distinct identifiers that PostgreSQL would truncate to the same 63 bytes.
+
+    Generated names are never shortened (that would move existing physical
+    layouts); a layout whose long names collide only after PostgreSQL's
+    silent truncation is refused on every dialect instead.
+    """
+
+    def __init__(self, what: str) -> None:
+        self._what = what
+        self._seen: dict[bytes, str] = {}
+
+    def add(self, name: str) -> None:
+        other = self._seen.setdefault(name.encode("utf-8")[:_MAX_IDENTIFIER_LENGTH], name)
+        if other != name:
+            raise ValueError(
+                f"{self._what} {other!r} and {name!r} collide after PostgreSQL's "
+                f"{_MAX_IDENTIFIER_LENGTH}-byte identifier truncation"
+            )
+
+
 def _validate_physical_names(layout: StorageLayout) -> None:
     owners: dict[str, type] = {}
+    tables = _TruncatedNames("table names")
 
     def check(schema: TableSchema) -> None:
         record = schema.cls
         names = [schema.table_name]
         names.extend(spec.child.table_name for spec in schema.fields if spec.child is not None)
+        parent_columns = _TruncatedNames(f"columns of table {schema.table_name!r}:")
+        for spec in schema.fields:
+            if spec.child is not None:
+                child_columns = _TruncatedNames(f"columns of table {spec.child.table_name!r}:")
+                for column in (
+                    f"{schema.table_name}_sid",
+                    f"{spec.field}_index",
+                    *(c.name for c in spec.child.element_columns),
+                ):
+                    child_columns.add(column)
+                if spec.optional:
+                    parent_columns.add(f"{spec.field}_present")
+            else:
+                for column_spec in spec.columns:
+                    parent_columns.add(column_spec.name)
+        for name in (*names, *(link.table_name for link in schema.links)):
+            tables.add(name)
         for name in names:
             if name.startswith(_RESERVED_PREFIX):
                 raise ValueError(f"record {record.__name__} claims reserved SqlStore table name {name!r}")
@@ -397,3 +437,4 @@ def _validate_physical_names(layout: StorageLayout) -> None:
                     f"entry family {family.name!r} dispatch table collides with record table {dispatch_name!r}"
                 )
             owners[dispatch_name] = family.family
+            tables.add(dispatch_name)

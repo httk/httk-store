@@ -8,7 +8,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 import sqlalchemy
@@ -16,11 +16,17 @@ from httk.core.register import register_entry_family, register_entry_record
 from httk.core.storage import StorageInfo, content_id
 from schema_override_support import schema_override
 
-from httk.store import EntryFamilyDeclaration, EntryLayoutBindingError, EntryRecordDeclaration, storage_layout
+from httk.store import (
+    EntryFamilyDeclaration,
+    EntryIdScheme,
+    EntryLayoutBindingError,
+    EntryRecordDeclaration,
+    storage_layout,
+)
 from httk.store.backend.sql import (
     STORAGE_PROTOCOL_VERSION,
-    BackendFacts,
     Backend,
+    BackendFacts,
     SqlStore,
     StorageLayoutUpgradeRequiredError,
     StoreUnderConstructionError,
@@ -357,22 +363,87 @@ def test_fresh_store_reads_are_empty_and_do_not_create_record_tables(database: B
 
 def test_read_candidate_metadata_is_memoized_per_class_set(database: Backend, monkeypatch: pytest.MonkeyPatch) -> None:
     store = SqlStore(database, entry_records={LayoutFamily: LayoutSingle})
-    calls: list[frozenset[type]] = []
-    original = SqlStore._candidate_metadata
+    calls: list[tuple[type, ...]] = []
+    original = SqlStore._closure_table_names
 
-    def spy(self: SqlStore, classes: object, **options: bool) -> object:
-        materialized = tuple(classes)  # type: ignore[call-overload]
-        calls.append(frozenset(materialized))
-        return original(self, materialized, **options)
+    def spy(self: SqlStore, classes: tuple[type, ...], family: object = None) -> frozenset[str]:
+        calls.append(classes)
+        return original(self, classes, family)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(SqlStore, "_candidate_metadata", spy)
+    monkeypatch.setattr(SqlStore, "_closure_table_names", spy)
     assert store.fetch_by_content_id(LayoutSingle, "missing") is None
-    assert len(calls) == 1
+    first = len(calls)
+    assert first >= 1
     for _ in range(5):
         assert store.fetch_by_content_id(LayoutSingle, "missing") is None
-    # The first read builds candidate metadata; later reads of the same
-    # class-set reuse the memoized name set and never rebuild it.
-    assert len(calls) == 1
+    # The first read assembles the candidate names; later reads of the same
+    # class-set reuse the memoized name set and never reassemble it.
+    assert len(calls) == first
+
+
+def _records_backings() -> tuple[type, ...]:
+    from httk.core.data_records import AverageTotalEnergyRecord, DataRecord, DerivedDataRecord, TotalEnergyRecord
+    from httk.core.property_records import RECORD_KINDS
+
+    return (DataRecord, DerivedDataRecord, TotalEnergyRecord, AverageTotalEnergyRecord, *RECORD_KINDS.values())
+
+
+@pytest.mark.parametrize("reach_families", (False, True))
+@pytest.mark.parametrize("case", ("single", "multi", "records", "weak-link"))
+def test_candidate_names_match_the_candidate_metadata(database: Backend, case: str, reach_families: bool) -> None:
+    """The name-only candidate equals the tables a fresh candidate metadata builds."""
+    if case == "records":
+        from httk.core.data_records import DataRecordEntry
+
+        entry_records: dict[type, Any] = {DataRecordEntry: _records_backings()}
+        requested: tuple[type, ...] = _records_backings()[4:6]
+    elif case == "weak-link":
+        from test_weak_links import Result
+
+        entry_records, requested = {}, (Result,)
+    elif case == "multi":
+        entry_records, requested = {MultiLayoutFamily: (LayoutFirst, LayoutSecond)}, (LayoutFirst,)
+    else:
+        entry_records, requested = {LayoutFamily: LayoutSingle}, (LayoutSingle,)
+    store = SqlStore(database, entry_records=entry_records)
+    expected = frozenset(store._candidate_metadata(requested, reach_families=reach_families).tables)
+    assert store._register_tables(requested, reach_families=reach_families) == expected
+    assert all(store._table(name) is not None for name in expected)
+
+
+def test_table_objects_are_built_once_per_store_not_per_backing_save_or_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Filtering, saving, and fetching N backings of one family never rebuild the family's tables."""
+    from httk.core.data_records import DataRecordEntry, TotalEnergyRecord
+    from httk.core.property_records import TemperatureRecord, VolumeRecord
+
+    from httk.store.backend.sql import mapping
+
+    backings = _records_backings()
+    builds: list[str] = []
+    original = mapping._build_parent_table
+
+    def spy(schema: object, *args: object, **kwargs: object) -> object:
+        builds.append(schema.table_name)  # type: ignore[attr-defined]
+        return original(schema, *args, **kwargs)  # type: ignore[arg-type]
+
+    with Backend.sqlite() as database:
+        store = SqlStore(database, entry_records={DataRecordEntry: backings}, entry_ids=EntryIdScheme("httk.test", "1"))
+        plan = store.stored_property_plan(DataRecordEntry)
+        # Opening builds the layout's tables once; everything after is name-only.
+        monkeypatch.setattr(mapping, "_build_parent_table", spy)
+        assert [row for searcher in plan.filter_searchers("_httk_temperature > 0") for row in searcher.results()] == []
+        assert builds == []
+        # The first save creates the family's tables from one fresh candidate: O(N).
+        store.save(TotalEnergyRecord(-1.0))
+        assert 0 < len(builds) <= 2 * len(backings)
+        builds.clear()
+        saved = [TemperatureRecord(300.0), VolumeRecord(1.0), TotalEnergyRecord(-2.0), TemperatureRecord(310.0)]
+        for record in saved:
+            store.save(record)
+        for record in saved:
+            assert store.fetch_entry(DataRecordEntry, content_id(record)) is not None
+        assert {row["_httk_temperature"] for row in plan.records()} >= {300.0, 310.0}
+        assert builds == []
 
 
 def test_warm_read_memo_does_not_block_table_creation_on_write(database: Backend) -> None:

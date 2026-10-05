@@ -9,6 +9,7 @@ import dataclasses
 import datetime
 import decimal
 import fractions
+import functools
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -358,6 +359,24 @@ class MongoStoredPropertyPlan:
             definition,
             backings,
         )
+        self._fulltypes: dict[tuple[bool, bool], Mapping[str, str]] = {}
+
+    @functools.cached_property
+    def _member_keys(self) -> Mapping[str, tuple[str, ...]]:
+        """Return each served property's dotted member keys, computed once per plan."""
+        return {
+            name: tuple(f"{name}.{path}" for path in definition.member_fulltypes())
+            for name, definition in self.definition.properties.items()
+        }
+
+    def _property_fulltypes(self, revisions: bool, alternatives: bool) -> Mapping[str, str]:
+        """Return the filter fulltypes of this plan's definition, computed once per stream mode."""
+        key = (revisions, alternatives)
+        fulltypes = self._fulltypes.get(key)
+        if fulltypes is None:
+            fulltypes = _property_fulltypes(self.definition, revisions=revisions, alternatives=alternatives)
+            self._fulltypes[key] = fulltypes
+        return fulltypes
 
     @property
     def backings(self) -> tuple[type, ...]:
@@ -577,7 +596,7 @@ class MongoStoredPropertyPlan:
                 predicate = translate_filter_ast(
                     ast,
                     cast(Any, variable),
-                    _property_fulltypes(self.definition, revisions=revisions, alternatives=alternatives),
+                    self._property_fulltypes(revisions, alternatives),
                     self._handlers(backing, context, public_id_prefix, revisions, alternatives),
                     known_definition_prefixes(),
                 )
@@ -681,6 +700,7 @@ class MongoStoredPropertyPlan:
             # ``_httk_id`` renders the plain group entry id, ``_httk_kind`` the kind.
             handlers["_httk_id"] = _id_handlers(context, prefix)
             handlers["_httk_kind"] = _alt_kind_handlers(context)
+        null = _null_handlers(context)  # Stateless beyond the context, so one table serves every unprojected key.
         for name, definition in self.definition.properties.items():
             if name in _CORE_PROPERTIES:
                 continue
@@ -695,8 +715,8 @@ class MongoStoredPropertyPlan:
             projection = backing.projections.get(name)
             if projection is None:
                 assert definition.nullable
-                handlers[name] = _null_handlers(context)
-                handlers.update((f"{name}.{path}", _null_handlers(context)) for path in definition.member_fulltypes())
+                handlers[name] = null
+                handlers.update((key, null) for key in self._member_keys[name])
                 continue
             if projection.query is not None:
                 handlers[name] = _projection_handlers(projection, context)

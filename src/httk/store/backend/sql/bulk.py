@@ -1390,13 +1390,10 @@ class BulkIngest:
         candidate = self._store._register_tables((record_type,))
         # Reject a record whose table claims a reserved ``_httk_`` name, exactly
         # as the ordinary write path does before creating tables.
-        self._store._validate_table_names(frozenset(candidate.tables))
-        order = LogicalEdgeGraph.from_store(self._store, (resolve_schema(record_type),)).dependency_order(
-            candidate.tables
-        )
+        self._store._validate_table_names(candidate)
+        order = LogicalEdgeGraph.from_store(self._store, (resolve_schema(record_type),)).dependency_order(candidate)
         for name in order:
-            table = candidate.tables[name]
-            name = table.name
+            table = self._store._table(name)
             if name in self._created_set:
                 continue
             if name in self._preexisting:

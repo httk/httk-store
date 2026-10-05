@@ -16,6 +16,7 @@ import dataclasses
 import datetime
 import decimal
 import fractions
+import functools
 import re
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -644,6 +645,29 @@ class StoredPropertySqlPlan:
         self.entry_type = entry_type
         self.definition = definition
         self._backings = backings
+        self._fulltypes: dict[tuple[bool, bool], Mapping[str, str]] = {}
+
+    @functools.cached_property
+    def _strong_link_families(self) -> list[StrongLinkFamily]:
+        """Return the store's StrongLink families, computed once (the store layout is fixed once opened)."""
+        return strong_link_families(self.store)
+
+    @functools.cached_property
+    def _member_keys(self) -> Mapping[str, tuple[str, ...]]:
+        """Return each served property's dotted member keys, computed once per plan."""
+        return {
+            name: tuple(f"{name}.{path}" for path in definition.member_fulltypes())
+            for name, definition in self.definition.properties.items()
+        }
+
+    def _property_fulltypes(self, revisions: bool, alternatives: bool) -> Mapping[str, str]:
+        """Return the filter fulltypes of this plan's definition, computed once per stream mode."""
+        key = (revisions, alternatives)
+        fulltypes = self._fulltypes.get(key)
+        if fulltypes is None:
+            fulltypes = _property_fulltypes(self.definition, revisions=revisions, alternatives=alternatives)
+            self._fulltypes[key] = fulltypes
+        return fulltypes
 
     @property
     def backings(self) -> tuple[type, ...]:
@@ -942,7 +966,7 @@ class StoredPropertySqlPlan:
                 predicate = translate_filter_ast(
                     ast,
                     cast(Any, variable),
-                    _property_fulltypes(self.definition, revisions=revisions, alternatives=alternatives),
+                    self._property_fulltypes(revisions, alternatives),
                     handlers,
                     known_definition_prefixes(),
                     relationship_targets=relationship_targets,
@@ -1006,6 +1030,7 @@ class StoredPropertySqlPlan:
             # ``_httk_id`` renders the plain group entry id, ``_httk_kind`` the kind.
             handlers["_httk_id"] = _id_handlers(context, public_id_prefix)
             handlers["_httk_kind"] = _column_handlers(context, ALT_KIND_COLUMN)
+        null = _null_handlers(context)  # Stateless beyond the context, so one table serves every unprojected key.
         for name, definition in self.definition.properties.items():
             if name in _CORE_PROPERTIES:
                 continue
@@ -1020,8 +1045,8 @@ class StoredPropertySqlPlan:
             projection = backing.projections.get(name)
             if projection is None:
                 assert definition.nullable
-                handlers[name] = _null_handlers(context)
-                handlers.update((f"{name}.{path}", _null_handlers(context)) for path in definition.member_fulltypes())
+                handlers[name] = null
+                handlers.update((key, null) for key in self._member_keys[name])
                 continue
             if projection.query is not None:
                 handlers[name] = _projection_handlers(projection, context)
@@ -1097,7 +1122,7 @@ class StoredPropertySqlPlan:
             handlers[f"{_REL_ROOT}.{rtype}.id"] = handler
             targets.append(rtype)
 
-        strong = strong_link_families(store)
+        strong = self._strong_link_families
         forward = next((family for family in strong if family.backing is backing), None)
         if forward is not None:
             # Group by forward wire key so several fields sharing a marker

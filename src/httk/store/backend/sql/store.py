@@ -41,7 +41,7 @@ import time
 import typing
 import uuid
 import weakref
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Self, cast
 
@@ -425,7 +425,10 @@ class SqlStore:
         self._managed_table_names: frozenset[str] = frozenset()
         self._known_record_types: set[type] = set()
         self._tables_present: set[str] = set()
-        self._candidate_names: dict[frozenset[type], frozenset[str]] = {}
+        # Candidate table names per (class set, reach_families); see _register_tables.
+        self._candidate_names: dict[tuple[frozenset[type], bool], frozenset[str]] = {}
+        # Table-name closures of single classes and whole families (see _closure_table_names).
+        self._closure_names: dict[tuple[tuple[type, ...], str | None], frozenset[str]] = {}
         self._initialized = False
         self._initialization_ddl_journal: list[sqlalchemy.Table] = []
         self._identity = IdentityCaches()
@@ -644,6 +647,7 @@ class SqlStore:
             # The memo maps class-sets to names registered in _metadata; a hit
             # skips re-registration, so it must be dropped with _metadata.
             self._candidate_names.clear()
+            self._closure_names.clear()
             self._initialized = False
             # No rollback token here: this runs during initialization, before any
             # user code could hold a lazy row read on this thread-local connection.
@@ -1891,6 +1895,9 @@ class SqlStore:
         self._layout = layout
         self._opened_declaration = declaration_json(layout)
         self._metadata = metadata
+        # Names memoized before installation were registered in the old metadata.
+        self._candidate_names.clear()
+        self._closure_names.clear()
         self._managed_table_names = frozenset(metadata.tables)
         self._tables_present = set(table_names)
         self._initialized = True
@@ -2581,7 +2588,7 @@ class SqlStore:
             finally:
                 stack.pop()
 
-    def _families_reached(self, candidate: sqlalchemy.MetaData) -> tuple[EntryFamilyLayout, ...]:
+    def _families_reached(self, candidate: Collection[str]) -> tuple[EntryFamilyLayout, ...]:
         """Families with a backing among ``candidate``'s tables, including records reached only by reference.
 
         A family's backings and dispatch table are created together, so a
@@ -2592,7 +2599,7 @@ class SqlStore:
         return tuple(
             family
             for family in self.layout.families
-            if any(resolve_schema(record).table_name in candidate.tables for record in family.records)
+            if any(resolve_schema(record).table_name in candidate for record in family.records)
         )
 
     def _candidate_metadata(self, classes: Iterable[type], *, reach_families: bool = True) -> sqlalchemy.MetaData:
@@ -2601,7 +2608,7 @@ class SqlStore:
         for cls in requested:
             table_for(resolve_schema(cls), candidate, store_timestamps=self._store_timestamps)
         families = (
-            self._families_reached(candidate)
+            self._families_reached(candidate.tables)
             if reach_families
             else tuple(family for family in self.layout.families if any(r in family.records for r in requested))
         )
@@ -2613,17 +2620,45 @@ class SqlStore:
                 dispatch_table_for(family.name, tuple(zip(family.record_names, schemas, strict=True)), candidate)
         return candidate
 
-    def _register_tables(self, classes: Iterable[type], *, reach_families: bool = True) -> sqlalchemy.MetaData:
-        """Register the tables of ``classes`` (and of every family they reach) and return a candidate set.
+    def _register_tables(self, classes: Iterable[type], *, reach_families: bool = True) -> frozenset[str]:
+        """Register the tables of ``classes`` (and of every family they reach) and return the candidate names.
 
-        Writes create the ``reach_families`` candidate, which includes the
+        Writes use the ``reach_families`` candidate, which includes the
         sibling backings and dispatch table of families reached only by
         reference.  Reads pass ``reach_families=False`` so a store written
         before siblings were created that way keeps reading as before.
+
+        The names are exactly the tables :meth:`_candidate_metadata` builds,
+        assembled from memoized per-class and per-family closures without
+        constructing table objects, and memoized per class set: the set is a
+        pure function of the class set given the installed layout and
+        ``_store_timestamps``.  Registration idempotently populates
+        ``_metadata`` on the first request, so every candidate name resolves
+        through :meth:`_table`; the memos are dropped whenever ``_metadata``
+        is replaced.
         """
         requested = tuple(classes)
+        key = (frozenset(requested), reach_families)
+        names = self._candidate_names.get(key)
+        if names is None:
+            found: set[str] = set()
+            for cls in requested:
+                found |= self._closure_table_names((cls,))
+            families = (
+                self._families_reached(found)
+                if reach_families
+                else tuple(family for family in self.layout.families if any(r in family.records for r in requested))
+            )
+            for family in families:
+                found |= self._closure_table_names(family.records, family)
+            names = frozenset(found)
+            self._register_in_metadata(requested, names)
+            self._candidate_names[key] = names
+        return names
+
+    def _register_in_metadata(self, requested: tuple[type, ...], candidate: Collection[str]) -> None:
+        """Idempotently register ``requested`` and every family ``candidate`` reaches in ``_metadata``."""
         self._known_record_types.update(requested)
-        candidate = self._candidate_metadata(requested, reach_families=reach_families)
         for cls in requested:
             table_for(resolve_schema(cls), self._metadata, store_timestamps=self._store_timestamps)
         for family in self._families_reached(candidate):
@@ -2632,7 +2667,35 @@ class SqlStore:
                 table_for(schema, self._metadata, store_timestamps=self._store_timestamps)
             if len(schemas) > 1:
                 dispatch_table_for(family.name, tuple(zip(family.record_names, schemas, strict=True)), self._metadata)
-        return candidate
+
+    def _closure_table_names(
+        self, classes: tuple[type, ...], family: EntryFamilyLayout | None = None
+    ) -> frozenset[str]:
+        """Memoized names of the tables ``table_for`` builds for ``classes`` (plus ``family``'s dispatch table).
+
+        Mirrors :func:`~httk.store.backend.sql.mapping.table_for`'s recursion by
+        name only (parent, child, and link tables, then referenced classes), so
+        no table object is constructed; a family is keyed by its record tuple,
+        which keeps the memo exact for any family layout.
+        """
+        key = (classes, None if family is None else family.name)
+        names = self._closure_names.get(key)
+        if names is None:
+            found: set[str] = set()
+            pending = [resolve_schema(cls) for cls in classes]
+            while pending:
+                schema = pending.pop()
+                if schema.table_name in found:
+                    continue
+                found.add(schema.table_name)
+                found.update(spec.child.table_name for spec in schema.fields if spec.child is not None)
+                found.update(link.table_name for link in schema.links)
+                pending.extend(resolve_schema(target) for target in schema.referenced_classes())
+            if family is not None and len(classes) > 1:
+                found.add(entry_dispatch_table_name(family.name))
+            names = frozenset(found)
+            self._closure_names[key] = names
+        return names
 
     def _validate_table_names(self, names: Iterable[str]) -> None:
         forbidden = sorted(
@@ -2661,8 +2724,8 @@ class SqlStore:
         save can leave empty or partial declaration-shaped tables. Stamp trust
         accepts that residue; the next write's ``checkfirst`` completes it.
         """
-        candidate = self._register_tables(classes)
-        candidate_names = frozenset(candidate.tables)
+        requested = tuple(classes)
+        candidate_names = self._register_tables(requested)
         self._validate_table_names(candidate_names)
         pending = self._pending_table_names()
         missing = candidate_names - self._tables_present - pending
@@ -2670,7 +2733,9 @@ class SqlStore:
             pending.update(actual_table_names(connection))
             missing = candidate_names - self._tables_present - pending
         if missing:
-            candidate.create_all(connection, checkfirst=True)
+            # Only creation needs table objects: build the same fresh candidate
+            # metadata as always, so DDL and ``checkfirst`` behave exactly as before.
+            self._candidate_metadata(requested).create_all(connection, checkfirst=True)
             # Publish only after the owning transaction commits. SQLite may
             # retain empty or partial declaration-shaped tables after rollback;
             # stamp trust accepts that residue and the next write completes it.
@@ -2718,14 +2783,7 @@ class SqlStore:
 
     def _missing_tables_for_read(self, classes: Iterable[type]) -> bool:
         """Register tables and report absence without issuing DDL."""
-        key = frozenset(classes)
-        candidate_names = self._candidate_names.get(key)
-        if candidate_names is None:
-            # The name set is a pure function of the class-set given the fixed
-            # layout and _store_timestamps; _register_tables also idempotently
-            # populates _metadata so later _table() lookups resolve on a hit.
-            candidate_names = frozenset(self._register_tables(key, reach_families=False).tables)
-            self._candidate_names[key] = candidate_names
+        candidate_names = self._register_tables(classes, reach_families=False)
         self._validate_table_names(candidate_names)
         pending = self._pending_table_names()
         missing = candidate_names - self._tables_present - pending

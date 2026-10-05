@@ -187,6 +187,14 @@ def _bson_type(kind: str) -> str | list[str]:
     return types[kind]
 
 
+def _element_bson_type(kind: str, nullable: bool) -> str | list[str]:
+    """A child element key's ``bsonType``; a nullable element (a ``None`` list item) stores null keys."""
+    bson = _bson_type(kind)
+    if not nullable:
+        return bson
+    return [bson, "null"] if isinstance(bson, str) else [*bson, "null"]
+
+
 def _partial_filter(path: str, kind: str) -> dict[str, Any]:
     return {path: {"$exists": True, "$type": _bson_type(kind)}}
 
@@ -304,7 +312,8 @@ def _field_validator(
     if spec.role == "child":
         assert spec.child is not None
         element_properties = {
-            column.name: {"bsonType": _bson_type(column.kind)} for column in spec.child.element_columns
+            column.name: {"bsonType": _element_bson_type(column.kind, column.nullable)}
+            for column in spec.child.element_columns
         }
         element_required = [column.name for column in spec.child.element_columns]
         element_dependencies = _channel_dependencies(spec.child.element_columns)

@@ -220,10 +220,11 @@ class _Chunk:
             ]
         elif spec.codec_name is not None:
             codec = codec_named(spec.codec_name)
-            elements = [
-                codec.decode(tuple(entry[columns[column.name]] for column in spec.child.element_columns))
-                for entry in entries
-            ]
+            nullable = spec.child.element_columns[0].nullable
+            elements = []
+            for entry in entries:
+                parts = tuple(entry[columns[column.name]] for column in spec.child.element_columns)
+                elements.append(None if nullable and all(part is None for part in parts) else codec.decode(parts))
         else:
             elements = [entry[columns[spec.child.element_columns[0].name]] for entry in entries]
         return tuple(elements) if typing.get_origin(spec.python_type) is tuple else elements

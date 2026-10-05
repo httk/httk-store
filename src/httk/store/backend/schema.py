@@ -31,6 +31,10 @@ Resolution rules (field annotation, then the resulting relational shape):
 - ``list[T]`` / homogeneous ``tuple[T, ...]`` — a child table: scalar or
   codec-typed elements store their columns per row; storable-dataclass elements
   store one ``name_sid`` foreign-key column per row.
+- ``list[T | None]`` / ``tuple[T | None, ...]`` for a scalar or codec ``T`` —
+  the same child table with every element column nullable; a ``None`` element
+  is a row whose element columns are all NULL. Storable-dataclass elements
+  cannot be ``None``.
 - another storable frozen dataclass (optionally ``| None``) — a reference:
   one ``name_sid`` foreign-key column.
 - ``Annotated[..., Skip()]`` — omitted from storage (the field must have a
@@ -753,17 +757,36 @@ def _resolve_sequence_field(
             raise SchemaError(f"{cls.__name__}.{name}: a storable list needs exactly one element type")
         element_type = arguments[0]
 
+    nullable = False
+    if typing.get_origin(element_type) in (typing.Union, types.UnionType):
+        members = typing.get_args(element_type)
+        others = tuple(member for member in members if member is not types.NoneType)
+        if len(others) != 1 or len(others) == len(members):
+            raise SchemaError(
+                f"{cls.__name__}.{name}: element type {element_type!r} is not storable; the only storable "
+                f"element union is 'T | None' for a scalar or codec type T"
+            )
+        element_type = others[0]
+        nullable = True
+
     codec_name: str | None = None
     target: type | None = None
     kind = _SCALAR_KINDS.get(element_type)
     if kind is not None:
-        element_columns: tuple[ColumnSpec, ...] = (ColumnSpec(name, kind),)
+        element_columns: tuple[ColumnSpec, ...] = (ColumnSpec(name, kind, nullable=nullable),)
     else:
         codec = codec_for(element_type)
         if codec is not None:
             codec_name = codec.name
-            element_columns = tuple(ColumnSpec(f"{name}{suffix}", column_kind) for suffix, column_kind in codec.columns)
+            element_columns = tuple(
+                ColumnSpec(f"{name}{suffix}", column_kind, nullable=nullable) for suffix, column_kind in codec.columns
+            )
         elif isinstance(element_type, type) and dataclasses.is_dataclass(element_type):
+            if nullable:
+                raise SchemaError(
+                    f"{cls.__name__}.{name}: storable-class elements cannot be None; 'T | None' elements "
+                    f"are storable only for a scalar or codec type T"
+                )
             _validate_target(cls, element_type)
             target = element_type
             element_columns = (ColumnSpec(f"{name}_sid", "int"),)

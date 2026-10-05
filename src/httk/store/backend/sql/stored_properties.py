@@ -1021,8 +1021,11 @@ class StoredPropertySqlPlan:
             if projection is None:
                 assert definition.nullable
                 handlers[name] = _null_handlers(context)
-            elif projection.query is not None:
+                handlers.update((f"{name}.{path}", _null_handlers(context)) for path in definition.member_fulltypes())
+                continue
+            if projection.query is not None:
                 handlers[name] = _projection_handlers(projection, context)
+            handlers.update(_member_handlers(name, projection, context))
         relationship_handlers, relationship_targets = self._relationship_handlers(
             backing.backing, alternatives, relationship_source_map
         )
@@ -1274,6 +1277,8 @@ def _property_fulltypes(
     definition: EntryTypeDefinition, *, revisions: bool = False, alternatives: bool = False
 ) -> Mapping[str, str]:
     result = {name: _definition_fulltype(item) for name, item in definition.properties.items()}
+    for name, item in definition.properties.items():
+        result.update((f"{name}.{path}", fulltype) for path, fulltype in item.member_fulltypes().items())
     if revisions:
         result["_httk_id"] = "string"
     if alternatives:
@@ -1320,6 +1325,17 @@ def _projection_handlers(
         "length": lambda entry, operator, value, _variable: invoke(f"LENGTH {operator}", value),
         "unknown": lambda entry, _variable, operator: invoke(operator, None),
     }
+
+
+def _member_handlers(
+    name: str, projection: StoredPropertyProjection, context: _SqlQueryContext
+) -> Iterator[tuple[str, Mapping[str, Callable[..., Any]]]]:
+    """Yield the dotted-key handlers of every queryable (nested) member of ``projection``."""
+    for member_name, member in projection.members.items():
+        key = f"{name}.{member_name}"
+        if member.query is not None:
+            yield key, _projection_handlers(member, context)
+        yield from _member_handlers(key, member, context)
 
 
 def _null_handlers(context: _SqlQueryContext) -> Mapping[str, Callable[..., Any]]:

@@ -498,5 +498,5 @@ def _json_value(schema: TableSchema, spec: FieldSpec, value: Any) -> Any:
     if spec.codec_name is not None:
         codec = codec_named(spec.codec_name)
         index = _query_index(codec)
-        return [codec.encode(element)[index] for element in value]
+        return [None if element is None else codec.encode(element)[index] for element in value]
     return list(value)

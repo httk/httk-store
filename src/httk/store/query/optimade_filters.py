@@ -36,6 +36,16 @@ Each dotted filter node is resolved *independently*: in ``references.doi
 CONTAINS "x" AND references.year >= 2000``, some related reference must match
 the doi condition and some (possibly different) related reference must match
 the year condition.
+
+**Nested property names** (dotted identifiers such as ``_httk_e.rmse`` whose
+first segment is not a relationship type) resolve by their full dotted name:
+they are supported for every operator when ``property_fulltypes`` and
+``handlers`` carry the dotted key (``"name.member"``). A dotted key present
+only in ``handlers`` (the ``_httk_relationships.<key>.id`` extension) serves
+``HAS`` alone, as a list of strings. A known property with an unknown member
+(``nelements.foo``) is an ``"unrecognized-property"`` error; an unknown head
+follows the ordinary unknown-property rules. Relationship paths deeper than
+one segment and relationship ``LENGTH`` remain not implemented.
 """
 
 import datetime
@@ -556,6 +566,17 @@ def constant_set_handler(
 
 # ---------------------------------------------------------------------- the translation
 
+_UNKNOWN_FAMILY_HANDLERS: Mapping[str, tuple[Callable[..., Any], str]] = MappingProxyType(
+    {
+        'HAS': (unknown_has_handler, 'list of unknown'),
+        'length': (unknown_length_handler, 'unknown'),
+        'comparison': (unknown_comparison_handler, 'unknown'),
+        'stringmatching': (unknown_stringmatching_handler, 'unknown'),
+        'unknown': (unknown_unknown_handler, 'unknown'),
+    }
+)
+"""Per operator family, the matches-nothing handler and value fulltype for an unknown property."""
+
 
 def translate_filter_ast(
     node: FilterAst,
@@ -597,8 +618,15 @@ def translate_filter_ast(
     2000`` matches entries where *some* related reference matches the doi
     condition and *some* — possibly different — related reference matches the
     year condition. Without a resolver, dotted filters other than ``<type>.id
-    HAS ...`` are not implemented; nested (deeper than depth-1) paths and
-    dotted ``LENGTH`` filters are never supported.
+    HAS ...`` are not implemented; relationship paths deeper than depth-1 and
+    relationship ``LENGTH`` filters are never supported.
+
+    **Nested property names:** any other dotted identifier resolves by its full
+    dotted name (``"name.member"``) in ``property_fulltypes`` and ``handlers``,
+    uniformly for every operator. A dotted key carried only by ``handlers``
+    serves ``HAS`` alone, typed as a list of strings. A known property with an
+    unknown member is an ``"unrecognized-property"`` error naming the full
+    path; an unknown first segment follows the ordinary unknown-property rules.
 
     :param node: The parsed OPTIMADE filter AST node.
     :param search_variable: The backend search variable receiving the expression.
@@ -644,6 +672,28 @@ def translate_filter_ast(
         )
         return recurse(rewritten)
 
+    def resolve(left: tuple[Any, ...], family: str) -> tuple[str, str, Callable[..., Any]]:
+        """Resolve a non-relationship identifier to ``(key, fulltype, handler)`` for ``family``."""
+        head, key = left[1], '.'.join(left[1:])
+        if key in property_fulltypes:
+            fulltype = property_fulltypes[key]
+        elif key != head and key in handlers:
+            # A handler-only dotted key (the ``_httk_relationships.<key>.id``
+            # filter-grammar extension) serves HAS over a list of ids only.
+            if family != 'HAS':
+                raise FilterTranslationError("Filtering on property " + key + " not implemented.", "not-implemented")
+            fulltype = 'list of string'
+        elif head in property_fulltypes or head.startswith(recognized_prefixes):
+            raise FilterTranslationError("Filter invokes unrecognized property name: " + key, "unrecognized-property")
+        else:
+            _warn_unknown_property(key)
+            unknown_handler, unknown_fulltype = _UNKNOWN_FAMILY_HANDLERS[family]
+            return key, unknown_fulltype, unknown_handler
+        handler = handlers.get(key, {}).get(family)
+        if handler is None:
+            raise FilterTranslationError("Filtering on property " + key + " not implemented.", "not-implemented")
+        return key, fulltype, handler
+
     search_expr: SearchExpression | None = None
 
     if node[0] in ['AND']:
@@ -657,30 +707,6 @@ def translate_filter_ast(
         left = node[2]
         right = node[3]
         assert left[0] == 'Identifier'
-        has_handler: Callable[..., Any] | None
-        if len(left) >= 4:
-            # A dotted identifier with three or more segments (e.g. the
-            # ``_httk_relationships.<key>.id`` filter-grammar extension): try the
-            # full dotted name as a handler key before the standard branches. On
-            # a miss, fall through to the ordinary unknown-root logic — an
-            # own-prefix name errors (naming the FULL dotted path), a foreign
-            # prefix keeps its null semantics — never the relationship
-            # not-implemented path.
-            dotted = '.'.join(left[1:])
-            dotted_handler = handlers.get(dotted, {}).get('HAS')
-            if dotted_handler is not None:
-                values = format_value('list of string', right)
-                if ops != tuple(['='] * len(values)):
-                    raise FilterTranslationError(
-                        "HAS queries with non-equal operators not implemented yet.", "not-implemented"
-                    )
-                search_expr = dotted_handler(dotted, ops, values, search_variable, node[0])
-                assert search_expr is not None
-                return search_expr
-            if left[1].startswith(recognized_prefixes):
-                raise FilterTranslationError(
-                    "Filter invokes unrecognized property name: " + dotted, "unrecognized-property"
-                )
         if len(left) > 2 and left[1] in relationship_targets:
             # Filtering on a relationship, e.g. `references.id HAS "ref-1"`.
             if len(left) == 3 and left[2] == 'id':
@@ -699,25 +725,11 @@ def translate_filter_ast(
                 assert search_expr is not None
                 return search_expr
             return relationship_semi_join(left, (node[0], ops, ('Identifier',) + tuple(left[2:]), right))
-        if left[1] not in property_fulltypes:
-            if left[1].startswith(recognized_prefixes):
-                raise FilterTranslationError(
-                    "Filter invokes unrecognized property name: " + left[1], "unrecognized-property"
-                )
-            else:
-                _warn_unknown_property(left[1])
-                has_handler = unknown_has_handler
-                values = format_value('list of unknown', right)
-        else:
-            values = format_value(property_fulltypes[left[1]], right)
-            has_handler = handlers.get(left[1], {}).get('HAS')
-            if has_handler is None:
-                raise FilterTranslationError(
-                    "Filtering on property " + left[1] + " not implemented.", "not-implemented"
-                )
+        key, fulltype, has_handler = resolve(left, 'HAS')
+        values = format_value(fulltype, right)
         if ops != tuple(['='] * len(values)):
             raise FilterTranslationError("HAS queries with non-equal operators not implemented yet.", "not-implemented")
-        search_expr = has_handler(left[1], ops, values, search_variable, node[0])
+        search_expr = has_handler(key, ops, values, search_variable, node[0])
     elif node[0] in ['LENGTH']:
         left = node[1]
         op = node[2]
@@ -736,25 +748,12 @@ def translate_filter_ast(
                 "LENGTH comparison can only be done with Numbers. Unexpected right hand side type:" + right[0],
                 "not-implemented",
             )
-        length_handler: Callable[..., Any] | None
-        if left[1] not in property_fulltypes:
-            if left[1].startswith(recognized_prefixes):
-                raise FilterTranslationError(
-                    "Filter invokes unrecognized property name: " + left[1], "unrecognized-property"
-                )
-            else:
-                _warn_unknown_property(left[1])
-                length_handler = unknown_length_handler
-                value = format_value('unknown', right)
-        else:
-            length_handler = handlers.get(left[1], {}).get('length')
-            if length_handler is None:
-                raise FilterTranslationError(
-                    "Filtering on property " + left[1] + " not implemented.", "not-implemented"
-                )
-            assert property_fulltypes[left[1]].startswith("list of ")
-            value = format_value("integer", right)
-        search_expr = length_handler(left[1], op, value, search_variable)
+        key, fulltype, length_handler = resolve(left, 'length')
+        if length_handler is not unknown_length_handler:
+            assert fulltype.startswith("list of ")
+            fulltype = "integer"
+        value = format_value(fulltype, right)
+        search_expr = length_handler(key, op, value, search_variable)
     elif node[0] in ['>', '>=', '<', '<=', '=', '!=']:
         op = node[0]
         left = node[1]
@@ -774,24 +773,8 @@ def translate_filter_ast(
             assert left[0] == 'Identifier'
             if len(left) > 2 and left[1] in relationship_targets:
                 return relationship_semi_join(left, (op, ('Identifier',) + tuple(left[2:]), right))
-            comparison_handler: Callable[..., Any] | None
-            if left[1] not in property_fulltypes:
-                if left[1].startswith(recognized_prefixes):
-                    raise FilterTranslationError(
-                        "Filter invokes unrecognized property name: " + left[1], "unrecognized-property"
-                    )
-                else:
-                    _warn_unknown_property(left[1])
-                    comparison_handler = unknown_comparison_handler
-                    value = format_value('unknown', right)
-            else:
-                comparison_handler = handlers.get(left[1], {}).get('comparison')
-                if comparison_handler is None:
-                    raise FilterTranslationError(
-                        "Filtering on property " + left[1] + " not implemented.", "not-implemented"
-                    )
-                value = format_value(property_fulltypes[left[1]], right)
-            search_expr = comparison_handler(left[1], op, value, search_variable)
+            key, fulltype, comparison_handler = resolve(left, 'comparison')
+            search_expr = comparison_handler(key, op, format_value(fulltype, right), search_variable)
     elif node[0] in ['ENDS', 'STARTS', 'CONTAINS']:
         left = node[1]
         right = node[2]
@@ -802,45 +785,15 @@ def translate_filter_ast(
             raise FilterTranslationError(
                 "Identifier vs. Identifier string comparisons not implemented.", "not-implemented"
             )
-        stringmatching: Callable[..., Any] | None
-        if left[1] not in property_fulltypes:
-            if left[1].startswith(recognized_prefixes):
-                raise FilterTranslationError(
-                    "Filter invokes unrecognized property name: " + left[1], "unrecognized-property"
-                )
-            else:
-                _warn_unknown_property(left[1])
-                stringmatching = unknown_stringmatching_handler
-                value = format_value('unknown', right)
-        else:
-            stringmatching = handlers.get(left[1], {}).get('stringmatching')
-            if stringmatching is None:
-                raise FilterTranslationError(
-                    "Filtering on property " + left[1] + " not implemented.", "not-implemented"
-                )
-            value = format_value(property_fulltypes[left[1]], right)
-        search_expr = stringmatching(left[1], value, node[0], search_variable)
+        key, fulltype, stringmatching = resolve(left, 'stringmatching')
+        search_expr = stringmatching(key, format_value(fulltype, right), node[0], search_variable)
     elif node[0] in ['IS_UNKNOWN', 'IS_KNOWN']:
         left = node[1]
         assert left[0] == 'Identifier'
         if len(left) > 2 and left[1] in relationship_targets:
             return relationship_semi_join(left, (node[0], ('Identifier',) + tuple(left[2:])))
-        unknown_handler: Callable[..., Any] | None
-        if left[1] not in property_fulltypes:
-            if left[1].startswith(recognized_prefixes):
-                raise FilterTranslationError(
-                    "Filter invokes unrecognized property name: " + left[1], "unrecognized-property"
-                )
-            else:
-                _warn_unknown_property(left[1])
-                unknown_handler = unknown_unknown_handler
-        else:
-            unknown_handler = handlers.get(left[1], {}).get('unknown')
-            if unknown_handler is None:
-                raise FilterTranslationError(
-                    "Filtering on property " + left[1] + " not implemented.", "not-implemented"
-                )
-        search_expr = unknown_handler(left[1], search_variable, node[0])
+        key, _fulltype, unknown_handler = resolve(left, 'unknown')
+        search_expr = unknown_handler(key, search_variable, node[0])
     else:
         raise FilterTranslationError("Unexpected translation error at: " + str(node[0]), "internal")
     assert search_expr is not None
@@ -864,8 +817,8 @@ def simple_property_handlers(
     ``property_fulltypes`` (default ``"string"``): string properties get
     comparison and stringmatching handlers; integer and float properties get a
     numeric comparison handler; ``list of ...`` properties get a HAS (set
-    membership) handler. Every generated property also gets a ``known``
-    unknown handler.
+    membership) handler; ``dict`` properties get no operator handler. Every
+    generated property also gets a ``known`` unknown handler.
 
     :param entry_type: The served entry type used by the constant ``type`` handler.
     :param property_keys: Mapping from served property names to backend field names.
@@ -898,6 +851,8 @@ def simple_property_handlers(
             table['HAS'] = lambda entry, ops, values, sv, has_type, k=key: set_handler(k, ops, values, has_type, sv)
         elif fulltype in ('integer', 'float'):
             table['comparison'] = lambda entry, op, value, sv, k=key: number_handler(k, op, value, sv)
+        elif fulltype == 'dict':
+            pass  # Dictionaries support only IS KNOWN/UNKNOWN; members filter by dotted name.
         elif fulltype == 'timestamp':
             # The datetime codec and timestamp handler both canonicalize to a
             # fixed-width UTC spelling, making SQL lexical order chronological.

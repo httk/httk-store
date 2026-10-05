@@ -4791,7 +4791,10 @@ class SqlStore:
             assert spec.shape is not None
             return decode_fracvector_exact(row[f"{spec.field}_exact"], 1, spec.shape.cols).to_fractions()[0]
         if spec.codec_name is not None:
-            return codec_named(spec.codec_name).decode(tuple(row[column.name] for column in spec.child.element_columns))
+            parts = tuple(row[column.name] for column in spec.child.element_columns)
+            if spec.child.element_columns[0].nullable and all(part is None for part in parts):
+                return None
+            return codec_named(spec.codec_name).decode(parts)
         return row[spec.child.element_columns[0].name]
 
     def _check_metadata_nested(
@@ -5104,6 +5107,13 @@ def _encode_child_rows(
             row = {parent_column: sid, index_column: position}
             if spec.target is not None:
                 row[spec.child.element_columns[0].name] = resolve_sid(spec.target, element, f"{path}[{position}]")
+            elif element is None:
+                if not spec.child.element_columns[0].nullable:
+                    raise ValueError(
+                        f"{schema.cls.__name__}.{spec.field}[{position}] cannot be None; "
+                        f"declare the element type as 'T | None' to store None elements"
+                    )
+                row.update(dict.fromkeys(column.name for column in spec.child.element_columns))
             elif codec is not None:
                 for column, part in zip(spec.child.element_columns, codec.encode(element), strict=True):
                     row[column.name] = part

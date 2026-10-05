@@ -132,6 +132,13 @@ def encode_record(
                                 )
                             }
                         )
+                    elif element is None:
+                        if not spec.child.element_columns[0].nullable:
+                            raise ValueError(
+                                f"{record_type.__name__}.{spec.field}[{len(elements)}] cannot be None; "
+                                f"declare the element type as 'T | None' to store None elements"
+                            )
+                        elements.append(dict.fromkeys(plan.element_keys))
                     elif codec is not None:
                         elements.append(
                             {key: part for key, part in zip(plan.element_keys, codec.encode(element), strict=True)}
@@ -175,9 +182,11 @@ def _decode_child(spec: FieldSpec, value: Any, resolve_reference: Callable[[type
         ]
     elif spec.codec_name is not None:
         codec = codec_named(spec.codec_name)
-        elements = [
-            codec.decode(tuple(element[column.name] for column in spec.child.element_columns)) for element in value
-        ]
+        nullable = spec.child.element_columns[0].nullable
+        elements = []
+        for element in value:
+            parts = tuple(element[column.name] for column in spec.child.element_columns)
+            elements.append(None if nullable and all(part is None for part in parts) else codec.decode(parts))
     else:
         elements = [element[spec.child.element_columns[0].name] for element in value]
     return tuple(elements) if typing.get_origin(spec.python_type) is tuple else elements

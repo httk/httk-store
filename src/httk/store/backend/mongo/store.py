@@ -3269,9 +3269,11 @@ class MongoStore:
                 return [int(item[spec.child.element_columns[0].name]) for item in entries]
             if spec.codec_name is not None:
                 codec = codec_named(spec.codec_name)
-                values = [
-                    codec.decode(tuple(item[column.name] for column in spec.child.element_columns)) for item in entries
-                ]
+                nullable = spec.child.element_columns[0].nullable
+                values = []
+                for item in entries:
+                    parts = tuple(item[column.name] for column in spec.child.element_columns)
+                    values.append(None if nullable and all(part is None for part in parts) else codec.decode(parts))
             else:
                 values = [item[spec.child.element_columns[0].name] for item in entries]
             return tuple(values) if typing.get_origin(spec.python_type) is tuple else values

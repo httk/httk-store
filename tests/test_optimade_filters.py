@@ -537,12 +537,8 @@ def test_resolver_receives_stripped_comparison_sub_ast():
 
 
 def test_resolver_constant_first_comparison_is_swapped_before_stripping():
-    # The core parser flattens dotted identifiers on the constant-first side
-    # (`2000 <= references.year` parses to a plain 'references' identifier), so
-    # exercise the swap path on a hand-built node.
     resolver = StubResolver()
-    node = ("<=", ("Number", "2000"), ("Identifier", "references", "year"))
-    translate(node, relationship_targets=("references",), resolver=resolver)
+    translate("2000 <= references.year", relationship_targets=("references",), resolver=resolver)
     assert resolver.calls == [("references", (">=", ("Identifier", "year"), ("Number", "2000")))]
 
 
@@ -656,6 +652,136 @@ def test_undeclared_dotted_prefix_is_an_unknown_property():
     # ordinary (unknown, unprefixed) property: it matches nothing.
     expr = translate('bananas.doi CONTAINS "10.1"')
     assert expr.tree == FALSE_TREE
+
+
+# ---------------------------------------------------------------------- nested (dotted) property names
+
+NESTED_FULLTYPES = {
+    "_httk_e": "dict",
+    "_httk_e.rmse": "float",
+    "_httk_e.weighting": "string",
+    "_httk_e.labels": "list of string",
+    "_httk_e.grid": "list of list of float",
+    "nelements": "integer",
+}
+
+
+def nested_handlers() -> dict[str, Any]:
+    """Generic handlers over NESTED_FULLTYPES, each family replaced by a call recorder."""
+    table = {
+        name: dict(families)
+        for name, families in simple_property_handlers(
+            "structures", {name: name for name in NESTED_FULLTYPES}, NESTED_FULLTYPES
+        ).items()
+    }
+    table["_httk_e.labels"]["length"] = table["_httk_e.grid"]["length"] = number_handler
+
+    def recorder(family: str) -> Any:
+        return lambda *args: FakeExpression((family,) + tuple(a for a in args if not isinstance(a, FakeVariable)))
+
+    recorded = {name: {family: recorder(family) for family in families} for name, families in table.items()}
+    recorded["_httk_relationships.k.id"] = {"HAS": recorder("HAS")}
+    return recorded
+
+
+def translate_nested(filter_string, handlers=None):
+    return translate_filter_ast(
+        parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string,
+        FakeVariable("structures"),
+        NESTED_FULLTYPES,
+        handlers if handlers is not None else nested_handlers(),
+        ("_httk_",),
+        relationship_targets=("references",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("filter_string", "expected"),
+    (
+        ("_httk_e.rmse < 0.5", ("comparison", "_httk_e.rmse", "<", 0.5)),
+        ("0.5 < _httk_e.rmse", ("comparison", "_httk_e.rmse", ">", 0.5)),
+        ('_httk_e.weighting = "uniform"', ("comparison", "_httk_e.weighting", "=", "uniform")),
+        ('_httk_e.weighting STARTS WITH "uni"', ("stringmatching", "_httk_e.weighting", "uni", "STARTS")),
+        ('_httk_e.labels HAS ALL "a","b"', ("HAS", "_httk_e.labels", ("=", "="), ["a", "b"], "HAS_ALL")),
+        ('_httk_e.labels HAS ONLY "a"', ("HAS", "_httk_e.labels", ("=",), ["a"], "HAS_ONLY")),
+        ("_httk_e.labels LENGTH 2", ("length", "_httk_e.labels", "=", 2)),
+        ("_httk_e.grid LENGTH >= 3", ("length", "_httk_e.grid", ">=", 3)),
+        ("_httk_e.rmse IS UNKNOWN", ("unknown", "_httk_e.rmse", "IS_UNKNOWN")),
+        ("_httk_e IS KNOWN", ("unknown", "_httk_e", "IS_KNOWN")),
+        ("nelements = 2", ("comparison", "nelements", "=", 2)),
+    ),
+)
+def test_nested_name_routes_every_operator_family_to_the_dotted_key(filter_string, expected):
+    assert translate_nested(filter_string).tree == expected
+
+
+def test_nested_name_generic_handler_queries_the_dotted_field():
+    handlers = simple_property_handlers("structures", {name: name for name in NESTED_FULLTYPES}, NESTED_FULLTYPES)
+    expr = translate_nested("_httk_e.rmse < 0.5", handlers=handlers)
+    assert expr.tree == ("lt", ("field", "_httk_e.rmse"), 0.5)
+    assert str(expr.tree[2]) == "0.5"
+
+
+def test_not_composes_over_a_nested_name():
+    expr = translate_nested('NOT _httk_e.labels HAS "a"')
+    assert expr.tree == ("NOT", ("HAS", "_httk_e.labels", ("=",), ["a"], "HAS_ALL"))
+
+
+def test_nested_list_of_lists_has_scalar_is_type_mismatch():
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate_nested("_httk_e.grid HAS 1.0")
+    assert excinfo.value.category == "type-mismatch"
+
+
+def test_dict_property_supports_only_known_unknown():
+    assert set(simple_property_handlers("structures", {"_httk_e": "_httk_e"}, NESTED_FULLTYPES)["_httk_e"]) == {
+        "unknown"
+    }
+    for filter_string in ('_httk_e CONTAINS "x"', '_httk_e = "x"', '_httk_e HAS "x"'):
+        with pytest.raises(FilterTranslationError) as excinfo:
+            translate_nested(filter_string)
+        assert excinfo.value.category == "not-implemented"
+
+
+@pytest.mark.parametrize(
+    ("filter_string", "path"),
+    (
+        ("_httk_e.nope = 1", "_httk_e.nope"),
+        ("nelements.foo = 1", "nelements.foo"),
+        ("0.5 > nelements.foo", "nelements.foo"),
+        ("nelements.foo IS KNOWN", "nelements.foo"),
+        ('_httk_e.x.y HAS "a"', "_httk_e.x.y"),
+        ("_httk_nope.x LENGTH 1", "_httk_nope.x"),
+    ),
+)
+def test_unknown_member_or_own_prefix_head_is_unrecognized_naming_the_full_path(filter_string, path):
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate_nested(filter_string)
+    assert excinfo.value.category == "unrecognized-property"
+    assert path in str(excinfo.value)
+
+
+def test_foreign_prefix_dotted_name_matches_nothing_and_warns_with_full_path():
+    with collect_reports() as collection:
+        assert translate_nested("_other_db_x.y = 1").tree == FALSE_TREE
+        assert translate_nested('_other_db_x.y HAS "a"').tree == FALSE_TREE
+        assert translate_nested("_other_db_x.y IS UNKNOWN").tree == TRUE_TREE
+    assert len(collection.records) == 3
+    assert all("_other_db_x.y" in record.getMessage() for record in collection.records)
+
+
+def test_handler_only_dotted_key_serves_has_alone():
+    assert translate_nested('_httk_relationships.k.id HAS "a"').tree == (
+        "HAS",
+        "_httk_relationships.k.id",
+        ("=",),
+        ["a"],
+        "HAS_ALL",
+    )
+    for filter_string in ('_httk_relationships.k.id = "a"', "_httk_relationships.k.id IS KNOWN"):
+        with pytest.raises(FilterTranslationError) as excinfo:
+            translate_nested(filter_string)
+        assert excinfo.value.category == "not-implemented"
 
 
 # ---------------------------------------------------------------------- filter_searcher sugar

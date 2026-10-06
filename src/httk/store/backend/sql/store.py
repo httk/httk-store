@@ -429,6 +429,9 @@ class SqlStore:
         self._candidate_names: dict[tuple[frozenset[type], bool], frozenset[str]] = {}
         # Table-name closures of single classes and whole families (see _closure_table_names).
         self._closure_names: dict[tuple[tuple[type, ...], str | None], frozenset[str]] = {}
+        # Serializes _register_tables misses (check-then-build on the shared
+        # _metadata). Innermost: never take another lock while holding it.
+        self._register_lock = threading.Lock()
         self._initialized = False
         self._initialization_ddl_journal: list[sqlalchemy.Table] = []
         self._identity = IdentityCaches()
@@ -2635,25 +2638,30 @@ class SqlStore:
         ``_store_timestamps``.  Registration idempotently populates
         ``_metadata`` on the first request, so every candidate name resolves
         through :meth:`_table`; the memos are dropped whenever ``_metadata``
-        is replaced.
+        is replaced.  A miss is serialized by ``_register_lock`` so concurrent
+        readers never build the same table into ``_metadata`` twice.
         """
         requested = tuple(classes)
         key = (frozenset(requested), reach_families)
         names = self._candidate_names.get(key)
-        if names is None:
-            found: set[str] = set()
-            for cls in requested:
-                found |= self._closure_table_names((cls,))
-            families = (
-                self._families_reached(found)
-                if reach_families
-                else tuple(family for family in self.layout.families if any(r in family.records for r in requested))
-            )
-            for family in families:
-                found |= self._closure_table_names(family.records, family)
-            names = frozenset(found)
-            self._register_in_metadata(requested, names)
-            self._candidate_names[key] = names
+        if names is not None:
+            return names
+        with self._register_lock:
+            names = self._candidate_names.get(key)
+            if names is None:
+                found: set[str] = set()
+                for cls in requested:
+                    found |= self._closure_table_names((cls,))
+                families = (
+                    self._families_reached(found)
+                    if reach_families
+                    else tuple(family for family in self.layout.families if any(r in family.records for r in requested))
+                )
+                for family in families:
+                    found |= self._closure_table_names(family.records, family)
+                names = frozenset(found)
+                self._register_in_metadata(requested, names)
+                self._candidate_names[key] = names
         return names
 
     def _register_in_metadata(self, requested: tuple[type, ...], candidate: Collection[str]) -> None:

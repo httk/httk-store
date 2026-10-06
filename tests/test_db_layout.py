@@ -85,6 +85,13 @@ class CheckRecord:
 
 
 @dataclass(frozen=True)
+class UnlaidRecord:
+    """Storable referenced by no layout, so its tables are first registered on demand."""
+
+    value: str
+
+
+@dataclass(frozen=True)
 class WeirdNamedRecord:
     __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="weird(name")
 
@@ -456,6 +463,68 @@ def test_warm_read_memo_does_not_block_table_creation_on_write(database: Backend
     key = content_id(LayoutSingle("kept"))
     fetched = store.fetch_by_content_id(LayoutSingle, key)
     assert fetched is not None and fetched.value == "kept"
+
+
+def test_concurrent_register_tables_miss_builds_each_table_once(
+    database: Backend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two readers missing the same class-set memo never build its tables into ``_metadata`` twice."""
+    from httk.store.backend.sql import mapping
+
+    store = SqlStore(database, entry_records={LayoutFamily: LayoutSingle})
+    assert "unlaid_record" not in store._metadata.tables
+    builds: list[str] = []
+    first_blocked = threading.Event()
+    second_arrived = threading.Event()
+    original = mapping._build_parent_table
+
+    def spy(schema: Any, *args: Any, **kwargs: Any) -> Any:
+        builds.append(schema.table_name)
+        if len(builds) == 1:
+            # Hold the first builder between table_for's existence check and
+            # the build until the second reader is blocked on the lock (fixed)
+            # or has reached a build of its own (the race).
+            first_blocked.set()
+            assert second_arrived.wait(timeout=10)
+        else:
+            second_arrived.set()
+        return original(schema, *args, **kwargs)
+
+    class ObservedLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+
+        def __enter__(self) -> None:
+            if self._lock.locked():
+                second_arrived.set()
+            self._lock.acquire()
+
+        def __exit__(self, *exc: object) -> None:
+            self._lock.release()
+
+    monkeypatch.setattr(mapping, "_build_parent_table", spy)
+    monkeypatch.setattr(store, "_register_lock", ObservedLock())
+    results: dict[str, frozenset[str]] = {}
+    errors: list[BaseException] = []
+
+    def register(name: str) -> None:
+        try:
+            results[name] = store._register_tables((UnlaidRecord,), reach_families=False)
+        except BaseException as error:
+            errors.append(error)
+            second_arrived.set()
+
+    first = threading.Thread(target=register, args=("first",))
+    second = threading.Thread(target=register, args=("second",))
+    first.start()
+    assert first_blocked.wait(timeout=10)
+    second.start()
+    for thread in (first, second):
+        thread.join(timeout=15)
+        assert not thread.is_alive()
+    assert errors == []
+    assert builds == ["unlaid_record"]
+    assert results["first"] == results["second"] == frozenset({"unlaid_record"})
 
 
 @pytest.mark.parametrize("old_protocol", ["v2.1.0", "v2.3.0", "v2.4.0", "v2.5.0"])

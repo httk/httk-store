@@ -18,7 +18,7 @@ from httk.core import FracScalar, FracVector
 from httk.core.register import register_entry_family, register_entry_record
 from httk.core.storage import IdentitySkip, Indexed, Shape, StorageInfo, content_id
 
-from httk.store.backend.sql.mapping import CONTENT_ID_COLUMN
+from httk.store.backend.sql.mapping import CONTENT_ID_COLUMN, ROLE_COLUMN, SID_COLUMN
 from httk.store.store_common import EntryDispatchIntegrityError, EntryMetadataConflictError
 
 # --------------------------------------------------------------------- record classes
@@ -322,6 +322,38 @@ def test_bulk_returned_sids_match_fetch(store_factory):
     assert reopened.fetch(Author, sids[0]) == Author("Ada", 1852)
     assert reopened.fetch(Author, sids[1]) == Author("Grace", 1906)
     assert reopened.fetch(Sample, sids[2]) == make_sample()
+
+
+class _UnscannableRows(list):
+    """A buffered-row list that fails the test if anything iterates it."""
+
+    def __iter__(self):
+        raise AssertionError("buffer scanned")
+
+    def __reversed__(self):
+        raise AssertionError("buffer scanned")
+
+
+def test_bulk_promote_buffered_role_does_not_scan_buffer(store_factory):
+    """Role promotion is a per-chunk sid lookup, never a scan of the buffered rows."""
+    store = store_factory()
+    _require_bulk(store)
+    if store.backend_facts.stage_load == "client-stream":
+        pytest.skip("backend is deferred-only; the parity encoder buffers no rows")
+    with store.bulk_ingest(finalize="parity") as bulk:
+        sids = [bulk.save(Author(name, 1900 + index)) for index, name in enumerate(("Ada", "Grace", "Hedy"))]
+        original = bulk._rows["bulk_author"]
+        row = bulk._rows_by_sid["bulk_author"][sids[1]]
+        assert row[SID_COLUMN] == sids[1]
+        row[ROLE_COLUMN] = 0
+        bulk._rows["bulk_author"] = _UnscannableRows(original)
+        try:
+            assert bulk._promote_buffered_role("bulk_author", sids[1])
+            assert row[ROLE_COLUMN] == 1
+            assert not bulk._promote_buffered_role("bulk_author", 10**9)
+        finally:
+            bulk._rows["bulk_author"] = original
+    assert not any(bulk._rows_by_sid.values())
 
 
 def test_bulk_intra_ingest_content_and_value_dedup(store_factory):

@@ -300,6 +300,8 @@ class BulkIngest:
         # Encoder bookkeeping, keyed by table name.
         self._next_sid: dict[str, int] = {}
         self._rows: dict[str, list[dict[str, Any]]] = {}
+        # table -> sid -> the buffered parent row dict; lives exactly one chunk.
+        self._rows_by_sid: dict[str, dict[int, dict[str, Any]]] = {}
         self._inserted_count: dict[str, int] = {}
         self._content_index: dict[str, dict[str, int]] = {}
         self._value_index: dict[str, dict[tuple[Any, ...], int]] = {}
@@ -1292,11 +1294,11 @@ class BulkIngest:
 
     def _promote_buffered_role(self, table_name: str, sid: int) -> bool:
         """Mark a top-level bulk occurrence main without making role a dedup key."""
-        for row in self._rows.get(table_name, ()):
-            if row[SID_COLUMN] == sid:
-                row[ROLE_COLUMN] = 1
-                return True
-        return False
+        row = self._rows_by_sid.get(table_name, {}).get(sid)
+        if row is None:
+            return False
+        row[ROLE_COLUMN] = 1
+        return True
 
     def _mint_bulk_entry_ids(self, record_type: type, schema: TableSchema, values: dict[str, Any], sid: int) -> None:
         """Mint ids for the serial parity encoder, whose sid is already final."""
@@ -1363,6 +1365,8 @@ class BulkIngest:
 
     def _buffer_row(self, table_name: str, row: dict[str, Any]) -> None:
         self._rows.setdefault(table_name, []).append(row)
+        if SID_COLUMN in row:
+            self._rows_by_sid.setdefault(table_name, {})[row[SID_COLUMN]] = row
 
     def _buffer_dispatch(self, family: Any, backing: type, sid: int, key: str) -> None:
         dispatch_name = entry_dispatch_table_name(family.name)
@@ -1452,6 +1456,7 @@ class BulkIngest:
         assert self._connection is not None
         if any(self._rows.values()):
             self._resolve_and_insert()
+        self._rows_by_sid.clear()
         # Metadata caches (and the chunk's roots) live only for the chunk that
         # buffered them: bound their memory to one chunk. A later chunk's hit on
         # an already-flushed content id verifies against the stored row instead.

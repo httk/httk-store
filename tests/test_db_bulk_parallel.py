@@ -46,6 +46,7 @@ from test_db_bulk import (
     _root,
     _stream,
     _table_stats,
+    _UnscannableRows,
     make_sample,
 )
 
@@ -54,6 +55,7 @@ from test_db_bulk import (
 pytestmark = pytest.mark.xdist_group("bulk-heavy")
 from httk.store.backend.sql import Backend, SqlStore
 from httk.store.backend.sql.layout import METADATA_TABLE_NAME, actual_schema_objects
+from httk.store.backend.sql.mapping import ROLE_COLUMN, SID_COLUMN
 from httk.store.store_common import EntryDispatchIntegrityError, EntryMetadataConflictError
 
 CALC_FAMILY = {BulkCalcFamily: (BulkCalcA, BulkCalcB)}
@@ -655,6 +657,40 @@ def test_parquet_untracked_worker_does_not_retain_dedup_indexes(worker_index):
                 encoder.save(100 + index, ByValParent(index, []), None)
             assert sum(map(len, encoder._content_index.values())) == 0
             assert sum(map(len, encoder._value_index.values())) == 0
+    finally:
+        database.dispose()
+
+
+def test_worker_promote_buffered_role_does_not_scan_buffer():
+    """The worker encoder promotes roles by per-chunk sid lookup, never by scanning its buffer."""
+    from httk.store.backend.sql.bulk_parallel import _WorkerConfig, _WorkerEncoder
+
+    database = Backend.sqlite()
+    try:
+        store = SqlStore(database, entry_records={})
+        with tempfile.TemporaryDirectory() as shard_dir:
+            encoder = _WorkerEncoder(
+                store,
+                0,
+                _WorkerConfig(chunk_size=1_000, shard_dir=shard_dir, backend="sqlite", track_sids=True),
+            )
+            sids = [
+                encoder.save(index, Author(name, 1900 + index), None) for index, name in enumerate(("Ada", "Grace"))
+            ]
+            original = encoder._rows["bulk_author"]
+            row = encoder._rows_by_sid["bulk_author"][sids[1]]
+            assert row[SID_COLUMN] == sids[1]
+            row[ROLE_COLUMN] = 0
+            encoder._rows["bulk_author"] = _UnscannableRows(original)
+            try:
+                assert encoder._promote_buffered_role("bulk_author", sids[1])
+                assert row[ROLE_COLUMN] == 1
+                assert not encoder._promote_buffered_role("bulk_author", 10**9)
+            finally:
+                encoder._rows["bulk_author"] = original
+            encoder._flush()
+            assert not any(encoder._rows_by_sid.values())
+            assert not encoder._promote_buffered_role("bulk_author", sids[1])
     finally:
         database.dispose()
 

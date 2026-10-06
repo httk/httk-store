@@ -518,6 +518,8 @@ class _WorkerEncoder:
         self._registered: set[type] = set()
         self._next_sid: dict[str, int] = {}
         self._rows: dict[str, list[dict[str, Any]]] = {}
+        # table -> sid -> the buffered parent row dict; lives exactly one chunk.
+        self._rows_by_sid: dict[str, dict[int, dict[str, Any]]] = {}
         self._content_index: dict[str, dict[str, int]] = {}
         self._value_index: dict[str, dict[tuple[Any, ...], int]] = {}
         self._token_sid: dict[int, tuple[str, int]] = {}
@@ -751,11 +753,11 @@ class _WorkerEncoder:
         return sid
 
     def _promote_buffered_role(self, table_name: str, sid: int) -> bool:
-        for row in self._rows.get(table_name, ()):
-            if row[SID_COLUMN] == sid:
-                row[ROLE_COLUMN] = 1
-                return True
-        return False
+        row = self._rows_by_sid.get(table_name, {}).get(sid)
+        if row is None:
+            return False
+        row[ROLE_COLUMN] = 1
+        return True
 
     def _register(self, record_type: type) -> None:
         if record_type in self._registered:
@@ -765,6 +767,8 @@ class _WorkerEncoder:
 
     def _buffer(self, table_name: str, row: dict[str, Any]) -> None:
         self._rows.setdefault(table_name, []).append(row)
+        if SID_COLUMN in row:
+            self._rows_by_sid.setdefault(table_name, {})[row[SID_COLUMN]] = row
         self._tables.add(table_name)
 
     def _record_nan_floats(self, table_name: str, row: dict[str, Any]) -> None:
@@ -792,6 +796,7 @@ class _WorkerEncoder:
             if rows:
                 self._writer.write(table_name, rows)
                 rows.clear()
+        self._rows_by_sid.clear()
         if self._root_rows:
             self._writer.write_roots(self._root_rows)
             self._root_rows.clear()

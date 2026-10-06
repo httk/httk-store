@@ -510,6 +510,11 @@ class DeferredFinalizer:
                 )
             elif edge.kind == "child_element":
                 assert edge.source_column is not None
+                # A child table with no staged rows (e.g. every surviving
+                # parent has an empty ``product_of``) has no stage relation and
+                # contributes no reachability.
+                if edge.source_table not in self.stage_views:
+                    continue
                 ownership = next(
                     (value for value in self.graph.ownership() if value.target_table == edge.source_table), None
                 )
@@ -555,7 +560,8 @@ class DeferredFinalizer:
                         (value for value in self.graph.ownership() if value.target_table == edge.source_table), None
                     )
                     if (
-                        ownership is None
+                        edge.source_table not in self.stage_views
+                        or ownership is None
                         or ownership.target_column is None
                         or ownership.source_table not in self.survivors
                         or edge.target_table not in self.survivors

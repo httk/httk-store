@@ -421,6 +421,18 @@ class MongoStore:
     def __repr__(self) -> str:
         return f"MongoStore(database={self._database!r})"
 
+    def close(self) -> None:
+        """Release what this store owns, mirroring :meth:`~httk.store.backend.sql.store.SqlStore.close`.
+
+        A ``MongoStore`` is always built from a caller-supplied
+        :class:`~httk.store.backend.mongo.database.MongoDatabase`, which it does
+        not own, so this is a no-op: the caller stays responsible for the client
+        and its connection pool (see
+        :meth:`~httk.store.backend.mongo.database.MongoDatabase.dispose`).
+
+        :return: None.
+        """
+
     @staticmethod
     def _family_entry_type(family: type) -> str:
         """Return the validated served entry type declared by ``family``."""

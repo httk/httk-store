@@ -266,6 +266,22 @@ def test_sql_rows_serve_the_whole_dictionary(sql_plan):
     }
 
 
+@pytest.mark.parametrize("aggregate", ("count", "distinct_count"))
+def test_sql_correlated_count_is_zero_without_matching_children(sql_plan, aggregate):
+    """A parent without matching child rows counts 0: ClickHouse's decorrelated subquery reads NULL there."""
+    searcher = sql_plan.store.searcher()
+    variable = searcher.variable(NestedErrors)
+    ctx = _SqlQueryContext(searcher, variable)
+    labels = ctx.scope("labels")
+    silicon = ctx.filtered(labels, ctx.equal(labels.field("value"), ctx.constant("Si")))
+    value = ctx.count(silicon) if aggregate == "count" else ctx.distinct_count(silicon, silicon.field("value"))
+    predicate = ctx.compare(value, "=", ctx.constant(0))
+    sql_plan._validate_clickhouse_correlation(predicate)
+    searcher.add(predicate)
+    searcher._output(variable, "record")
+    assert {row[0].name for row in searcher.results()} == {"a1", "a2", "a4"}
+
+
 @pytest.mark.parametrize(
     ("member", "operator", "literal"),
     (

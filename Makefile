@@ -131,10 +131,10 @@ clickhouse-dev-server:
 	cp tests/clickhouse/users.xml "$(CLICKHOUSE_DEV_DIR)/users.xml"; \
 	mkdir -p "$(CLICKHOUSE_DEV_DIR)/data" "$(CLICKHOUSE_DEV_DIR)/tmp" "$(CLICKHOUSE_DEV_DIR)/user_files" \
 		"$(CLICKHOUSE_DEV_DIR)/keeper/log" "$(CLICKHOUSE_DEV_DIR)/keeper/snapshots"; \
-	python_path="$$(readlink -f "$$(command -v "$(PYTHON)")")"; binary_path="$$(readlink -f "$(CLICKHOUSE_DEV_BINARY)")"; config_path="$$(readlink -f "$(CLICKHOUSE_DEV_CONFIG)")"; \
+	python_path="$$(command -v "$(PYTHON)")"; binary_path="$$(readlink -f "$(CLICKHOUSE_DEV_BINARY)")"; config_path="$$(readlink -f "$(CLICKHOUSE_DEV_CONFIG)")"; \
 	clickhouse_process_matches() { \
 		pid="$$1"; test -r "/proc/$$pid/cmdline" || return 1; \
-		cmdline="$$(tr '\\0' ' ' < "/proc/$$pid/cmdline")"; \
+		cmdline="$$(tr '\0' ' ' < "/proc/$$pid/cmdline")"; \
 		case "$$cmdline" in *"$$python_path -m httk.core.memguard "*"$$binary_path"*"server"*"--config-file"*"$$config_path"*) return 0;; esac; \
 		return 1; \
 	}; \
@@ -172,14 +172,14 @@ clickhouse-stop:
 	@set -eu; \
 	if [ -f "$(CLICKHOUSE_DEV_PID)" ]; then \
 		pid="$$(cat "$(CLICKHOUSE_DEV_PID)")"; \
-		python_path="$$(readlink -f "$$(command -v "$(PYTHON)")")"; binary_path="$$(readlink -f "$(CLICKHOUSE_DEV_BINARY)")"; config_path="$$(readlink -f "$(CLICKHOUSE_DEV_CONFIG)")"; \
+		python_path="$$(command -v "$(PYTHON)")"; binary_path="$$(readlink -f "$(CLICKHOUSE_DEV_BINARY)")"; config_path="$$(readlink -f "$(CLICKHOUSE_DEV_CONFIG)")"; \
 		case "$$pid" in ''|*[!0-9]*) echo "Refusing ClickHouse stop: invalid PID file $(CLICKHOUSE_DEV_PID)" >&2; exit 1;; esac; \
-		cmdline="$$(tr '\\0' ' ' < "/proc/$$pid/cmdline" 2>/dev/null || true)"; \
+		cmdline="$$(tr '\0' ' ' < "/proc/$$pid/cmdline" 2>/dev/null || true)"; \
 		case "$$cmdline" in *"$$python_path -m httk.core.memguard "*"$$binary_path"*"server"*"--config-file"*"$$config_path"*) ;; *) echo "Refusing ClickHouse stop: PID $$pid is stale or not the expected memguard/binary/config process; inspect $(CLICKHOUSE_DEV_PID)" >&2; exit 1;; esac; \
 		kill "$$pid"; \
 		for attempt in $$(seq 1 30); do kill -0 "$$pid" 2>/dev/null || break; sleep 1; done; \
 		if kill -0 "$$pid" 2>/dev/null; then \
-			cmdline="$$(tr '\\0' ' ' < "/proc/$$pid/cmdline" 2>/dev/null || true)"; \
+			cmdline="$$(tr '\0' ' ' < "/proc/$$pid/cmdline" 2>/dev/null || true)"; \
 			case "$$cmdline" in *"$$python_path -m httk.core.memguard "*"$$binary_path"*"server"*"--config-file"*"$$config_path"*) kill -KILL "$$pid";; *) echo "Refusing ClickHouse stop: PID $$pid changed identity; not signaling it" >&2; exit 1;; esac; \
 		fi; \
 		rm -f "$(CLICKHOUSE_DEV_PID)"; \

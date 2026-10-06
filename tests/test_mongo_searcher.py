@@ -86,7 +86,8 @@ def test_scalar_is_in_none_contract_and_negation(mongo_test_database):
 
     _store, searcher, variable = _query(mongo_test_database)
     searcher.add(~variable.note.is_in("present"))
-    assert set(_labels(searcher, variable)) == {"axb"}
+    # is_in is definite (httk.store.query.conformance): ~is_in keeps NULL rows.
+    assert set(_labels(searcher, variable)) == {"50% Mg", "a_b", "axb"}
 
 
 @pytest.mark.parametrize(

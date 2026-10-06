@@ -15,6 +15,8 @@
     <tcp_port replace="replace">29000</tcp_port>
     <http_port replace="replace">28123</http_port>
     <max_server_memory_usage replace="replace">4500000000</max_server_memory_usage>
+    <!-- Shared-cgroup accounting counts other processes' memory; memguard and max_server_memory_usage bound the server. -->
+    <memory_worker_use_cgroup replace="replace">0</memory_worker_use_cgroup>
     <mark_cache_size replace="replace">268435456</mark_cache_size>
     <uncompressed_cache_size replace="replace">134217728</uncompressed_cache_size>
     <logger replace="replace">

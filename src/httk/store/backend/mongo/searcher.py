@@ -315,13 +315,16 @@ def _render_is_in(node: IsInNode) -> tuple[dict[str, Any], dict[str, Any]]:
     if non_null:
         member = _and({path: {"$in": list(non_null)}}, _known(path))
         truth = _or(_null(path), member) if includes_null else member
-        false = _and({path: {"$nin": list(non_null)}}, _known(path))
+        # ``$nin`` is the exact complement of ``$in`` and keeps null/missing
+        # rows: ``~is_in`` is definite and drops NULL only for an explicit None.
+        excluded = {path: {"$nin": list(non_null)}}
+        false = _and(excluded, _known(path)) if includes_null else excluded
     elif includes_null:
         truth = _null(path)
         false = _known(path)
     else:
         truth = _unknown_constant()
-        false = _known(path)
+        false = {}
     return truth, false
 
 

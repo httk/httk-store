@@ -583,6 +583,16 @@ def test_reopen_with_changed_record_schema_is_rejected(database: Backend) -> Non
     assert set(schema_diff) == {"layout_single"}
 
 
+def test_reopen_with_corrupt_fingerprint_reports_sentinel(database: Backend) -> None:
+    """A stored fingerprint that is not parseable yields the single sentinel diff and a rebuild remedy."""
+    SqlStore(database, entry_records={LayoutFamily: LayoutSingle})
+    _write_metadata_value(database, "entry_schemas", "not a fingerprint")
+    with pytest.raises(StorageLayoutUpgradeRequiredError) as error:
+        SqlStore(database)
+    assert set(error.value.diff["schema"]) == {"<fingerprint>"}
+    assert error.value.remedy == "rebuild"
+
+
 def test_reopen_detects_dedup_change_on_referenced_class(database: Backend) -> None:
     SqlStore(database, entry_records={RefFamily: RefParent})
     # A real resolution-path change: the referenced child's dedup policy differs

@@ -918,9 +918,15 @@ def classify_schema_upgrade(stored: str | None, current: str) -> AdditiveUpgrade
     :return: An :class:`AdditiveUpgradePlan` when fully additive, otherwise a
         human-readable rejection reason naming the offending table/field/column.
     """
-    current_document = json.loads(current)
-    current_tables = current_document["tables"]
-    entry_id_tables = frozenset(current_document.get("entry_id_tables", ()))
+    try:
+        # The reopen "stored is ahead" probe passes the stored fingerprint here.
+        current_document = json.loads(current)
+        current_tables = current_document["tables"]
+        entry_id_tables = frozenset(current_document.get("entry_id_tables", ()))
+    except (TypeError, KeyError, AttributeError, json.JSONDecodeError):
+        return "current schema fingerprint is not parseable"
+    if not isinstance(current_tables, dict):
+        return "current schema fingerprint is not parseable"
     try:
         stored_document = json.loads(stored) if stored is not None else None
         stored_tables = stored_document["tables"] if isinstance(stored_document, dict) else None

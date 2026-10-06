@@ -409,7 +409,7 @@ class _SqlQueryContext:
             .correlate(*target.ancestors)
         )
         return _SqlValue(
-            statement.scalar_subquery(),
+            _correlated_count(statement),
             correlation_depth=max(1, target.correlation_depth, target.condition_depth),
         )
 
@@ -466,7 +466,7 @@ class _SqlQueryContext:
             .correlate(*target.ancestors)
         )
         return _SqlValue(
-            statement.scalar_subquery(),
+            _correlated_count(statement),
             correlation_depth=max(1, target.correlation_depth, selected.correlation_depth, target.condition_depth),
         )
 
@@ -1819,6 +1819,18 @@ def _scope(value: object) -> _SqlScope:
     if not isinstance(value, _SqlScope):
         raise StoredPropertySqlConfigurationError("stored-property query callback received a foreign scope")
     return value
+
+
+def _correlated_count(statement: sqlalchemy.Select[Any]) -> sqlalchemy.ColumnElement[Any]:
+    """Return a correlated ``count`` subquery that is ``0``, never NULL, for a parent without matches.
+
+    ClickHouse's correlated-subquery decorrelation rewrites a correlated count
+    into a join and aggregation and yields ``NULL`` for parents without
+    matching rows, so ``count = 0`` / ``NOT count > 0`` silently drop them.
+    ``coalesce`` restores SQL's empty-set count on every dialect and is a
+    no-op where the subquery is already never NULL.
+    """
+    return sqlalchemy.func.coalesce(statement.scalar_subquery(), 0)
 
 
 def _scope_from(scope: _SqlScope) -> tuple[sqlalchemy.FromClause, ...]:

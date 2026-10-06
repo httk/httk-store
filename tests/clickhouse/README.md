@@ -16,8 +16,13 @@ under `python -m httk.core.memguard --max-rss-gb 7`.  The committed config
 keeps the server on loopback: native port 29000, HTTP port 28123, and
 embedded Keeper ports 29181/29234.  Its `max_server_memory_usage` is
 4,500,000,000 bytes (4.5 GB), while memguard's 7 GiB allowance is the real
-process-group safety limit.  The server is deliberately outside the pytest
-process tree, but that allowance remains part of the machine-safety budget.
+process-group safety limit.  `memory_worker_use_cgroup` is 0 because a
+server sharing a cgroup (such as the root cgroup on a desktop) would otherwise
+count other processes' memory against `max_server_memory_usage`.  With cgroup
+accounting off, the CI container's `--memory=7g` limit is enforced only by
+Docker, while `max_server_memory_usage` (and, locally, memguard) bound the
+server.  The server is deliberately outside the pytest process tree, but that
+allowance remains part of the machine-safety budget.
 Use `make clickhouse-stop` when finished.
 
 The static binary has no distro configuration tree.  The helper therefore

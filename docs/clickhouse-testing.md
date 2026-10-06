@@ -59,6 +59,13 @@ and is suitable only on a host/container with that larger envelope.  CI uses
 envelope.  The server's 4.5 GB allocator cap is separate from its 7 GiB
 process-group allowance.
 
+The committed config sets `memory_worker_use_cgroup` to 0: a server sharing a
+cgroup (such as the root cgroup on a desktop) would otherwise count other
+processes' memory against `max_server_memory_usage` and fail queries with
+`MEMORY_LIMIT_EXCEEDED`.  With cgroup accounting off, the CI container's
+`--memory=7g` limit is enforced only by Docker, while
+`max_server_memory_usage` (and, locally, memguard) bound the server.
+
 ## Manual recovery
 
 Only recover after verifying that the former writer is dead.  Inspect the

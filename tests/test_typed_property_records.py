@@ -520,9 +520,10 @@ ZIPS = PropertyDefinition.from_optimade(
             "labels": _list(_leaf("string", ["string"]), "sites", None),
             "counts": _list(_leaf("integer", ["integer"]), "sites", None),
             "weights": _list(_leaf("float", ["number"]), "sites", None),
+            "masses": _list(_leaf("float", ["number", "null"]), "sites", None),
             "other": _list(_leaf("integer", ["integer"]), "other", None),
         },
-        "required": ["labels", "counts", "other"],
+        "required": ["labels", "counts", "masses", "other"],
     },
 )
 
@@ -540,6 +541,7 @@ class TypedZipsRecord(TypedRecord):
 
     labels: tuple[str, ...]
     counts: tuple[int, ...]
+    masses: tuple[float | None, ...]
     other: tuple[int, ...]
     weights: tuple[float, ...] | None = None
     product_of: Annotated[tuple[RunEdge, ...], StrongLink("product_of", reverse="has_product", role="subject")] = ()
@@ -560,10 +562,17 @@ ZIPS_FAMILIES = (
     ),
 )
 ZIP_VALUES: dict[str, dict[str, Any]] = {
-    "z1": {"labels": ["a", "b"], "counts": [1, 2], "weights": [0.5, 1.5], "other": [7]},
-    "z2": {"labels": ["a", "b"], "counts": [2, 1], "other": []},
-    "z3": {"labels": ["a"], "counts": [1], "weights": [2.0], "other": [1, 2]},
-    "z4": {"labels": ["c", "a", "a"], "counts": [5, 3, 1], "weights": [1.0, 1.0, 1.0], "other": []},
+    "z1": {"labels": ["a", "b"], "counts": [1, 2], "weights": [0.5, 1.5], "masses": [1.0, None], "other": [7]},
+    "z2": {"labels": ["a", "b"], "counts": [2, 1], "masses": [2.0, 2.0], "other": []},
+    "z3": {"labels": ["a"], "counts": [1], "weights": [2.0], "masses": [None], "other": [1, 2]},
+    "z4": {
+        "labels": ["c", "a", "a"],
+        "counts": [5, 3, 1],
+        "weights": [1.0, 1.0, 1.0],
+        "masses": [1.0] * 3,
+        "other": [],
+    },
+    "z5": {"labels": [], "counts": [], "masses": [], "other": []},  # The empty zip: HAS ONLY vacuously true.
 }
 ALL_ZIPS = {*ZIP_VALUES, "b1"}
 
@@ -578,16 +587,24 @@ def _zip_records() -> dict[str, Any]:
 
 _LC = "_httk_typed_zips.labels:_httk_typed_zips.counts"
 _LW = "_httk_typed_zips.labels:_httk_typed_zips.weights"
+_LM = "_httk_typed_zips.labels:_httk_typed_zips.masses"
 ZIP_CASES = (
     (f'{_LC} HAS "a":1', {"z1", "z3", "z4"}),
     (f'{_LC} HAS "a":2', {"z2"}),  # Positions correlate: z1 holds "a" and 2, never at one position.
     (f'{_LC} HAS ALL "a":1, "b":2', {"z1"}),
     (f'{_LC} HAS ANY "a":2, "c":5', {"z2", "z4"}),
-    (f'{_LC} HAS ONLY "a":1, "b":2', {"z1", "z3"}),
+    (f'{_LC} HAS ONLY "a":1, "b":2', {"z1", "z3", "z5"}),
     (f'{_LC} HAS "a":>1', {"z2", "z4"}),
-    (f'NOT {_LC} HAS "a":1', {"z2"}),  # The unprojecting backing (b1) never matches.
+    (f'NOT {_LC} HAS "a":1', {"z2", "z5"}),  # The unprojecting backing (b1) never matches.
     (f'{_LW} HAS "a":1.0', {"z4"}),
-    (f'NOT {_LW} HAS "a":1.0', {"z1", "z3"}),  # z2 lacks the optional weights: unknown, neither form.
+    (f'NOT {_LW} HAS "a":1.0', {"z1", "z3"}),  # z2 and z5 lack the optional weights: unknown, neither form.
+    # A null slot makes its position unknown: HAS ONLY ignores it (z1's "b", z3's only position) ...
+    (f'{_LM} HAS ONLY "a":1.0, "b":2.0', {"z1", "z3", "z5"}),
+    ("_httk_typed_zips.masses HAS ONLY 1.0", {"z1", "z3", "z4", "z5"}),
+    # ... and it never matches HAS, so z1's ("b", null) is not ("b", 2.0); the empty zip never HAS.
+    (f'{_LM} HAS "b":2.0', {"z2"}),
+    (f'{_LM} HAS ANY "a":1.0, "b":2.0', {"z1", "z2", "z4"}),
+    (f'NOT {_LM} HAS "b":2.0', {"z1", "z3", "z4", "z5"}),
 )
 ZIP_FAILURES = (("_httk_typed_zips.labels:_httk_typed_zips.other HAS \"a\":1", "not-implemented"),)
 

@@ -30,9 +30,19 @@ __all__ = [
 _NO_LITERAL = object()
 
 
+class _Misaligned(Exception):
+    """Aligned sibling lists of one parent item differ in length (the predicate is unknown)."""
+
+
 @dataclass(frozen=True, slots=True)
 class MongoScope:
-    """A root, child, reference, or filtered record-object scope."""
+    """A root, child, reference, filtered, or aligned record-object scope.
+
+    An aligned view (``aligned`` non-empty) is member ``aligned_index`` of a
+    group of sibling list children sharing one ``identifier``: its items are
+    the position-wise tuples of the group's lists, so binding the identifier
+    binds every view of the group to the same element position.
+    """
 
     identifier: int
     schema: TableSchema
@@ -41,6 +51,8 @@ class MongoScope:
     filter_predicate: "MongoPredicate | None" = None
     scalar_child: bool = False
     context: Any = dataclasses.field(default=None, compare=False, repr=False)
+    aligned: tuple[FieldSpec, ...] = ()
+    aligned_index: int = 0
 
     def field(self, name: str) -> "MongoValue":
         """Select a scalar field from this scope."""
@@ -151,6 +163,21 @@ def _root_scope(predicate: MongoPredicate) -> MongoScope | None:
 
 
 def _eval_predicate(
+    predicate: MongoPredicate,
+    environment: dict[int, object],
+    store_timestamp_resolver: Callable[[], object] | None = None,
+    logical_id_resolver: Callable[[], object] | None = None,
+    alt_kind_resolver: Callable[[], object] | None = None,
+) -> bool | None:
+    try:
+        return _eval_node(predicate, environment, store_timestamp_resolver, logical_id_resolver, alt_kind_resolver)
+    except _Misaligned:
+        # Unequal aligned lists: the innermost predicate reading them is UNKNOWN,
+        # so neither it nor its negation matches (never truncate to the shortest).
+        return None
+
+
+def _eval_node(
     predicate: MongoPredicate,
     environment: dict[int, object],
     store_timestamp_resolver: Callable[[], object] | None = None,
@@ -317,7 +344,16 @@ def _items(
         alt_kind_resolver,
     )
     values: list[object] = []
-    for parent in parents:
+    for item in parents:
+        parent = _element(scope.parent, item)
+        if scope.aligned:
+            lists = [child for spec in scope.aligned if (child := getattr(parent, spec.field, None)) is not None]
+            if not lists:
+                continue
+            if len(lists) != len(scope.aligned) or len({len(child) for child in lists}) != 1:
+                raise _Misaligned
+            values.extend(zip(*lists, strict=True))
+            continue
         child = getattr(parent, scope.relationship.field, None)
         if child is None:
             continue
@@ -339,6 +375,11 @@ def _items(
             is True
         ]
     return tuple(values)
+
+
+def _element(scope: MongoScope, item: object) -> object:
+    """Return ``scope``'s own element of a bound item (its member of an aligned position)."""
+    return cast(tuple[object, ...], item)[scope.aligned_index] if scope.aligned else item
 
 
 def _eval_value(
@@ -393,7 +434,7 @@ def _eval_value(
             logical_id_resolver,
             alt_kind_resolver,
         )
-        return len(items) == 1 and getattr(items[0], value.field, None) is not None
+        return len(items) == 1 and getattr(_element(value.scope, items[0]), value.field, None) is not None
     if value.kind == "count":
         assert value.scope is not None
         return len(
@@ -435,15 +476,16 @@ def _eval_value(
     )
     if len(items) != 1:
         return None
+    item = _element(value.scope, items[0])
     if value.scope.scalar_child:
-        return items[0]
+        return item
     if value.field.startswith("__presentation_prefix__"):
         marker = value.field.removeprefix("__presentation_prefix__")
         prefix, separator, field = marker.partition("\0")
         if not separator:
             raise ValueError("invalid stored public-id evaluator marker")
-        return prefix + getattr(items[0], field)
-    return getattr(items[0], value.field, None)
+        return prefix + getattr(item, field)
+    return getattr(item, value.field, None)
 
 
 def _compare(
@@ -539,7 +581,7 @@ def _canonical(value: object) -> object:
             "nested": None if value.value is None else _canonical(value.value),
         }
     if isinstance(value, MongoScope):
-        return {
+        result: dict[str, object] = {
             "scope": value.identifier,
             "class": f"{value.schema.cls.__module__}.{value.schema.cls.__qualname__}",
             "parent": None if value.parent is None else _canonical(value.parent),
@@ -547,6 +589,10 @@ def _canonical(value: object) -> object:
             "filter": (None if value.filter_predicate is None else _canonical(value.filter_predicate)),
             "scalar_child": value.scalar_child,
         }
+        if value.aligned:  # Only aligned views carry these keys: other identities stay unchanged.
+            result["aligned"] = [spec.field for spec in value.aligned]
+            result["aligned_index"] = value.aligned_index
+        return result
     return _canonical_literal(value)
 
 

@@ -286,7 +286,7 @@ def _errors_definition() -> Iterator[None]:
     """Make the definition loader return ``ERRORS``, as the core typed-record runtime tests do."""
 
     def load(definition_id: str) -> PropertyDefinition:
-        return ERRORS if definition_id == ERRORS_ID else load_property_definition(definition_id)
+        return {ERRORS_ID: ERRORS, ZIPS_ID: ZIPS}.get(definition_id) or load_property_definition(definition_id)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(typed_records, "load_property_definition", load)
@@ -451,11 +451,13 @@ def test_dictionary_record_round_trip(errors_plan: Any) -> None:
 # ---------------------------------------------------------------------- Mongo
 
 
-def _mongo_in_process_labels(filter_string: str) -> set[str]:
+def _mongo_in_process_labels(
+    filter_string: str, families: Any = ERRORS_FAMILIES, records: Mapping[str, Any] | None = None
+) -> set[str]:
     """Run the Mongo plan's handlers and evaluator in process (no server), as the nested-name suite does."""
-    records = _error_records()
+    records = _error_records() if records is None else records
     with Backend.sqlite() as database:
-        store = SqlStore(database, entry_families=ERRORS_FAMILIES, entry_ids=IDS)
+        store = SqlStore(database, entry_families=families, entry_ids=IDS)
         layout = next(item for item in store.entry_layout if item.family is DataRecordEntry)
         plan = stored_property_mongo_plan(
             store, DataRecordEntry, served=family_entry_type_definition(layout).served_form()
@@ -501,6 +503,127 @@ def test_mongo_dictionary_member_filters_live(mongo_test_database: Any, filter_s
         store.save(record)
     plan = store.stored_property_plan(DataRecordEntry)
     assert _labels(plan.filter_searchers(filter_string), records) == expected
+
+
+# ---------------------------------------------------------------------- generated zip (correlated list) filters
+
+ZIPS_ID = "https://schemas.httk.org/defs/v0.1/properties/test/typed_zips"
+ZIPS = PropertyDefinition.from_optimade(
+    "typed_zips",
+    {
+        "$id": ZIPS_ID,
+        "description": "Test site lists sharing one dimension.",
+        "x-optimade-type": "dictionary",
+        "x-optimade-unit": "dimensionless",
+        "type": ["object", "null"],
+        "properties": {
+            "labels": _list(_leaf("string", ["string"]), "sites", None),
+            "counts": _list(_leaf("integer", ["integer"]), "sites", None),
+            "weights": _list(_leaf("float", ["number"]), "sites", None),
+            "other": _list(_leaf("integer", ["integer"]), "other", None),
+        },
+        "required": ["labels", "counts", "other"],
+    },
+)
+
+
+@dataclass(frozen=True)
+class TypedZipsRecord(TypedRecord):
+    """A dictionary kind whose one-dimensional members share the ``sites`` dimension (zippable)."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        storage_name="test_typed_zips", identity_name="test_typed_zips"
+    )
+    __httk_typed_record__: ClassVar[TypedRecordSpec] = TypedRecordSpec(ZIPS_ID, "_httk_typed_zips")
+    __httk_property_definitions__: ClassVar[Mapping[str, PropertyDefinition]] = __httk_typed_record__.definitions()
+    __httk_stored_properties__: ClassVar[Mapping[str, StoredPropertyProjection]] = __httk_typed_record__.projections()
+
+    labels: tuple[str, ...]
+    counts: tuple[int, ...]
+    other: tuple[int, ...]
+    weights: tuple[float, ...] | None = None
+    product_of: Annotated[tuple[RunEdge, ...], StrongLink("product_of", reverse="has_product", role="subject")] = ()
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+
+ZIPS_FAMILIES = (
+    EntryFamilyDeclaration(
+        name="records",
+        family=DataRecordEntry,
+        definition_id=RECORDS_DEFINITION_ID,
+        records=(
+            EntryRecordDeclaration(name="core-data-record", record=DataRecord, definition_id=RECORDS_DEFINITION_ID),
+            EntryRecordDeclaration(name="test-typed-zips", record=TypedZipsRecord, definition_id=RECORDS_DEFINITION_ID),
+        ),
+    ),
+)
+ZIP_VALUES: dict[str, dict[str, Any]] = {
+    "z1": {"labels": ["a", "b"], "counts": [1, 2], "weights": [0.5, 1.5], "other": [7]},
+    "z2": {"labels": ["a", "b"], "counts": [2, 1], "other": []},
+    "z3": {"labels": ["a"], "counts": [1], "weights": [2.0], "other": [1, 2]},
+    "z4": {"labels": ["c", "a", "a"], "counts": [5, 3, 1], "weights": [1.0, 1.0, 1.0], "other": []},
+}
+ALL_ZIPS = {*ZIP_VALUES, "b1"}
+
+
+def _zip_records() -> dict[str, Any]:
+    records: dict[str, Any] = {
+        label: TypedZipsRecord.from_value(value, product_of=_edge(label)) for label, value in ZIP_VALUES.items()
+    }
+    records["b1"] = DataRecord.from_value(TOTAL_ENERGY, "e", -1.0)
+    return records
+
+
+_LC = "_httk_typed_zips.labels:_httk_typed_zips.counts"
+_LW = "_httk_typed_zips.labels:_httk_typed_zips.weights"
+ZIP_CASES = (
+    (f'{_LC} HAS "a":1', {"z1", "z3", "z4"}),
+    (f'{_LC} HAS "a":2', {"z2"}),  # Positions correlate: z1 holds "a" and 2, never at one position.
+    (f'{_LC} HAS ALL "a":1, "b":2', {"z1"}),
+    (f'{_LC} HAS ANY "a":2, "c":5', {"z2", "z4"}),
+    (f'{_LC} HAS ONLY "a":1, "b":2', {"z1", "z3"}),
+    (f'{_LC} HAS "a":>1', {"z2", "z4"}),
+    (f'NOT {_LC} HAS "a":1', {"z2"}),  # The unprojecting backing (b1) never matches.
+    (f'{_LW} HAS "a":1.0', {"z4"}),
+    (f'NOT {_LW} HAS "a":1.0', {"z1", "z3"}),  # z2 lacks the optional weights: unknown, neither form.
+)
+ZIP_FAILURES = (("_httk_typed_zips.labels:_httk_typed_zips.other HAS \"a\":1", "not-implemented"),)
+
+
+@pytest.fixture(scope="module", params=SQL_PARAMS)
+def zips_plan(request: pytest.FixtureRequest) -> Iterator[Any]:
+    with _sql_database(request.param) as database:
+        _populate(
+            SqlStore(database, entry_families=ZIPS_FAMILIES, entry_ids=IDS), _zip_records().values(), request.param
+        )
+        yield _plan(SqlStore(database, entry_families=ZIPS_FAMILIES, entry_ids=IDS))
+
+
+@pytest.mark.parametrize(("filter_string", "expected"), ZIP_CASES)
+def test_sql_generated_zip_filters(zips_plan: Any, filter_string: str, expected: set[str]) -> None:
+    assert expected and expected < ALL_ZIPS
+    assert _labels(zips_plan.filter_searchers(filter_string), _zip_records()) == expected
+
+
+@pytest.mark.parametrize(("filter_string", "category"), ZIP_FAILURES)
+def test_sql_generated_zip_errors(zips_plan: Any, filter_string: str, category: str) -> None:
+    with pytest.raises(FilterTranslationError) as excinfo:
+        zips_plan.filter_searchers(filter_string)
+    assert excinfo.value.category == category
+
+
+@pytest.mark.parametrize(("filter_string", "expected"), ZIP_CASES)
+def test_mongo_generated_zip_filters_in_process(filter_string: str, expected: set[str]) -> None:
+    assert _mongo_in_process_labels(filter_string, ZIPS_FAMILIES, _zip_records()) == expected
+
+
+@pytest.mark.parametrize(("filter_string", "category"), ZIP_FAILURES)
+def test_mongo_generated_zip_errors_in_process(filter_string: str, category: str) -> None:
+    with pytest.raises(FilterTranslationError) as excinfo:
+        _mongo_in_process_labels(filter_string, ZIPS_FAMILIES, _zip_records())
+    assert excinfo.value.category == category
 
 
 # ---------------------------------------------------------------------- additive upgrade

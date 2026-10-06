@@ -26,6 +26,7 @@ from httk.core.optimade import FilterAst, parse_optimade_filter
 from httk.core.storage import (
     QueryLiteralError,
     StoredPropertyProjection,
+    ZipLiteral,
     stored_property_projections,
 )
 
@@ -143,6 +144,31 @@ class _MongoQueryContext:
 
     def count(self, scope: MongoScope) -> MongoValue:
         return MongoValue("count", scope=_scope(scope))
+
+    def aligned(self, *scopes: MongoScope) -> tuple[MongoScope, ...]:
+        targets = tuple(_scope(scope) for scope in scopes)
+        if len(targets) < 2:
+            raise MongoStoredPropertyConfigurationError("aligned needs at least two sibling list scopes")
+        parent = targets[0].parent
+        for target in targets:
+            if (
+                parent is None
+                or target.parent != parent
+                or target.relationship is None
+                or target.relationship.role != "child"
+                or target.filter_predicate is not None
+                or target.aligned
+            ):
+                raise MongoStoredPropertyConfigurationError(
+                    "aligned scopes must be unfiltered list children of one parent scope"
+                )
+        group = tuple(cast(FieldSpec, target.relationship) for target in targets)
+        identifier = self._next_scope  # One fresh identifier binds the whole group.
+        self._next_scope += 1
+        return tuple(
+            replace(target, identifier=identifier, aligned=group, aligned_index=index)
+            for index, target in enumerate(targets)
+        )
 
     def distinct_count(self, scope: MongoScope, value: MongoValue) -> MongoValue:
         target, selected = _scope(scope), _value(value)
@@ -718,7 +744,7 @@ class MongoStoredPropertyPlan:
                 handlers[name] = null
                 handlers.update((key, null) for key in self._member_keys[name])
                 continue
-            if projection.query is not None:
+            if projection.query is not None or projection.zip_query is not None:
                 handlers[name] = _projection_handlers(projection, context)
             handlers.update(_member_handlers(name, projection, context))
         return handlers
@@ -903,22 +929,38 @@ def stored_property_mongo_plan(
 def _projection_handlers(
     projection: StoredPropertyProjection, context: _MongoQueryContext
 ) -> Mapping[str, Callable[..., Any]]:
-    query = projection.query
-    assert query is not None
+    query, zip_query = projection.query, projection.zip_query
 
-    def invoke(operator: str, value: object) -> MongoPredicate:
-        result = query(cast(Any, context), operator, value)
+    def checked(result: object) -> MongoPredicate:
         if not isinstance(result, MongoPredicate):
             raise MongoStoredPropertyConfigurationError("stored-property query callback returned a foreign expression")
         return result
 
-    return {
-        "comparison": lambda _e, op, value, _v: invoke(op, value),
-        "stringmatching": lambda _e, value, op, _v: invoke(op, value),
-        "HAS": lambda _e, _o, values, _v, op: invoke(op, tuple(values)),
-        "length": lambda _e, op, value, _v: invoke(f"LENGTH {op}", value),
-        "unknown": lambda _e, _v, op: invoke(op, None),
-    }
+    handlers: dict[str, Callable[..., Any]] = {}
+    if query is not None:
+
+        def invoke(operator: str, value: object) -> MongoPredicate:
+            return checked(query(cast(Any, context), operator, value))
+
+        handlers = {
+            "comparison": lambda _e, op, value, _v: invoke(op, value),
+            "stringmatching": lambda _e, value, op, _v: invoke(op, value),
+            "HAS": lambda _e, _o, values, _v, op: invoke(op, tuple(values)),
+            "length": lambda _e, op, value, _v: invoke(f"LENGTH {op}", value),
+            "unknown": lambda _e, _v, op: invoke(op, None),
+        }
+    if zip_query is not None:
+
+        def invoke_zip(owner: str, literal: ZipLiteral, _variable: object, has_type: str) -> MongoPredicate:
+            result = zip_query(cast(Any, context), has_type, literal)
+            if result is None:
+                raise FilterTranslationError(
+                    "Filtering on " + owner + " with correlated (zip) values is not implemented.", "not-implemented"
+                )
+            return checked(result)
+
+        handlers["HAS_ZIP"] = invoke_zip
+    return handlers
 
 
 def _member_handlers(
@@ -927,7 +969,7 @@ def _member_handlers(
     """Yield the dotted-key handlers of every queryable (nested) member of ``projection``."""
     for member_name, member in projection.members.items():
         key = f"{name}.{member_name}"
-        if member.query is not None:
+        if member.query is not None or member.zip_query is not None:
             yield key, _projection_handlers(member, context)
         yield from _member_handlers(key, member, context)
 
@@ -938,6 +980,7 @@ def _null_handlers(context: _MongoQueryContext) -> Mapping[str, Callable[..., An
         "comparison": lambda *_: unknown(),
         "stringmatching": lambda *_: unknown(),
         "HAS": lambda *_: unknown(),
+        "HAS_ZIP": lambda *_: unknown(),
         "length": lambda *_: unknown(),
         "unknown": lambda _e, _v, op: context.always_true() if op == "IS_UNKNOWN" else context.always_false(),
     }
@@ -1040,22 +1083,15 @@ def _property_fulltypes(
 
 
 def _definition_fulltype(definition: PropertyDefinition) -> str:
-    document = definition.as_optimade()
-    value = document["x-optimade-type"]
-    return (
-        "list of " + _fulltype_from_document(cast(Mapping[str, Any], document["items"]))
-        if value == "list"
-        else cast(str, value)
-    )
+    return _fulltype_from_document(definition.as_optimade())
 
 
 def _fulltype_from_document(document: Mapping[str, Any]) -> str:
     value = document["x-optimade-type"]
-    return (
-        "list of " + _fulltype_from_document(cast(Mapping[str, Any], document["items"]))
-        if value == "list"
-        else cast(str, value)
-    )
+    if value == "list":
+        return "list of " + _fulltype_from_document(cast(Mapping[str, Any], document["items"]))
+    # The translator's (and SQL's) spelling of OPTIMADE ``dictionary``.
+    return "dict" if value == "dictionary" else cast(str, value)
 
 
 def _literal_for(spec: FieldSpec, value: object) -> object:

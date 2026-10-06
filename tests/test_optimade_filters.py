@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from httk.core.optimade import parse_optimade_filter
 from httk.core.report import collect_reports
+from httk.core.storage import ZipLiteral
 
 from httk.store.query.optimade_filters import (
     FilterTranslationError,
@@ -444,10 +445,19 @@ def test_has_all_with_operator_not_implemented():
     assert excinfo.value.category == "not-implemented"
 
 
-def test_has_with_operator_is_internal():
+@pytest.mark.parametrize("filter_string", ("elements HAS < 3", 'elements HAS > "a"', "species.nattached HAS > 1"))
+def test_has_with_operator_not_implemented(filter_string):
     with pytest.raises(FilterTranslationError) as excinfo:
-        translate("elements HAS < 3")
-    assert excinfo.value.category == "internal"
+        translate(filter_string)
+    assert excinfo.value.category == "not-implemented"
+
+
+@pytest.mark.parametrize("filter_string", ('elements = "Si"', 'elements CONTAINS "Si"', '"Si" < elements'))
+def test_scalar_literal_on_list_is_type_mismatch_without_a_handler(filter_string):
+    # make_handlers serves elements with HAS alone: the literal shape is checked first.
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate(filter_string)
+    assert excinfo.value.category == "type-mismatch"
 
 
 def test_boolean_with_ordering_operator_not_implemented():
@@ -662,8 +672,17 @@ NESTED_FULLTYPES = {
     "_httk_e.weighting": "string",
     "_httk_e.labels": "list of string",
     "_httk_e.grid": "list of list of float",
+    "_httk_e.counts": "list of integer",
+    "_httk_e.flags": "list of boolean",
+    "_httk_e.when": "list of timestamp",
+    "_httk_s": "list of dict",
+    "_httk_s.names": "list of string",
+    "_httk_s.weights": "list of float",
+    "elements": "list of string",
+    "elements_ratios": "list of float",
     "nelements": "integer",
 }
+ZIP_OWNERS = ("_httk_e", "_httk_s", "elements")
 
 
 def nested_handlers() -> dict[str, Any]:
@@ -681,6 +700,8 @@ def nested_handlers() -> dict[str, Any]:
 
     recorded = {name: {family: recorder(family) for family in families} for name, families in table.items()}
     recorded["_httk_relationships.k.id"] = {"HAS": recorder("HAS")}
+    for owner in ZIP_OWNERS:
+        recorded[owner]["HAS_ZIP"] = recorder("HAS_ZIP")
     return recorded
 
 
@@ -782,6 +803,124 @@ def test_handler_only_dotted_key_serves_has_alone():
         with pytest.raises(FilterTranslationError) as excinfo:
             translate_nested(filter_string)
         assert excinfo.value.category == "not-implemented"
+
+
+# ---------------------------------------------------------------------- correlated (zip) filters
+
+
+@pytest.mark.parametrize(
+    ("filter_string", "expected"),
+    (
+        (
+            '_httk_e.labels:_httk_e.counts HAS "a":1',
+            ("_httk_e", ZipLiteral(("labels", "counts"), (("=", "="),), (("a", 1),)), "HAS_ZIP_ALL"),
+        ),
+        (
+            '_httk_s.weights:_httk_s.names HAS ANY >0.5:"Si", <=1:!="O"',
+            (
+                "_httk_s",
+                ZipLiteral(("weights", "names"), ((">", "="), ("<=", "!=")), ((0.5, "Si"), (1.0, "O"))),
+                "HAS_ZIP_ANY",
+            ),
+        ),
+        (
+            'elements:elements_ratios HAS "Si":0.5',
+            ("elements", ZipLiteral(("elements", "elements_ratios"), (("=", "="),), (("Si", 0.5),)), "HAS_ZIP_ALL"),
+        ),
+        (
+            # Members of a dictionary mixed with a top-level list: the first name owns.
+            'elements:_httk_e.counts HAS ONLY "Si":2, "O":3',
+            (
+                "elements",
+                ZipLiteral(("elements", "_httk_e.counts"), (("=", "="), ("=", "=")), (("Si", 2), ("O", 3))),
+                "HAS_ZIP_ONLY",
+            ),
+        ),
+        (
+            '_httk_e.flags:_httk_e.when:_httk_e.counts HAS ALL TRUE:"2020-01-01T00:00:00Z":>=2.0',
+            (
+                "_httk_e",
+                ZipLiteral(
+                    ("flags", "when", "counts"),
+                    (("=", "=", ">="),),
+                    ((True, "2020-01-01T00:00:00Z", 2),),
+                ),
+                "HAS_ZIP_ALL",
+            ),
+        ),
+    ),
+)
+def test_zip_routes_to_the_owner_with_formatted_slot_values(filter_string, expected):
+    tree = translate_nested(filter_string).tree
+    assert tree == ("HAS_ZIP", *expected)
+    assert all(isinstance(v, type(e)) for v, e in zip(tree[2].values[0], expected[1].values[0], strict=True))
+
+
+def test_zip_float_slot_keeps_the_number_lexeme():
+    literal = translate_nested('elements:elements_ratios HAS "Si":0.10').tree[2]
+    assert str(literal.values[0][1]) == "0.10"
+
+
+def test_not_composes_over_a_zip():
+    assert translate_nested('NOT elements:elements_ratios HAS "Si":0.5').tree == (
+        "NOT",
+        (
+            "HAS_ZIP",
+            "elements",
+            ZipLiteral(("elements", "elements_ratios"), (("=", "="),), (("Si", 0.5),)),
+            "HAS_ZIP_ALL",
+        ),
+    )
+
+
+def test_zip_with_a_foreign_prefix_unknown_matches_nothing_and_warns():
+    with collect_reports() as collection:
+        assert translate_nested('elements:_other_db_x HAS "Si":1').tree == FALSE_TREE
+        assert translate_nested('NOT _other_db_x.y:elements HAS 1:"Si"').tree == ("NOT", FALSE_TREE)
+    assert len(collection.records) == 2
+
+
+@pytest.mark.parametrize(
+    ("filter_string", "category"),
+    (
+        ('_httk_e.labels:_httk_e.nope HAS "a":1', "unrecognized-property"),
+        ('elements:_httk_nope HAS "a":1', "unrecognized-property"),
+        ('_httk_e.labels:_httk_e.grid HAS "a":1', "type-mismatch"),
+        ('elements:nelements HAS "a":1', "type-mismatch"),
+        ('elements:_httk_e.counts HAS "a":"b"', "type-mismatch"),
+        ("elements:elements_ratios HAS nelements:0.5", "not-implemented"),
+        ('_httk_e.labels:_httk_e.flags HAS "a":>TRUE', "not-implemented"),
+        ('elements:references.id HAS "a":"b"', "not-implemented"),
+        ('references.id:elements HAS "a":"b"', "not-implemented"),
+    ),
+)
+def test_zip_errors(filter_string, category):
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate_nested(filter_string)
+    assert excinfo.value.category == category
+
+
+@pytest.mark.parametrize(
+    "filter_string",
+    ('elements:_httk_relationships.k.id HAS "Si":"a"', '_httk_relationships.k.id:elements HAS "a":"Si"'),
+)
+def test_zip_over_a_handler_only_key_not_implemented(filter_string):
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate_nested(filter_string)
+    assert excinfo.value.category == "not-implemented"
+    assert "_httk_relationships.k.id" in str(excinfo.value)
+
+
+def test_zip_without_owner_handler_not_implemented():
+    handlers = nested_handlers()
+    del handlers["_httk_e"]["HAS_ZIP"]
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate_nested('_httk_e.labels:_httk_e.counts HAS "a":1', handlers=handlers)
+    assert excinfo.value.category == "not-implemented"
+    assert "_httk_e" in str(excinfo.value)
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate_nested('_httk_e.counts:elements HAS 1:"a"')  # the first name owns; it has no table
+    assert excinfo.value.category == "not-implemented"
 
 
 # ---------------------------------------------------------------------- filter_searcher sugar

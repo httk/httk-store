@@ -46,6 +46,11 @@ only in ``handlers`` (the ``_httk_relationships.<key>.id`` extension) serves
 (``nelements.foo``) is an ``"unrecognized-property"`` error; an unknown head
 follows the ordinary unknown-property rules. Relationship paths deeper than
 one segment and relationship ``LENGTH`` remain not implemented.
+
+**Correlated (zip) filters** (``a:b HAS ALL v1:w1, v2:w2``) compare element
+positions of several one-dimensional list properties together. They are
+supported when the owning property's handler table carries a ``'HAS_ZIP'``
+entry (see :data:`HandlerTable`), and are otherwise not implemented.
 """
 
 import datetime
@@ -57,6 +62,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Self, cast
 
 from httk.core.optimade import FilterAst, parse_optimade_filter
+from httk.core.storage import ZipLiteral
 
 from httk.store.query import ID_FIELD, BackendSearcher, Searcher, SearchExpression, SearchVariable, Store
 from httk.store.validation import _is_rfc3339_datetime
@@ -112,10 +118,16 @@ type HandlerTable = Mapping[str, Mapping[str, Callable[..., Any]]]
 The inner mapping's keys name the filter-operation families: ``'comparison'``
 (``=``, ``!=``, ``<``, ``<=``, ``>``, ``>=``), ``'stringmatching'``
 (``CONTAINS``/``STARTS``/``ENDS``), ``'HAS'`` (the set operations),
-``'length'`` (``LENGTH``), and ``'unknown'`` (``IS KNOWN``/``IS UNKNOWN``).
+``'length'`` (``LENGTH``), ``'unknown'`` (``IS KNOWN``/``IS UNKNOWN``), and
+``'HAS_ZIP'`` (correlated ``a:b HAS ...`` filters).
 A ``'HAS'`` handler is called as ``handler(property, ops, values,
 search_variable, has_type)`` and returns a plain
-:class:`~httk.store.query.SearchExpression`. The caller applies ``NOT`` as
+:class:`~httk.store.query.SearchExpression`. A ``'HAS_ZIP'`` handler is called
+as ``handler(owner, literal, search_variable, has_type)`` with a
+``httk.core.storage.ZipLiteral`` and ``has_type`` one of
+``"HAS_ZIP_ALL"``, ``"HAS_ZIP_ANY"``, ``"HAS_ZIP_ONLY"``; it raises
+:class:`FilterTranslationError` (``"not-implemented"``) for combinations it
+does not support. The caller applies ``NOT`` as
 ``~``; handlers do not receive negation state or report post-filter placement.
 Dotted ``'<type>.id'`` entries provide relationship-id filtering (see
 :func:`~httk.store.query.optimade_filters.relationship_id_handler`).
@@ -577,6 +589,9 @@ _UNKNOWN_FAMILY_HANDLERS: Mapping[str, tuple[Callable[..., Any], str]] = Mapping
 )
 """Per operator family, the matches-nothing handler and value fulltype for an unknown property."""
 
+_ZIP_ELEMENT_FULLTYPES = frozenset({'string', 'integer', 'float', 'boolean', 'timestamp'})
+"""Element fulltypes a correlated (zip) filter can compare."""
+
 
 def translate_filter_ast(
     node: FilterAst,
@@ -628,6 +643,29 @@ def translate_filter_ast(
     unknown member is an ``"unrecognized-property"`` error naming the full
     path; an unknown first segment follows the ordinary unknown-property rules.
 
+    **Correlated (zip) filters:** ``a:b HAS v1:w1`` (``HAS_ZIP_ALL``), ``HAS
+    ALL``, ``HAS ANY`` and ``HAS ONLY`` correlate element positions of the
+    named properties, each of which must be a one-dimensional list of
+    strings, integers, floats, booleans or timestamps (otherwise a type
+    mismatch). ``ALL`` requires every value tuple to match at some position
+    (positions may differ between tuples), ``ANY`` some value tuple, and
+    ``ONLY`` every position to match some value tuple. Each slot carries its
+    own operator (``=``, ``!=``, ``<``, ``<=``, ``>``, ``>=``; booleans only
+    ``=`` and ``!=``) and its constant is converted with the property's
+    element fulltype; property-valued slots are not implemented. When every
+    name is a member ``H.<path>`` of one served ``dict`` or ``list of dict``
+    property ``H``, the owner is ``H`` and the paths are relative to it;
+    otherwise the owner is the first name and the paths are all names. The
+    owner's ``'HAS_ZIP'`` handler receives a ``httk.core.storage.ZipLiteral``;
+    without one the filter is not implemented. Any unknown foreign-prefix
+    name makes the whole filter match nothing; relationship names are not
+    implemented. ``HAS <op> value`` without ``ALL``/``ANY``/``ONLY`` is not
+    implemented either.
+
+    A comparison or string-matching constant is checked against the
+    property's fulltype before the handler lookup, so a scalar constant
+    against a list property is a type mismatch regardless of the handlers.
+
     :param node: The parsed OPTIMADE filter AST node.
     :param search_variable: The backend search variable receiving the expression.
     :param property_fulltypes: Fulltypes keyed by recognized property name.
@@ -672,8 +710,12 @@ def translate_filter_ast(
         )
         return recurse(rewritten)
 
-    def resolve(left: tuple[Any, ...], family: str) -> tuple[str, str, Callable[..., Any]]:
-        """Resolve a non-relationship identifier to ``(key, fulltype, handler)`` for ``family``."""
+    def resolve_type(left: tuple[Any, ...], family: str) -> tuple[str, str, Callable[..., Any] | None]:
+        """Resolve a non-relationship identifier to ``(key, fulltype, unknown_handler)``.
+
+        ``unknown_handler`` is the matches-nothing handler of ``family`` for an
+        unknown (foreign-prefix) property, otherwise None.
+        """
         head, key = left[1], '.'.join(left[1:])
         if key in property_fulltypes:
             fulltype = property_fulltypes[key]
@@ -689,10 +731,29 @@ def translate_filter_ast(
             _warn_unknown_property(key)
             unknown_handler, unknown_fulltype = _UNKNOWN_FAMILY_HANDLERS[family]
             return key, unknown_fulltype, unknown_handler
+        return key, fulltype, None
+
+    def lookup(key: str, family: str) -> Callable[..., Any]:
         handler = handlers.get(key, {}).get(family)
         if handler is None:
             raise FilterTranslationError("Filtering on property " + key + " not implemented.", "not-implemented")
-        return key, fulltype, handler
+        return handler
+
+    def resolve(left: tuple[Any, ...], family: str) -> tuple[str, str, Callable[..., Any]]:
+        """Resolve a non-relationship identifier to ``(key, fulltype, handler)`` for ``family``."""
+        key, fulltype, handler = resolve_type(left, family)
+        return key, fulltype, handler or lookup(key, family)
+
+    def resolve_value(left: tuple[Any, ...], family: str, right: Any) -> tuple[str, Any, Callable[..., Any]]:
+        """Resolve like :func:`resolve`, but check and convert ``right`` before the handler lookup.
+
+        Checking the literal first makes a shape mismatch (a scalar constant
+        against a list property) a type mismatch whether or not the handler
+        table serves the family.
+        """
+        key, fulltype, handler = resolve_type(left, family)
+        value = format_value(fulltype, right)
+        return key, value, handler or lookup(key, family)
 
     search_expr: SearchExpression | None = None
 
@@ -773,8 +834,8 @@ def translate_filter_ast(
             assert left[0] == 'Identifier'
             if len(left) > 2 and left[1] in relationship_targets:
                 return relationship_semi_join(left, (op, ('Identifier',) + tuple(left[2:]), right))
-            key, fulltype, comparison_handler = resolve(left, 'comparison')
-            search_expr = comparison_handler(key, op, format_value(fulltype, right), search_variable)
+            key, value, comparison_handler = resolve_value(left, 'comparison', right)
+            search_expr = comparison_handler(key, op, value, search_variable)
     elif node[0] in ['ENDS', 'STARTS', 'CONTAINS']:
         left = node[1]
         right = node[2]
@@ -785,8 +846,8 @@ def translate_filter_ast(
             raise FilterTranslationError(
                 "Identifier vs. Identifier string comparisons not implemented.", "not-implemented"
             )
-        key, fulltype, stringmatching = resolve(left, 'stringmatching')
-        search_expr = stringmatching(key, format_value(fulltype, right), node[0], search_variable)
+        key, value, stringmatching = resolve_value(left, 'stringmatching', right)
+        search_expr = stringmatching(key, value, node[0], search_variable)
     elif node[0] in ['IS_UNKNOWN', 'IS_KNOWN']:
         left = node[1]
         assert left[0] == 'Identifier'
@@ -794,6 +855,66 @@ def translate_filter_ast(
             return relationship_semi_join(left, (node[0], ('Identifier',) + tuple(left[2:])))
         key, _fulltype, unknown_handler = resolve(left, 'unknown')
         search_expr = unknown_handler(key, search_variable, node[0])
+    elif node[0] == 'HAS':
+        # ``x HAS <op> value``; the parser leaves its constant unconverted.
+        raise FilterTranslationError("HAS with an operator is not implemented.", "not-implemented")
+    elif node[0] in ['HAS_ZIP_ALL', 'HAS_ZIP_ANY', 'HAS_ZIP_ONLY']:
+        zip_ops, lefts, zip_values = node[1], node[2], node[3]
+        resolved = []
+        for left in lefts:
+            assert left[0] == 'Identifier'
+            if left[1] in relationship_targets:
+                raise FilterTranslationError(
+                    "Correlated (zip) filtering on relationship " + ".".join(left[1:]) + " not implemented.",
+                    "not-implemented",
+                )
+            key, fulltype, unknown_has = resolve_type(left, 'HAS')
+            if unknown_has is None and key not in property_fulltypes:  # A handler-only dotted key.
+                raise FilterTranslationError(
+                    "Correlated (zip) filters on " + key + " are not implemented.", "not-implemented"
+                )
+            resolved.append((key, fulltype, unknown_has))
+        for key, _fulltype, unknown_has in resolved:
+            if unknown_has is not None:
+                return unknown_has(key, zip_ops, zip_values, search_variable, node[0])
+        element_fulltypes = []
+        for key, fulltype, _unknown in resolved:
+            element = fulltype.removeprefix('list of ')
+            if element == fulltype or element not in _ZIP_ELEMENT_FULLTYPES:
+                raise FilterTranslationError(
+                    "Type mismatch in filter, correlated filters need one-dimensional list properties: " + key,
+                    "type-mismatch",
+                )
+            element_fulltypes.append(element)
+        literal_values = []
+        for slot_ops, value_tuple in zip(zip_ops, zip_values, strict=True):
+            row = []
+            for op, element, value in zip(slot_ops, element_fulltypes, value_tuple, strict=True):
+                if value[0] == 'Identifier':
+                    raise FilterTranslationError(
+                        "Correlated (zip) comparisons with property values not implemented.", "not-implemented"
+                    )
+                if op not in invert_op or (element == 'boolean' and op not in ('=', '!=')):
+                    raise FilterTranslationError(
+                        "Operator " + str(op) + " is not implemented for " + element + " values in correlated filters.",
+                        "not-implemented",
+                    )
+                row.append(format_value(element, value))
+            literal_values.append(tuple(row))
+        head = lefts[0][1]
+        if all(len(left) > 2 and left[1] == head for left in lefts) and property_fulltypes.get(head) in (
+            'dict',
+            'list of dict',
+        ):
+            owner, paths = head, tuple('.'.join(left[2:]) for left in lefts)
+        else:
+            owner, paths = resolved[0][0], tuple(key for key, _fulltype, _unknown in resolved)
+        zip_handler = handlers.get(owner, {}).get('HAS_ZIP')
+        if zip_handler is None:
+            raise FilterTranslationError(
+                "Filtering on " + owner + " with correlated (zip) values is not implemented.", "not-implemented"
+            )
+        search_expr = zip_handler(owner, ZipLiteral(paths, zip_ops, tuple(literal_values)), search_variable, node[0])
     else:
         raise FilterTranslationError("Unexpected translation error at: " + str(node[0]), "internal")
     assert search_expr is not None

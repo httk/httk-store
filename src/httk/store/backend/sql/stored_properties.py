@@ -36,6 +36,7 @@ from httk.core.provenance import RUNS_DEFINITION_ID
 from httk.core.storage import (
     QueryLiteralError,
     StoredPropertyProjection,
+    ZipLiteral,
     stored_property_projections,
 )
 from sqlalchemy.sql.elements import Null
@@ -192,6 +193,9 @@ class _SqlScope:
     singleton: bool = True
     correlation_depth: int = 0
     condition_depth: int = 0
+    # The (parent scope, child field) an unfiltered child scope was created
+    # from, so ``aligned`` can rebuild it with fresh aliases; ``None`` otherwise.
+    origin: "tuple[_SqlScope, FieldSpec] | None" = dataclasses.field(default=None, compare=False, repr=False)
 
     def field(self, name: str) -> _SqlValue:
         if name == STORE_TIMESTAMP_COLUMN:
@@ -389,6 +393,7 @@ class _SqlQueryContext:
         predicate = _predicate(predicate)
         return dataclasses.replace(
             target,
+            origin=None,
             conditions=(*target.conditions, predicate.clause),
             correlation_depth=max(target.correlation_depth, predicate.correlation_depth),
             condition_depth=max(target.condition_depth, predicate.correlation_depth),
@@ -406,6 +411,46 @@ class _SqlQueryContext:
         return _SqlValue(
             statement.scalar_subquery(),
             correlation_depth=max(1, target.correlation_depth, target.condition_depth),
+        )
+
+    def aligned(self, *scopes: _SqlScope) -> tuple[_SqlScope, ...]:
+        """Join sibling child scopes on their ``<field>_index`` element positions.
+
+        Every scope must be an unfiltered child scope that ``scope()`` created
+        from one and the same parent scope object.  Each call rebuilds the
+        scopes with fresh aliases; every returned view shares all of their
+        aliases and conditions plus the index equalities, so a predicate or
+        count over any view ranges over the aligned positions only.
+        """
+        if len(scopes) < 2:
+            raise StoredPropertySqlConfigurationError("aligned needs at least two sibling child scopes")
+        origins: list[tuple[_SqlScope, FieldSpec]] = []
+        for scope in scopes:
+            origin = _scope(scope).origin
+            if origin is None:
+                raise StoredPropertySqlConfigurationError("aligned needs unfiltered child scopes created by scope()")
+            origins.append(origin)
+        parent = origins[0][0]
+        if any(origin_parent is not parent for origin_parent, _spec in origins):
+            raise StoredPropertySqlConfigurationError("aligned needs child scopes of one and the same parent scope")
+        fresh = [self._related_scope(parent, spec) for _parent, spec in origins]
+        # The element link alias (holding the index) follows the parent's aliases in both child forms.
+        positions = [
+            item.froms[len(parent.froms)].c[f"{spec.field}_index"]
+            for item, (_parent, spec) in zip(fresh, origins, strict=True)
+        ]
+        froms: list[sqlalchemy.FromClause] = []
+        conditions: list[sqlalchemy.ColumnElement[bool]] = []
+        for item in fresh:
+            froms.extend(alias for alias in item.froms if not any(alias is seen for seen in froms))
+            conditions.extend(clause for clause in item.conditions if not any(clause is seen for seen in conditions))
+        conditions.extend(_bool_clause(position == positions[0]) for position in positions[1:])
+        depth = max(item.correlation_depth for item in fresh)
+        return tuple(
+            dataclasses.replace(
+                item, froms=tuple(froms), conditions=tuple(conditions), correlation_depth=depth, origin=None
+            )
+            for item in fresh
         )
 
     def distinct_count(self, scope: _SqlScope, value: _SqlValue) -> _SqlValue:
@@ -554,6 +599,7 @@ class _SqlQueryContext:
                 (*parent.conditions, condition, target_condition),
                 singleton=False,
                 correlation_depth=depth,
+                origin=(parent, spec),
             )
         return _SqlScope(
             self,
@@ -565,6 +611,7 @@ class _SqlQueryContext:
             scalar_child=spec,
             singleton=False,
             correlation_depth=depth,
+            origin=(parent, spec),
         )
 
     def _child_scalar_value(self, scope: _SqlScope, spec: FieldSpec) -> _SqlValue:
@@ -1048,7 +1095,7 @@ class StoredPropertySqlPlan:
                 handlers[name] = null
                 handlers.update((key, null) for key in self._member_keys[name])
                 continue
-            if projection.query is not None:
+            if projection.query is not None or projection.zip_query is not None:
                 handlers[name] = _projection_handlers(projection, context)
             handlers.update(_member_handlers(name, projection, context))
         relationship_handlers, relationship_targets = self._relationship_handlers(
@@ -1335,21 +1382,40 @@ def _projection_handlers(
     projection: StoredPropertyProjection, context: _SqlQueryContext
 ) -> Mapping[str, Callable[..., Any]]:
     query = projection.query
-    assert query is not None
+    zip_query = projection.zip_query
+    handlers: dict[str, Callable[..., Any]] = {}
 
-    def invoke(operator: str, literal: object) -> _SqlPredicate:
-        result = query(cast(Any, context), operator, literal)
+    def checked(result: object) -> _SqlPredicate:
         if not isinstance(result, _SqlPredicate):
             raise StoredPropertySqlConfigurationError("stored-property query callback returned a foreign expression")
         return result
 
-    return {
-        "comparison": lambda entry, operator, value, _variable: invoke(operator, value),
-        "stringmatching": lambda entry, value, operator, _variable: invoke(operator, value),
-        "HAS": lambda entry, _ops, values, _variable, operator: invoke(operator, tuple(values)),
-        "length": lambda entry, operator, value, _variable: invoke(f"LENGTH {operator}", value),
-        "unknown": lambda entry, _variable, operator: invoke(operator, None),
-    }
+    if query is not None:
+
+        def invoke(operator: str, literal: object) -> _SqlPredicate:
+            return checked(query(cast(Any, context), operator, literal))
+
+        handlers.update(
+            {
+                "comparison": lambda entry, operator, value, _variable: invoke(operator, value),
+                "stringmatching": lambda entry, value, operator, _variable: invoke(operator, value),
+                "HAS": lambda entry, _ops, values, _variable, operator: invoke(operator, tuple(values)),
+                "length": lambda entry, operator, value, _variable: invoke(f"LENGTH {operator}", value),
+                "unknown": lambda entry, _variable, operator: invoke(operator, None),
+            }
+        )
+    if zip_query is not None:
+
+        def invoke_zip(owner: str, literal: ZipLiteral, _variable: object, has_type: str) -> _SqlPredicate:
+            result = zip_query(cast(Any, context), has_type, literal)
+            if result is None:
+                raise FilterTranslationError(
+                    "Filtering on " + owner + " with correlated (zip) values is not implemented.", "not-implemented"
+                )
+            return checked(result)
+
+        handlers["HAS_ZIP"] = invoke_zip
+    return handlers
 
 
 def _member_handlers(
@@ -1358,7 +1424,7 @@ def _member_handlers(
     """Yield the dotted-key handlers of every queryable (nested) member of ``projection``."""
     for member_name, member in projection.members.items():
         key = f"{name}.{member_name}"
-        if member.query is not None:
+        if member.query is not None or member.zip_query is not None:
             yield key, _projection_handlers(member, context)
         yield from _member_handlers(key, member, context)
 
@@ -1368,6 +1434,7 @@ def _null_handlers(context: _SqlQueryContext) -> Mapping[str, Callable[..., Any]
         "comparison": lambda entry, operator, value, variable: _sql_unknown(),
         "stringmatching": lambda entry, value, operator, variable: _sql_unknown(),
         "HAS": lambda entry, ops, values, variable, operator: _sql_unknown(),
+        "HAS_ZIP": lambda owner, literal, variable, has_type: _sql_unknown(),
         "length": lambda entry, operator, value, variable: _sql_unknown(),
         "unknown": lambda entry, variable, operator: (
             context.always_true() if operator == "IS_UNKNOWN" else context.always_false()

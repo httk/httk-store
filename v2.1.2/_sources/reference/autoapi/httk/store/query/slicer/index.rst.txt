@@ -1,0 +1,149 @@
+httk.store.query.slicer
+=======================
+
+.. py:module:: httk.store.query.slicer
+
+.. autoapi-nested-parse::
+
+   A pandas-style ``[]`` indexing layer over the store search DSL.
+
+   The :class:`Slicer` compiles bracket indexing into the ordinary
+   :class:`~httk.store.query.protocols.Searcher` surface — ``variable``, ``add``,
+   ``output``, ``results`` and ``count`` — and adds no query capability of its own.
+   It is a thin convenience: ``note = store.searcher().slicer(Note)`` gives an
+   object where ``note['title']`` iterates one field, ``note[note['value'] > 10]``
+   iterates the matching records, and ``len(note[mask])`` counts them.
+   ``note[mask]['title']`` iterates that field over the matching records, and
+   ``note[mask][['title', 'value']]`` iterates named rows (``.title``/``.value``)
+   projected through the searcher's native ``results()``.
+
+   Nothing here touches a searcher until it is iterated or measured. A slicer
+   holds only a zero-argument factory that mints a *fresh* searcher and the target
+   record class; a column holds a field path; a mask holds a small immutable op
+   tree (the private ``_Cmp``/``_And``/``_Or``/``_Not`` nodes). Backend search
+   expressions are bound to one searcher's variable and
+   :meth:`~httk.store.query.protocols.Searcher.add` mutates that searcher, so
+   every terminal operation runs against its own fresh
+   searcher and compiles the op tree against that searcher's variable. Two slicer
+   operations therefore never share filter state.
+
+   No sorting is offered: some conforming stores (the federation) reject it.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.query.slicer.Slicer
+   httk.store.query.slicer.SlicerColumn
+   httk.store.query.slicer.SlicerMask
+   httk.store.query.slicer.SlicerSelection
+   httk.store.query.slicer.SlicerProjection
+
+
+Module Contents
+---------------
+
+.. py:class:: Slicer(make_searcher, target)
+
+   A pandas-style indexing view over one record class in a store.
+
+   Index it with a field-name string to iterate that field's values, or with a
+   boolean :class:`SlicerMask` to iterate the matching records. Iterating the
+   slicer itself yields every record; ``len()`` counts them. Each operation
+   runs against its own fresh searcher, so operations never share filter state.
+
+   :param make_searcher: A zero-argument callable returning a fresh searcher.
+   :param target: The stored record class this slicer indexes.
+
+
+.. py:class:: SlicerColumn(slicer, path, ast = None)
+
+   One field of a :class:`Slicer`, iterable and comparable.
+
+   Iterating yields the field's decoded scalar values, across every record of
+   the slicer or, when reached through a :class:`SlicerSelection`, across
+   only its matching records. Comparisons and the
+   ``isin``/``isna``/``notna``/``between`` helpers, plus the ``.str`` literal
+   matchers, build a :class:`SlicerMask` for use as a slicer index key.
+
+   :param slicer: The owning slicer.
+   :param path: The attribute names from the query variable to this field.
+   :param ast: The owning selection's op tree to filter by, or ``None`` for
+       every record of the slicer.
+
+
+   .. py:method:: isin(values)
+
+      Match records whose field value is one of ``values``.
+
+      :param values: The membership set.
+      :return: A mask matching records in the set.
+
+
+
+   .. py:method:: isna()
+
+      Match records whose field value is null.
+
+      :return: A mask matching null field values.
+
+
+
+   .. py:method:: notna()
+
+      Match records whose field value is not null.
+
+      :return: A mask matching non-null field values.
+
+
+
+   .. py:method:: between(low, high)
+
+      Match records whose field value lies in ``[low, high]`` inclusive.
+
+      :param low: The inclusive lower bound.
+      :param high: The inclusive upper bound.
+      :return: A mask matching the closed interval.
+
+
+
+.. py:class:: SlicerMask(slicer, ast)
+
+   A boolean predicate over a :class:`Slicer`, combinable with ``& | ^ ~``.
+
+   A mask is not iterable and has no comparison operators; it is used only as a
+   slicer index key or combined with another mask from the same slicer.
+
+   :param slicer: The owning slicer.
+   :param ast: The op tree the mask describes.
+
+
+.. py:class:: SlicerSelection(slicer, ast)
+
+   The records of a :class:`Slicer` matching a :class:`SlicerMask`.
+
+   Iterating yields the reconstructed records; ``len()`` counts them. Each runs
+   against its own fresh searcher.
+
+   :param slicer: The owning slicer.
+   :param ast: The op tree selecting the records.
+
+
+.. py:class:: SlicerProjection(slicer, ast, names)
+
+   Named rows of a :class:`SlicerSelection`, projected to chosen fields.
+
+   Iterating yields the searcher's own native result rows (from
+   :meth:`~httk.store.query.protocols.Searcher.results`), unchanged, each
+   exposing every requested name by attribute or subscript. Each iteration
+   runs against its own fresh searcher, so it never shares filter state with
+   another operation.
+
+   :param slicer: The owning slicer.
+   :param ast: The op tree selecting the records.
+   :param names: The single-segment field names to project, in order.
+
+

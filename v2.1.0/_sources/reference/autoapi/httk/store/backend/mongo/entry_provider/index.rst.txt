@@ -1,0 +1,113 @@
+httk.store.backend.mongo.entry_provider
+=======================================
+
+.. py:module:: httk.store.backend.mongo.entry_provider
+
+.. autoapi-nested-parse::
+
+   Serve MongoDB-backed records through the neutral entry-provider contract.
+
+   Mongo entry identities are the store-managed physical ``id`` values carried
+   by the hydrated records.
+   Configured entry families are rendered through their Mongo stored-property plan;
+   configured backing records are also accepted for the schema-derived provider
+   surface used by the SQL provider's parity tests.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.entry_provider.StoreEntryProvider
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.entry_provider.served_specs
+   httk.store.backend.mongo.entry_provider.auto_definition
+
+
+Module Contents
+---------------
+
+.. py:function:: served_specs(schema, prefix)
+
+   Return the served ``(name, field spec, fulltype)`` triples.
+
+   :param schema: The resolved schema whose fields are inspected.
+   :param prefix: The registered prefix used for served property names.
+   :return: One triple for every non-intrinsic schema field with an OPTIMADE
+       value type.  The store-managed ``id`` and ``immutable_id`` fields are
+       intentionally omitted because serving layers expose them intrinsically.
+
+
+.. py:function:: auto_definition(entry_type, schema, prefix)
+
+   Build a definition for the JSON-able fields of one backing class.
+
+
+.. py:class:: StoreEntryProvider(store, classes, *, definitions = None, prefix = '_httk_', id_of = None, only_latest = True)
+
+   Bases: :py:obj:`httk.core.EntryProvider`
+
+
+   Serve configured Mongo entry families or their concrete backings.
+
+   ``classes`` maps public entry-type names to either configured entry-family
+   classes or configured concrete backing classes. Family classes use the
+   family's :class:`~httk.store.backend.mongo.stored_properties.MongoStoredPropertyPlan`; backing classes use the same
+   schema-derived property contract as the SQL provider. ``id_of`` receives
+   ``(entry_type, sid, hydrated_record)`` and defaults to the record's
+   stored ``id`` field. ``only_latest`` restricts served searchers' root
+   variables to the latest document of each lineage.
+
+
+   .. py:method:: entry_types()
+
+      Return definitions for all served entry types.
+
+      This provider is an OPTIMADE serving edge, so each definition is returned
+      in its wire form via ``EntryTypeDefinition.served_form()``
+      (idempotent for the already-prefixed supplied and auto-generated
+      definitions).
+
+      :return: The served entry-type definitions keyed by entry type.
+
+
+
+   .. py:method:: property_keys(entry_type)
+
+      Return public property names mapped to Mongo response keys.
+
+
+
+   .. py:method:: records(entry_type)
+
+      Yield JSON-able records for one served entry type.
+
+
+
+   .. py:method:: relationships(entry_type)
+
+      Return relationships grouped by source id, including provenance edges.
+
+      Related entries come from stored reference fields, child fields, exposed
+      weak links, and StrongLink provenance edges in both directions: a run's
+      own edges under their forward wire key, and the derived reverse edges
+      naming the runs pointing at each served target under their reverse wire
+      key. The reverse view is store-scoped; it is lineage-level (latest main
+      run revisions only), matching the SQL provider, under the default
+      ``only_latest=True`` (see ``_reverse_edge_index`` for the
+      ``only_latest=False`` caveat).
+
+      :param entry_type: The served entry type whose relationships are read.
+      :return: Related entries keyed by source entry id.
+      :raises KeyError: If ``entry_type`` is not served.
+
+
+

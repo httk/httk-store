@@ -1,0 +1,544 @@
+httk.store.storage_layout
+=========================
+
+.. py:module:: httk.store.storage_layout
+
+.. autoapi-nested-parse::
+
+   Backend-neutral store declaration machinery shared by storage backends.
+
+   This module owns the logical entry-family declaration, its canonical JSON
+   encoding, and trust-on-reopen validation.  Physical names and backend-specific
+   layout validation belong to each storage backend.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.store.storage_layout.DECLARATION_PROTOCOL_VERSION
+   httk.store.storage_layout.ADDITIVE_UPGRADE_HINT
+   httk.store.storage_layout.ADDITIVE_DECLARATION_UPGRADE_HINT
+   httk.store.storage_layout.ENTRY_ID_OFFSETS_KEY
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.storage_layout.StorageLayoutUpgradeRequiredError
+   httk.store.storage_layout.EntryLayoutBindingError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.storage_layout.EntryRecordDeclaration
+   httk.store.storage_layout.EntryFamilyDeclaration
+   httk.store.storage_layout.EntryFamilyLayout
+   httk.store.storage_layout.StorageLayout
+   httk.store.storage_layout.AdditiveUpgradePlan
+   httk.store.storage_layout.DeclarationUpgradePlan
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.storage_layout.validate_entry_id_fields
+   httk.store.storage_layout.normalize_entry_records
+   httk.store.storage_layout.normalize_entry_families
+   httk.store.storage_layout.normalize_entry_types
+   httk.store.storage_layout.family_entry_type_definition
+   httk.store.storage_layout.declaration_json
+   httk.store.storage_layout.schema_fingerprint_json
+   httk.store.storage_layout.schema_fingerprint_diff
+   httk.store.storage_layout.classify_schema_upgrade
+   httk.store.storage_layout.classify_declaration_upgrade
+   httk.store.storage_layout.declaration_is_superseded
+   httk.store.storage_layout.entry_id_number
+   httk.store.storage_layout.next_entry_id_offset
+   httk.store.storage_layout.entry_id_offsets_json
+   httk.store.storage_layout.parse_entry_id_offsets
+
+
+Module Contents
+---------------
+
+.. py:data:: DECLARATION_PROTOCOL_VERSION
+   :type:  Final
+   :value: '2'
+
+
+   The current backend-neutral declaration protocol.
+
+   The value is the major generation only, compared for strict equality on reopen
+   and never parsed. Bump it to "3" solely on a breaking change to the declaration
+   protocol that an existing store could not be reopened against.
+
+.. py:data:: ADDITIVE_UPGRADE_HINT
+   :type:  Final
+   :value: 'the schema difference is purely additive (new nullable columns / lazily created tables); reopen...
+
+
+   The reopen hint appended when an additive-only schema mismatch is not applied.
+
+.. py:data:: ADDITIVE_DECLARATION_UPGRADE_HINT
+   :type:  Final
+   :value: 'the declaration change is purely additive (record kinds appended to existing families and/or...
+
+
+   The reopen hint appended when an additive declaration change is not applied.
+
+.. py:data:: ENTRY_ID_OFFSETS_KEY
+   :type:  Final
+   :value: 'entry_id_offsets'
+
+
+   The optional store-metadata key holding the per-family entry-id numbering offsets.
+
+   Its value is the canonical JSON object ``{family name: offset}`` (sorted keys,
+   compact separators) with positive integer offsets.  Only an additive declaration
+   upgrade writes it; an absent key means every offset is zero.
+
+.. py:exception:: StorageLayoutUpgradeRequiredError(diff, *, hint = None, remedy = None)
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   A database does not exactly implement the current persisted store layout.
+
+   ``diff`` is immutable and JSON-shaped.  Its top-level keys are stable
+   categories (currently ``protocol``, ``declaration`` and ``schema``), so a
+   caller can present a precise upgrade diagnostic without parsing
+   the human-readable exception message.  The ``declaration`` category maps
+   named aspect keys (``metadata_keys``, ``store_timestamps``,
+   ``write_profile``, ``entry_declaration``) to their own diagnostics, so
+   several independent declaration mismatches are reported together; the
+   exception message names the mismatched aspects.
+
+   ``remedy`` is the machine-readable action a caller should take, so a tool
+   (``httk collect --upgrade``, say) never has to parse ``hint``:
+
+   - ``"upgrade"`` — the difference is additive (or an additive upgrade was
+     interrupted); reopen with the target declaration and ``upgrade=True``;
+   - ``"rebuild"`` — the difference cannot be applied in place; rebuild the store;
+   - ``"reopen"`` — this handle is out of date or was opened with mismatching
+     options (another instance upgraded the layout, a concurrent upgrade won
+     with a different layout, or ``store_timestamps``/write profile differ);
+     reopen it with the right declaration and options;
+   - ``"retry"`` — a transient conflict (the store was locked by writers, or a
+     concurrent write conflicted with the upgrade's claim); retry the same call.
+
+   SQL stores set it on every raise; ``None`` means the raising backend does
+   not classify the difference (currently the Mongo store).
+
+   :param diff: The immutable JSON-shaped category-keyed difference.
+   :param hint: An optional remediation appended to the message and exposed as
+       :attr:`hint` (e.g. that a purely additive schema change can be applied
+       with ``upgrade=True``).
+   :param remedy: The machine-readable remedy, exposed as :attr:`remedy`.
+
+
+   .. py:attribute:: diff
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: hint
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: remedy
+      :type:  Literal['upgrade', 'rebuild', 'reopen', 'retry'] | None
+      :value: None
+
+
+
+.. py:exception:: EntryLayoutBindingError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A persisted application-owned layout needs explicit Python class bindings.
+
+
+.. py:class:: EntryRecordDeclaration
+
+   Bind one stable store-local name to a concrete record class.
+
+   :param name: Stable record identity persisted in the store declaration.
+   :param record: Concrete frozen dataclass used for storage and hydration.
+   :param definition_id: Optional entry-type definition IRI described by the record.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: record
+      :type:  type
+
+
+   .. py:attribute:: definition_id
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: EntryFamilyDeclaration
+
+   Declare one application-owned entry family without global registration.
+
+   Explicit declarations provide stable persistence identities directly to a
+   store.  They are intended for application-private families which should
+   not participate in plugin discovery.  The same declaration must be
+   supplied whenever such a store is reopened.
+
+   :param name: Stable family identity persisted in the store declaration.
+   :param family: Logical entry-family class exposed through ``entry_layout``.
+   :param records: Ordered concrete record declarations belonging to the family.
+   :param definition_id: Optional entry-type definition IRI for the family.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: family
+      :type:  type
+
+
+   .. py:attribute:: records
+      :type:  tuple[EntryRecordDeclaration, ...]
+
+
+   .. py:attribute:: definition_id
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: EntryFamilyLayout
+
+   One immutable configured entry family and its concrete records.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: family
+      :type:  type
+
+
+   .. py:attribute:: definition_id
+      :type:  str | None
+
+
+   .. py:attribute:: record_names
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: records
+      :type:  tuple[type, ...]
+
+
+   .. py:attribute:: record_definition_ids
+      :type:  tuple[str | None, ...]
+
+
+.. py:class:: StorageLayout
+
+   The immutable normalized entry declaration of an initialized store.
+
+
+   .. py:attribute:: protocol_version
+      :type:  str
+
+
+   .. py:attribute:: families
+      :type:  tuple[EntryFamilyLayout, ...]
+
+
+   .. py:property:: entry_records
+      :type: collections.abc.Mapping[type, tuple[type, ...]]
+
+
+      Configured family classes mapped to their ordered concrete record classes.
+
+
+   .. py:property:: declaration
+      :type: collections.abc.Mapping[str, tuple[str, ...]]
+
+
+      Configured stable family names mapped to their ordered stable record names.
+
+
+.. py:function:: validate_entry_id_fields(layout)
+
+   Require entry-id fields on every backing of a defined entry family.
+
+
+.. py:function:: normalize_entry_records(entry_records)
+
+   Validate an explicit class declaration and replace it with stable registry names.
+
+   Registry aliases are rejected rather than selected arbitrarily: a
+   persistent declaration must have exactly one stable spelling for every
+   supplied class.
+
+
+.. py:function:: normalize_entry_families(entry_families)
+
+   Validate application-owned entry declarations and build a store layout.
+
+   Unlike :func:`normalize_entry_records`, this path does not require the
+   family or record classes to be globally registered.  Stable names and
+   optional definition identities are supplied by the application itself.
+
+   :param entry_families: Explicit family declarations in any order.
+   :return: The immutable normalized storage layout.
+   :raises TypeError: If the declaration container or its members are invalid.
+   :raises ValueError: If names, classes, definitions, or storage schemas conflict.
+
+
+.. py:function:: normalize_entry_types(records)
+
+   Build a family declaration from decorated application record classes.
+
+   ``records`` is the short declaration used by the beginner-facing store
+   API.  Each class supplies its stable ``__httk_entry_name__`` and inherits
+   the family ``type`` and ``definition_id`` from a core entry-record base.
+   Registered record classes referenced by those records are included
+   recursively, so a record containing (for example) a structure also makes
+   the structure family available to a serving provider.
+
+   :param records: Decorated frozen entry-record classes, or registered core records such as ``Run``, to serve.
+   :return: The normalized storage layout.
+   :raises TypeError: If ``records`` is not a sequence of classes.
+   :raises ValueError: If a class is neither decorated nor registered, has incomplete or conflicting entry
+       metadata, or two families containing explicitly listed
+       classes would serve the same entry type.
+
+
+.. py:function:: family_entry_type_definition(family)
+
+   Return the internal entry-type definition a configured family serves.
+
+   A family class that defines ``entry_type_definition()`` is authoritative and
+   its result is returned unchanged. Otherwise the family's registered
+   definition is extended with the union of the property definitions its
+   record backings declare in ``__httk_property_definitions__``, so a typed
+   backing (for example a record with a native total-energy column) serves its
+   property next to generic backings of the same family. Backings without
+   ``__httk_property_definitions__`` contribute nothing, names already in the
+   registered definition are left to it, and a family whose backings add
+   nothing gets the registered definition itself. The result is the internal
+   form; serve it through ``served_form()``.
+
+   :param family: The configured entry family whose definition is derived.
+   :return: The family's internal entry-type definition.
+   :raises TypeError: If the family's ``entry_type_definition()`` does not
+       return an :class:`~httk.core.EntryTypeDefinition`, or a backing declares
+       malformed property metadata.
+   :raises ValueError: If the family has neither a definition id nor
+       ``entry_type_definition()``, or two backings declare different
+       definitions under one property name.
+
+
+.. py:function:: declaration_json(layout)
+
+   Serialize a normalized declaration in its exact deterministic persisted form.
+
+
+.. py:function:: schema_fingerprint_json(layout)
+
+   Serialize the resolved per-table schema of ``layout`` in deterministic form.
+
+   The fingerprint covers every declared record class plus the transitive
+   closure of referenced storable classes, resolved through
+   :func:`~httk.store.backend.schema.resolve_schema`.  It captures what determines
+   the on-disk layout, the stored value encoding, and the *content identity* of
+   each table — the logical identity name, dedup policy, composite indexes,
+   relationship links, and per-field roles, codecs, shapes, columns, child
+   tables, identity participation, and list-vs-tuple container — so that
+   reopening a store whose record classes changed is rejected up front.
+
+   A code move or rename is safe only when the record pins an explicit
+   :attr:`~httk.core.storage.StorageInfo.identity_name` (every shipped httk
+   record does); without a pin the qualified class name *is* the content
+   identity, so the move changes ``content_id`` and the store correctly
+   refuses to open.  ``cls`` and ``python_type`` themselves are excluded — the
+   identity name and resolved columns capture everything the store depends on.
+
+   :param layout: The normalized storage layout to fingerprint.
+   :return: A deterministic ``sort_keys`` JSON document describing tables and
+       definition-backed entry-id tables.
+
+
+.. py:function:: schema_fingerprint_diff(stored, current)
+
+   Diff a stored fingerprint against the current one, per differing table.
+
+   The persisted fingerprint shape is versioned by the store protocol, so this
+   only needs to survive a corrupt stored value gracefully.
+
+   :param stored: The persisted fingerprint JSON, or ``None`` when absent.
+   :param current: The fingerprint recomputed from the persisted layout.
+   :return: A mapping of table name to ``{"expected", "actual"}`` for each table
+       that differs; ``{}`` when the two fingerprints are byte-equal.  A stored
+       value that is not a parseable fingerprint yields a single
+       ``"<fingerprint>"`` entry, and differing ``entry_id_tables`` (the backing
+       tables of defined families) an ``"<entry_id_tables>"`` entry — they
+       differ even when every table is unchanged, e.g. when a record kind whose
+       table was already reachable by reference is appended to a family.
+
+
+.. py:class:: AdditiveUpgradePlan
+
+   The nullable parent columns an additive fingerprint upgrade must add per table.
+
+   :param added_columns: Physical table name mapped to the ordered
+       :class:`~httk.store.backend.schema.ColumnSpec` values newly present in the
+       current fingerprint.  New tables carry no entry (they are created whole);
+       a table appears only when it already exists in the stored fingerprint
+       and gained one or more nullable parent columns.
+
+
+   .. py:attribute:: added_columns
+      :type:  collections.abc.Mapping[str, tuple[httk.store.backend.schema.ColumnSpec, ...]]
+
+
+.. py:function:: classify_schema_upgrade(stored, current)
+
+   Classify a fingerprint mismatch as an additive upgrade plan or a rejection.
+
+   The whole diff must be additive.  A table present only in the current
+   fingerprint is a new table (additive; it is created whole).  A table present
+   in both is additive only when its ``identity_name``, ``dedup``,
+   ``composite_indexes`` and ``links`` are byte-equal, it carries no
+   unrecognized top-level key, every stored field is present and byte-equal in
+   the current fingerprint, and every added field is a non-child, non-derived,
+   content-identity-excluded (``IdentitySkip``) field whose parent columns are
+   all nullable.  Identity participation is required so a pre-existing row's
+   ``content_id`` (and therefore dedup, dispatch, and federation identity) is
+   unchanged by the upgrade.  ``entry_id_tables`` may grow (a declaration
+   upgrade attaches backings) but never lose a table.
+
+   :param stored: The persisted fingerprint JSON, or ``None`` when absent.
+   :param current: The fingerprint recomputed from the persisted layout.
+   :return: An :class:`AdditiveUpgradePlan` when fully additive, otherwise a
+       human-readable rejection reason naming the offending table/field/column.
+
+
+.. py:class:: DeclarationUpgradePlan
+
+   The families an additive declaration upgrade touches.
+
+   :param changed_families: Names of stored families whose record list gained
+       appended record kinds; their dispatch tables are rebuilt and their
+       entry-id numbering offsets advanced.
+   :param new_families: Names of families present only in the target declaration.
+
+
+   .. py:attribute:: changed_families
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: new_families
+      :type:  tuple[str, ...]
+
+
+.. py:function:: classify_declaration_upgrade(stored, target)
+
+   Classify a persisted-declaration mismatch as an additive upgrade plan or a rejection.
+
+   The change is additive iff every stored family is still declared under the
+   same name with the same family ``definition_id``, and the stored record list
+   of every such family (registry names *and* record ``definition_id`` values)
+   is an order-preserving prefix of the target family's record list, so record
+   kinds are only ever appended.  New families are allowed.  Record order is
+   part of the entry-id numbering scheme (a record's position is its backing
+   index), which is why a reorder is never additive.  The comparison works on
+   the names-only persisted declaration, so it is shared by every backend.
+
+   :param stored: The persisted ``entry_declaration`` JSON, or ``None`` when absent.
+   :param target: The declaration the store is being reopened with.
+   :return: A :class:`DeclarationUpgradePlan` when the change is additive,
+       otherwise a human-readable rejection naming the offending family and record.
+
+
+.. py:function:: declaration_is_superseded(stored, supplied)
+
+   Whether the persisted declaration is an additive extension of ``supplied``.
+
+   That is the situation of a client one declaration behind: the store was
+   already upgraded (record kinds appended or families added) by a newer
+   declaration, and ``supplied`` is the older one.  The store is healthy; the
+   remedy is to open it with the newer declaration, never to rebuild it.
+
+   :param stored: The persisted ``entry_declaration`` JSON, or ``None`` when absent.
+   :param supplied: The declaration the store is being opened with.
+   :return: ``True`` when ``supplied`` → stored is an additive change.
+
+
+.. py:function:: entry_id_number(value)
+
+   Return the numeric suffix of an entry, immutable, or alternative identifier.
+
+   Identifiers are parsed exactly as the store mints and validates them
+   (:func:`httk.core.entry_ids.parse_entry_id` and its immutable/alternative
+   siblings).  An identifier outside the recommended ``<base>-<series>-<number>``
+   form carries no store-mintable number and yields ``None``: it can never
+   collide with a minted identifier.
+
+   :param value: A stored ``id`` or ``immutable_id`` value (``None`` allowed).
+   :return: The embedded entry number, or ``None``.
+
+
+.. py:function:: next_entry_id_offset(numbers, previous)
+
+   Return a family's entry-id numbering offset after its record list changes.
+
+   Store-minted numbers are ``offset + logical_id * B + backing_index`` with
+   ``logical_id >= 1`` and ``0 <= backing_index < B``, so every number minted
+   under the returned offset is at least ``offset + B``.  The offset is one
+   more than the largest number any existing identifier of the family carries
+   (over every backing and every id series) and than the previous offset, so
+   every later number exceeds every earlier one: identifiers minted before the
+   change can never be re-minted after it, whatever ``B`` becomes, and repeated
+   upgrades keep the property.  A family with neither existing numbers nor a
+   previous offset keeps offset ``0`` and so mints exactly like a fresh store.
+
+   :param numbers: The numeric suffixes of the family's existing identifiers.
+   :param previous: The family's current offset (``0`` when none is recorded).
+   :return: The new offset.
+
+
+.. py:function:: entry_id_offsets_json(offsets)
+
+   Serialize per-family entry-id offsets in their canonical persisted form.
+
+   :param offsets: Family name mapped to its positive offset (zero offsets are omitted).
+   :return: The canonical JSON object persisted under :data:`ENTRY_ID_OFFSETS_KEY`.
+
+
+.. py:function:: parse_entry_id_offsets(value, layout)
+
+   Parse and validate the persisted per-family entry-id offsets.
+
+   :param value: The persisted :data:`ENTRY_ID_OFFSETS_KEY` value.
+   :param layout: The layout whose families the offsets must name.
+   :return: Family name mapped to its positive offset.
+   :raises ValueError: If the value is not the canonical encoding of a mapping
+       from declared family names to positive integers.
+
+

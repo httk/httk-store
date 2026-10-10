@@ -1,0 +1,1642 @@
+httk.store
+==========
+
+.. py:module:: httk.store
+
+.. autoapi-nested-parse::
+
+   Provide httk-store's data-management capability layer for httk v2.
+
+   Built on the stdlib-only *contracts and models* in *httk-core*, httk-store
+   supplies *capabilities*:
+
+   - in-memory :class:`~httk.core.EntryProvider` implementations for the standard
+     OPTIMADE entry types (:class:`ReferenceEntryProvider`,
+     :class:`FileEntryProvider`, :class:`CalculationEntryProvider`), serving
+     httk-core's record models through the neutral provider contract; and
+   - **property-definition validation** (:func:`validate_property`,
+     :func:`validate_record`, :class:`PropertyValidationError`) built on
+     ``jsonschema`` (Draft 2020-12), checking record values against their OPTIMADE
+     property definitions fully offline; and
+   - the **store/searcher query protocols** (:mod:`httk.store.query`) — the
+     backend-agnostic query contract implemented by httk data stores and consumed
+     by serving modules; and
+   - the **federated store** (:mod:`httk.store.federated_store`) — ordered, immutable
+     source and target bindings plus lazy sequential union query execution; and
+   - the **generic OPTIMADE filter translation** (:mod:`httk.store.query.optimade_filters`)
+     — turning filter syntax trees parsed by
+     :func:`httk.core.optimade.parse_optimade_filter` into search expressions over the
+     query protocols (the machinery in :mod:`httk.store.query.optimade_filters`, including
+     :func:`~httk.store.query.optimade_filters.filter_searcher`), with
+     neutral :class:`~httk.store.query.optimade_filters.FilterTranslationError` categories; and
+
+   - the **database storage layer** (:mod:`httk.store.backend.sql`, requiring the
+     ``httk-store[db]`` extra) — relational storage and querying of plain frozen
+     dataclasses (:class:`~httk.store.backend.sql.store.SqlStore` over SQLite, DuckDB,
+     PostgreSQL, or ClickHouse),
+     served through the provider contract by
+     :class:`~httk.store.backend.sql.entry_provider.StoreEntryProvider`.
+
+   The providers self-register (under ``httk.registry.entries.store``, as
+   ``store-references``/``store-files``/``store-calculations``/``store-db-store``)
+   when ``httk.core`` discovers the module, so a serving module (such as
+   *httk-serve*) can find them through the registry.
+
+   .. py:class:: StandardEntryProvider
+      :canonical: httk.store.entry_providers.StandardEntryProvider
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/store/backend/index
+   /reference/autoapi/httk/store/entry_providers/index
+   /reference/autoapi/httk/store/export/index
+   /reference/autoapi/httk/store/federated_store/index
+   /reference/autoapi/httk/store/id_ledger/index
+   /reference/autoapi/httk/store/query/index
+   /reference/autoapi/httk/store/served_specs/index
+   /reference/autoapi/httk/store/storage_layout/index
+   /reference/autoapi/httk/store/store_common/index
+   /reference/autoapi/httk/store/store_timestamp/index
+   /reference/autoapi/httk/store/validation/index
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.store.FilterTranslationCategory
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.FederatedSourceError
+   httk.store.FederatedStoreError
+   httk.store.IdLedgerError
+   httk.store.CountUnavailableError
+   httk.store.MultipleResultsError
+   httk.store.NoResultError
+   httk.store.PaginationCursorError
+   httk.store.UnsupportedQueryError
+   httk.store.FilterTranslationError
+   httk.store.EntryLayoutBindingError
+   httk.store.EntryIdConflictError
+   httk.store.PropertyValidationError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.CalculationEntryProvider
+   httk.store.DataRecordEntryProvider
+   httk.store.FileEntryProvider
+   httk.store.ReferenceEntryProvider
+   httk.store.RunEntryProvider
+   httk.store.FederatedResultSet
+   httk.store.FederatedSearcher
+   httk.store.FederatedStore
+   httk.store.FederatedTarget
+   httk.store.IdLedger
+   httk.store.ContinuationToken
+   httk.store.PageableResultSetLike
+   httk.store.PageOrder
+   httk.store.PortableQueryCapabilities
+   httk.store.ResultPage
+   httk.store.ResultRow
+   httk.store.ResultRowLike
+   httk.store.ResultSetLike
+   httk.store.Searcher
+   httk.store.SearchExpression
+   httk.store.SearchField
+   httk.store.SearchResult
+   httk.store.SearchVariable
+   httk.store.Store
+   httk.store.EntryFamilyDeclaration
+   httk.store.EntryRecordDeclaration
+   httk.store.EntryIdScheme
+   httk.store.EntryStore
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.product_relationships
+   httk.store.export_dataset
+   httk.store.check_ledger_key
+   httk.store.portable_query_capabilities
+   httk.store.portable_query_fields
+   httk.store.filter_searcher
+   httk.store.validate_property
+   httk.store.validate_record
+
+
+Package Contents
+----------------
+
+.. py:class:: CalculationEntryProvider(entries, *, relationships = None)
+
+   Bases: :py:obj:`StandardEntryProvider`
+
+
+   Serves OPTIMADE ``calculations`` from a mapping of id to :class:`~httk.core.Calculation`.
+
+   ``relationships`` optionally maps a calculation id to its related entries
+   (:class:`~httk.core.RelatedEntry` values, served flat per id) — e.g. its
+   ``input``/``output`` files, expressed via the ``role`` metadata.
+
+   :param entries: The calculations keyed by their served identifiers.
+   :param relationships: Optional related entries keyed by calculation identifier.
+
+
+.. py:class:: DataRecordEntryProvider(entries, *, definitions = None, relationships = None)
+
+   Bases: :py:obj:`httk.core.EntryProvider`
+
+
+   Serve core :class:`~httk.core.DataRecord` values as provider properties.
+
+   Definitions are resolved eagerly at construction. Every served property name
+   must start with ``_``; absent record properties are emitted as JSON null.
+
+   :param entries: The data records keyed by their served identifiers.
+   :param definitions: Optional property definitions keyed by served property name.
+   :param relationships: Optional related entries keyed by record identifier.
+   :raises ValueError: If a property name, definition, or non-nullable property
+       is inconsistent with the supplied records.
+
+
+   .. py:method:: entry_types()
+
+      Return the resolved ``_httk_records`` entry definition.
+
+      :return: The served data-record entry-type definition.
+
+
+
+   .. py:method:: property_keys(entry_type)
+
+      Return served property names mapped to data-record keys.
+
+      :param entry_type: The entry type to inspect.
+      :return: The served-property to record-key mapping.
+      :raises KeyError: If ``entry_type`` is not ``_httk_records``.
+
+
+
+   .. py:method:: records(entry_type)
+
+      Return records with union-null values for unserved properties.
+
+      :param entry_type: The entry type to enumerate.
+      :yield: JSON-compatible records in input mapping order.
+      :raises KeyError: If ``entry_type`` is not ``_httk_records``.
+
+
+
+   .. py:method:: relationships(entry_type)
+
+      Return normalized data-record relationships by identifier.
+
+      :param entry_type: The entry type to inspect.
+      :return: The relationship mapping supplied at construction.
+      :raises KeyError: If ``entry_type`` is not ``_httk_records``.
+
+
+
+.. py:class:: FileEntryProvider(entries, *, relationships = None)
+
+   Bases: :py:obj:`StandardEntryProvider`
+
+
+   Serves OPTIMADE ``files`` from a mapping of id to :class:`~httk.core.File`.
+
+   ``relationships`` optionally maps a file id to its related entries
+   (:class:`~httk.core.RelatedEntry` values, served flat per id) — e.g. the
+   calculations a file is ``input``/``output`` of.
+
+   :param entries: The files keyed by their served identifiers.
+   :param relationships: Optional related entries keyed by file identifier.
+
+
+.. py:class:: ReferenceEntryProvider(entries, *, relationships = None)
+
+   Bases: :py:obj:`StandardEntryProvider`
+
+
+   Serves OPTIMADE ``references`` from a mapping of id to :class:`~httk.core.Reference`.
+
+   ``relationships`` optionally maps a reference id to its related entries
+   (:class:`~httk.core.RelatedEntry` values, served flat per id).
+
+   :param entries: The references keyed by their served identifiers.
+   :param relationships: Optional related entries keyed by reference identifier.
+
+
+.. py:class:: RunEntryProvider(entries)
+
+   Bases: :py:obj:`httk.core.EntryProvider`
+
+
+   Serve core :class:`~httk.core.Run` records and their provenance edges.
+
+   :param entries: The runs keyed by their served identifiers.
+
+
+   .. py:method:: entry_types()
+
+      Return the served ``_httk_runs`` entry definition.
+
+      The wire naming is the served form of the internal runs definition (see
+      ``EntryTypeDefinition.served_form()``).
+
+      :return: The served run entry-type definition.
+
+
+
+   .. py:method:: property_keys(entry_type)
+
+      Return the served run-property to record-key mapping.
+
+      :param entry_type: The entry type to inspect.
+      :return: The served-property to record-key mapping.
+      :raises KeyError: If ``entry_type`` is not ``_httk_runs``.
+
+
+
+   .. py:method:: records(entry_type)
+
+      Return JSON-compatible run records.
+
+      :param entry_type: The entry type to enumerate.
+      :yield: Run records in input mapping order.
+      :raises KeyError: If ``entry_type`` is not ``_httk_runs``.
+
+
+
+   .. py:method:: relationships(entry_type)
+
+      Return run provenance edges as forward semantic relationships.
+
+      Each edge is grouped under its owning field's ``StrongLink`` forward
+      relationship key in wire form (e.g. ``_httk_has_input``, read from the
+      markers on :class:`~httk.core.Run`, not hardcoded). Run edges carry
+      internal entry-type names; this serving edge translates each target type
+      to its served (wire) name (via ``EntryTypeDefinition.served_form()``), so
+      a target such as ``records`` is served as ``_httk_records`` while
+      standard type names pass through unchanged.
+
+      :param entry_type: The entry type to inspect.
+      :return: Relationships grouped by run identifier.
+      :raises KeyError: If ``entry_type`` is not ``_httk_runs``.
+
+
+
+   .. py:method:: reverse_relationships()
+
+      Return the derived reverse view of the runs' provenance edges.
+
+      Each run edge ``(entry_type, entry_id)`` yields a reverse related entry
+      attached to the targeted entry: keyed by the target's served (wire) entry
+      type and its raw id, the related entry names this run under the edge
+      field's ``StrongLink`` reverse relationship key in wire form (e.g.
+      ``_httk_is_input``). Fields whose marker declares no ``reverse`` key
+      contribute nothing.
+
+      :return: Related runs keyed by target entry type and then target entry id.
+
+
+
+.. py:function:: product_relationships(links)
+
+   Build source-side relationships for a provider's ``relationships=`` argument.
+
+   Feed the inner mapping into the source-side provider's ``relationships=`` argument;
+   per-edge ``workflow_declaration_uri`` is deliberately not served yet (relation-object
+   serving is future work).
+
+   :param links: The product links to group by source type and identifier.
+   :return: Source-type mappings of source identifiers to related product entries.
+   :raises ValueError: If one source has duplicate product labels.
+
+
+.. py:function:: export_dataset(store_path, out_path)
+
+   Export a snapshot-consistent SQLite store and its OPTIMADE definitions.
+
+   :param store_path: SQLite store to copy.
+   :param out_path: Destination zip file.
+   :return: The destination path.
+   :raises ValueError: If the store declaration has no resolvable definitions.
+
+
+.. py:class:: FederatedResultSet(store, plan)
+
+   Represent a frozen, lazy, re-iterable federated result plan.
+
+   Results execute source-major in federation source order, preserve duplicate
+   rows, and remain read-only views over the borrowed stores.
+
+   :param store: The federation whose sources execute the plan.
+   :param plan: The validated frozen federation plan.
+
+
+   .. py:property:: names
+      :type: tuple[str, ...]
+
+
+      Return the declared projection names.
+
+      :return: The result projection names in declaration order.
+
+
+   .. py:method:: first()
+
+      Return the first result row, or ``None`` when no row matches.
+
+      :return: The first matching row, or ``None``.
+
+
+
+   .. py:method:: one()
+
+      Return the only result row.
+
+      :return: The sole matching result row.
+      :raises httk.store.query.protocols.NoResultError: If no row matches.
+      :raises httk.store.query.protocols.MultipleResultsError: If more than one row matches.
+
+
+
+   .. py:method:: scalars(name = None)
+
+      Iterate over one named projection.
+
+      :param name: The projection name, required when more than one output exists.
+      :return: An iterator over the selected projection values.
+      :raises ValueError: If no name is supplied for multiple outputs.
+      :raises KeyError: If ``name`` is not a declared output.
+
+
+
+   .. py:method:: column(name)
+
+      Return a lazy scalar column by projection name.
+
+      :param name: The scalar projection name.
+      :return: A lazy column view over the projection.
+      :raises KeyError: If ``name`` is not a declared output.
+      :raises TypeError: If ``name`` identifies an object or weak-link-set output.
+
+
+
+   .. py:method:: cursor()
+      :abstractmethod:
+
+
+      Reject cursor access because federation cursors are unsupported.
+
+      :return: Never returns.
+      :raises NotImplementedError: Always, because federated cursors are not implemented.
+
+
+
+.. py:class:: FederatedSearcher(store, *, as_of = None, only_latest = False)
+
+   Build and validate one portable, single-root federated query.
+
+   :param store: The federation whose child stores provide the query surface.
+   :param as_of: Optional historic cutoff forwarded to child stores.
+   :param only_latest: Whether each child restricts root variables to the latest row of each lineage.
+
+
+   .. py:attribute:: offset
+      :value: 0
+
+
+
+   .. py:attribute:: origin
+
+
+   .. py:method:: variable(target)
+
+      Bind one shared or explicit target against child searcher prototypes.
+
+      :param target: A shared child target or a source-specific target binding.
+      :return: The federated root variable.
+      :raises httk.store.query.protocols.UnsupportedQueryError: If a second root or foreign target is supplied.
+      :raises FederatedSourceError: If a source rejects target binding.
+
+
+
+   .. py:method:: add(expression)
+
+      Validate and retain a portable condition for the future frozen plan.
+
+      :param expression: An expression produced by this searcher.
+      :return: None.
+      :raises httk.store.query.protocols.UnsupportedQueryError: If the expression belongs to another searcher.
+      :raises FederatedSourceError: If a source rejects the expression.
+
+
+
+   .. py:method:: output(value, name)
+
+      Declare a record, scalar field, or origin output for a future plan.
+
+      :param value: The root variable, field, or ``origin`` sentinel to project.
+      :param name: The nonempty output name.
+      :return: None.
+      :raises ValueError: If ``name`` is empty or already declared.
+      :raises httk.store.query.protocols.UnsupportedQueryError: If ``value`` is not owned by this searcher.
+      :raises FederatedSourceError: If a source rejects the output.
+
+
+
+   .. py:method:: add_sort(field, descending = False)
+
+      Reject global sorting until a portable sort-semantics contract exists.
+
+      :param field: The requested sort field.
+      :param descending: Whether the requested order is descending.
+      :raises httk.store.query.protocols.UnsupportedQueryError: Always, because global federation sorting
+          has no portable contract.
+
+
+
+   .. py:method:: count()
+
+      Return the exact unpaged count of the current filtered union.
+
+      :return: The exact sum of matching rows across participating sources.
+      :raises httk.store.query.protocols.CountUnavailableError: If a source cannot provide an exact count.
+      :raises FederatedSourceError: If a source fails while counting.
+
+
+
+   .. py:method:: set_limit(limit)
+
+      Set the global output limit; a negative value clears it.
+
+      :param limit: The nonnegative limit, or a negative value to clear it.
+      :return: None.
+      :raises TypeError: If ``limit`` is not an integer.
+
+
+
+   .. py:method:: add_offset(offset)
+
+      Add a global source-union offset.
+
+      :param offset: The nonnegative number of union rows to skip.
+      :return: None.
+      :raises TypeError: If ``offset`` is not an integer.
+      :raises ValueError: If ``offset`` is negative.
+
+
+
+   .. py:method:: results(**outputs)
+
+      Freeze a projection plan into a lazy, re-iterable result set.
+
+      :param \*\*outputs: Optional output names mapped to root variables or fields.
+      :return: The lazy frozen result set.
+      :raises ValueError: If no outputs are declared or an output name is invalid.
+      :raises httk.store.query.protocols.UnsupportedQueryError: If an output does not belong to this searcher.
+      :raises FederatedSourceError: If a source rejects an output.
+
+
+
+   .. py:method:: slicer(target)
+
+      A pandas-style ``[]`` indexing view over ``target`` records.
+
+      Each terminal indexing operation runs against a fresh federated searcher
+      minted with this searcher's ``as_of``/``only_latest`` scope, so slicer
+      operations never share filter state. Slicer masks never sort, so the
+      federation's rejection of sorting does not apply.
+
+      :param target: The stored record class to index.
+      :return: A slicer over ``target``.
+
+
+
+.. py:exception:: FederatedSourceError(source, operation)
+
+   Bases: :py:obj:`FederatedStoreError`
+
+
+   Report that a named source rejected or failed a federated operation.
+
+   :param source: The source name that failed.
+   :param operation: The federation operation being performed.
+
+
+   .. py:attribute:: source
+
+
+   .. py:attribute:: operation
+
+
+.. py:class:: FederatedStore(sources)
+
+   Fan out read-only queries over an ordered collection of borrowed stores.
+
+   The union is source-major, lazy, and non-deduplicating. Queries require the
+   strict common query surface accepted by every participating source, and
+   counts are exact sums of the unpaged source counts. This live borrowed-store
+   view is distinct from the persisted registry in
+   :mod:`httk.store.backend.sql.stored_federation`.
+
+   :param sources: Child stores keyed by stable federation source name.
+   :raises TypeError: If ``sources`` is not a mapping.
+   :raises ValueError: If fewer than two sources or an invalid source name is supplied.
+
+
+   .. py:property:: source_names
+      :type: tuple[str, ...]
+
+
+      Return the immutable source names in constructor iteration order.
+
+      :return: The source names in constructor order.
+
+
+   .. py:method:: target(name, targets)
+
+      Create an immutable target mapping for an intentional source subset.
+
+      :param name: The logical target name.
+      :param targets: Concrete targets keyed by federation source name.
+      :return: The validated target binding.
+      :raises TypeError: If ``targets`` is not a mapping.
+      :raises ValueError: If a target name or source name is invalid.
+
+
+
+   .. py:method:: searcher(*, as_of = None, only_latest = False)
+
+      Create an unbound federated searcher without touching child stores.
+
+      :param as_of: Optional historic cutoff forwarded to every child store.
+          A child that cannot honor it raises and the federation surfaces that
+          child failure; this is a user-facing store API.
+      :param only_latest: Whether each child restricts root variables to the latest row of
+          each lineage. A child that cannot honor it raises and the federation surfaces that
+          child failure.
+      :return: A new mutable query builder.
+
+
+
+.. py:exception:: FederatedStoreError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   Report that a federation-level store operation failed.
+
+
+.. py:class:: FederatedTarget
+
+   Bind one logical target to exact concrete targets for named sources.
+
+   :param name: The nonempty logical target name.
+   :param targets: Concrete targets keyed by federation source name.
+   :param _owner: The federation that owns this target binding.
+   :raises TypeError: If ``targets`` is not a mapping or ``_owner`` is not a federation.
+   :raises ValueError: If the name, source set, or source names are invalid.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: targets
+      :type:  collections.abc.Mapping[str, object]
+
+
+.. py:class:: IdLedger(path, *, bases, series, ledger_uuid, keys, records, live, persisted, segments, read_only = False)
+
+   A signed, append-only allocator of stable entry ids for source keys.
+
+   Open one with :meth:`create` or :meth:`open` and use it as a context
+   manager; the enclosing ``with`` holds an exclusive lock and, on exit, appends
+   and signs one new segment only when something was assigned or aliased.
+   Callers use those constructors rather than the initializer, which binds an
+   already-validated state to its file and lock.
+
+   :param path: The ledger sqlite database path.
+   :param bases: The per-family id bases, keyed by family name.
+   :param series: The id series every minted id carries.
+   :param ledger_uuid: This ledger's identity, stamped into every segment subject.
+   :param keys: The signing keys used to sign the next segment on close, each a
+       ``(role, seed)`` pair.
+   :param records: The ordered ledger records, each a ``{key, ...}`` mapping.
+   :param live: The newest record per key, the key's live binding.
+   :param persisted: How many records are already stored on disk.
+   :param segments: How many segments are already stored on disk.
+   :param read_only: Whether this ledger was opened read-only: mutators raise
+       and :meth:`close` is a no-op that never writes and takes no lock.
+
+
+   .. py:method:: create(path, *, bases, series, keys)
+      :classmethod:
+
+
+      Create and sign a fresh, empty ledger, then hold it open and locked.
+
+      The fresh database carries segment 1: an empty segment (no records) whose
+      signed subject stamps the initial bases, so the ledger is signed from
+      birth.
+
+      :param path: Where to write the ledger database; it must not exist.
+      :param bases: The explicit per-family id bases, e.g.
+          ``{"structures": "anyt.am.structure"}``.
+      :param series: The id series token every minted id carries.
+      :param keys: The signing keys, each a ``(role, seed)`` pair.
+      :return: The open, locked ledger.
+      :raises IdLedgerError: If the ledger already exists or the lock is held.
+      :raises ValueError: If a base or the series is malformed.
+
+
+
+   .. py:method:: open(path, *, keys = (), trusted_keys = (), verify = True, bases = None, series = None, read_only = False)
+      :classmethod:
+
+
+      Open an existing ledger, verifying its signatures and invariants.
+
+      With *verify*, every segment's signature is checked: an INVALID signature
+      (content that no longer matches its own segment) always raises, while a
+      valid one is treated as an audit record — *trusted_keys* demand a trusted
+      signer on every segment, and without them the valid signers are logged.
+      The structure and every entry invariant are validated regardless (segment
+      ranges must partition the records exactly, bases must grow monotonically,
+      ids must conform, supersession must be sound), because a signature
+      attests only to the bytes, not to their meaning. None of this is weakened
+      by *read_only*.
+
+      When *series* is given it must equal the stored series. When *bases* is
+      given it is reconciled as a SUPERSET of the stored map: every stored
+      family must appear in it with the same base (removing, renaming, or
+      re-basing a stored family is an error), while families present only in the
+      expectation are ADDED and stamped into the next segment's subject at close
+      (so a build that assigns nothing but grows the scheme still writes on
+      close). The merged map is revalidated for id shape and base uniqueness.
+      With *read_only*, stamping that growth is impossible (there is no write),
+      so an expectation that would add a family is refused outright rather than
+      silently appearing to have taken effect; a stored map that is a subset of
+      the expectation with no addition needed (i.e. an exact match) still opens.
+
+      With *read_only*, no lock is taken or required — this succeeds even while
+      another process holds the write lock, so the caller may observe a snapshot
+      that a concurrent writer is about to extend — and the returned ledger
+      permits no mutation: :meth:`assign`, :meth:`alias`, and any other mutator
+      raise, and :meth:`close` is a no-op that neither writes nor requires a
+      signing key.
+
+      :param path: The ledger database to open.
+      :param keys: The signing keys used to sign the next segment on close.
+      :param trusted_keys: Trust anchors as ``ed25519:`` keys or ``sha256:``
+          fingerprints; when given, every segment's signer must be one of them.
+      :param verify: Whether to verify the segment signatures.
+      :param bases: The per-family bases the caller expects, asserted when given.
+      :param series: The id series the caller expects, asserted when given.
+      :param read_only: Whether to open without a lock and without permitting
+          mutation, for a concurrent-safe read path.
+      :return: The open ledger, locked unless *read_only*.
+      :raises IdLedgerError: If the ledger is missing, the lock is held (and
+          *read_only* is false), verification fails, an invariant is violated,
+          the expected bases/series disagree, or *read_only* is true and the
+          expected bases would require growing the stored map.
+
+
+
+   .. py:method:: assign(key, family, *, supersede = False)
+
+      Return the id for a source key, minting one on first sight.
+
+      The call is idempotent: a key already assigned in this family returns
+      its existing id. A key assigned in another family is an error, and an
+      aliased key is an error unless *supersede* re-binds it.
+
+      With ``supersede=True`` on a currently-**aliased** key, a fresh
+      assignment is appended carrying ``supersedes=<the alias target>`` and a
+      newly minted id — the split half of source regrouping. ``supersede=True``
+      on an already-assigned key is an error: an assignment is never re-bound
+      to another assignment.
+
+      :param key: The stable source key.
+      :param family: The id family the key belongs to.
+      :param supersede: Whether to re-bind an aliased key to a fresh assignment.
+      :return: The assigned entry id.
+      :raises IdLedgerError: If the ledger is read-only, the key is aliased and
+          *supersede* is false, its family disagrees, the family has no base, or
+          *supersede* is passed outside its one transition (a new key, or an
+          already-assigned key).
+
+
+
+   .. py:method:: alias(key, existing_id, *, supersede = False)
+
+      Record a source key pointing at an id already in the ledger.
+
+      Aliases exist because the store deduplicates content-identical rows
+      family-wide: several keys can reach one row, which must keep one id. The
+      call is idempotent for an identical ``(key, existing_id)`` pair; a
+      conflicting re-alias, or targeting an id absent from the ledger, is an
+      error, and so is aliasing an already-assigned key unless *supersede*
+      re-binds it.
+
+      With ``supersede=True`` on a currently-**assigned** key, an alias record
+      is appended carrying ``supersedes=<its old id>`` — the merge half of
+      source regrouping. The old id stays reserved and stays resolvable while
+      any other key points at it, otherwise becoming a harmless orphan.
+
+      :param key: The stable source key to record.
+      :param existing_id: An id already assigned in the ledger.
+      :param supersede: Whether to re-bind an assigned key to an alias.
+      :raises IdLedgerError: If the ledger is read-only, on a conflict, an
+          unknown target, an assigned key when *supersede* is false, or
+          *supersede* passed for a new key.
+
+
+
+   .. py:method:: lookup(key)
+
+      Return the id a source key resolves to, following an alias.
+
+      Resolution is to the key's newest record, so a superseded binding is
+      never returned for the key that moved on from it.
+
+      :param key: The source key to resolve.
+      :return: The assigned id, or ``None`` when the key is unknown.
+
+
+
+   .. py:method:: bindings()
+
+      Return every key's current live binding, aliases resolved to their target id.
+
+      Only live bindings appear here: a superseded record is as invisible to
+      this as it is to :meth:`lookup` for the key that moved on from it. Each
+      binding names the family its id belongs to (an alias's family is that of
+      the id it resolves to, since a bare alias record carries no family of its
+      own) and whether the key is an alias or the assignment that established
+      the id — enough for a caller to group by family and separate intrinsic
+      identity from binding, without exposing the record shape itself.
+
+      The result is a snapshot, independent of the ledger's internals: it is a
+      fresh mapping of immutable values, so neither mutating it nor a later
+      :meth:`assign`/:meth:`alias` on this ledger can affect it, in either
+      direction. Works the same whether the ledger was opened for write or
+      *read_only*.
+
+      :return: The live bindings, keyed by source key, in ascending key order
+          (a fixed, deterministic order independent of append order).
+
+
+
+   .. py:method:: close()
+
+      Append and sign a new segment when the ledger changed, then unlock.
+
+      A ledger untouched since it was opened is left byte-identical: no
+      connection is opened and nothing is written, so an idempotent rebuild
+      produces no git churn. A dirty close with no signing key available raises
+      from the sealing layer before anything is written; a failed close leaves
+      the ledger unclosed and its lock held, so a retried close reattempts the
+      write instead of silently skipping it (the manual remedy for an abandoned
+      session is to delete the lock).
+
+      A read-only ledger never took the lock, so this is purely a no-op: it
+      neither writes nor touches any lock file (removing one here could delete
+      a concurrent writer's *own* lock, since a read-only open may coexist with
+      one).
+
+
+
+.. py:exception:: IdLedgerError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   An id ledger cannot be opened, verified, locked, or extended.
+
+   This covers both the *cannot proceed* cases — a held lock, a signature or
+   invariant that does not verify — and the API-misuse cases — assigning an
+   aliased key without superseding, or aliasing a key to an id absent from the
+   ledger.
+
+
+.. py:function:: check_ledger_key(key)
+
+   Check a ledger source key, warning for deviations but never rejecting.
+
+   Ledger keys are opaque to the allocator: the standardized grammar is a
+   convention enforced only by the workflow helpers, so this mirrors
+   ``httk.core.entry_ids.check_entry_id`` in stance but, unlike it, never
+   raises — it only warns on leading/trailing whitespace or non-URL-safe
+   characters.
+
+   :param key: The source key to check.
+   :return: The unchanged key.
+
+
+.. py:class:: ContinuationToken
+
+   Bases: :py:obj:`str`
+
+
+   Carry an opaque URL-safe continuation value.
+
+   It is a ``str`` subclass so normal JSON serializers preserve it as a
+   scalar value.  Applications should pass a token returned by a page back
+   unchanged; data backends validate its version, structure, and result-plan
+   fingerprint before using any decoded value as a bound parameter.
+
+   :param value: The opaque continuation value.
+
+
+.. py:exception:: CountUnavailableError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   Report that a store cannot provide an exact query count.
+
+
+.. py:exception:: MultipleResultsError
+
+   Bases: :py:obj:`LookupError`
+
+
+   Report that a result-set ``one()`` operation found multiple results.
+
+
+.. py:exception:: NoResultError
+
+   Bases: :py:obj:`LookupError`
+
+
+   Report that a result-set ``one()`` operation found no matching result.
+
+
+.. py:class:: PageableResultSetLike
+
+   Bases: :py:obj:`Protocol`
+
+
+   Expose optional continuation-page capability on a frozen result set.
+
+   This deliberately extends neither :class:`ResultSetLike` nor
+   :class:`Searcher`: stores that do not support seek pagination remain fully
+   conforming to the required portable contracts.
+
+
+   .. py:method:: page(*, size, order_by, cursor = None, include_total = False)
+
+      Return one ordered continuation page.
+
+
+
+.. py:class:: PageOrder
+
+   Order a continuation page by one named scalar result projection.
+
+   ``name`` identifies the name supplied to ``results()`` (or
+   :meth:`Searcher.output`), never a backend column object.  The result-set
+   implementation validates that it is a root scalar projection before it
+   generates SQL.
+
+   :param name: The declared scalar output name used for ordering.
+   :param descending: Whether to order this field in descending order.
+   :param nulls: Whether null values sort first or last.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: descending
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: nulls
+      :type:  Literal['first', 'last']
+      :value: 'last'
+
+
+
+.. py:exception:: PaginationCursorError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Report that a continuation cursor is malformed, expired, or belongs to another result plan.
+
+
+.. py:class:: PortableQueryCapabilities
+
+   Describe the query operations guaranteed by one property definition.
+
+   ``query-support`` expresses a cross-provider guarantee, not a particular
+   server's implementation detail.  ``all optional`` is deliberately
+   fail-closed here: it gives a portable client no operation it can rely on.
+   A server may offer more, but that is not represented by the definition.
+
+   :param query_support: The normalized declared query-support level.
+   :param operations: The portable operation families guaranteed by the definition.
+
+
+   .. py:attribute:: query_support
+      :type:  str | None
+
+
+   .. py:attribute:: operations
+      :type:  frozenset[str]
+
+
+   .. py:method:: supports(operation)
+
+      Report whether ``operation`` is guaranteed by this definition.
+
+      :param operation: The operation family to test.
+      :return: ``True`` when the operation is portable.
+
+
+
+.. py:class:: ResultPage
+
+   Represent an immutable continuation-page result.
+
+   ``rows`` is always a tuple.  Returned rows are ordinary persistent result
+   rows, not the expiring proxies produced by ``SqlResultSet.cursor()``.
+   ``total`` is populated only when the caller explicitly asks for it.
+
+   :param rows: The persistent rows returned by the page.
+   :param next: The token for the next page, if one exists.
+   :param previous: The token for the previous page, if one exists.
+   :param total: The exact result count when requested, otherwise ``None``.
+
+
+   .. py:attribute:: rows
+      :type:  tuple[ResultRowLike, ...]
+
+
+   .. py:attribute:: next
+      :type:  ContinuationToken | None
+
+
+   .. py:attribute:: previous
+      :type:  ContinuationToken | None
+
+
+   .. py:attribute:: total
+      :type:  int | None
+      :value: None
+
+
+
+.. py:class:: ResultRow(values, names, resolver = None, guard = None)
+
+   Represent one named result row by position, name, or attribute.
+
+   :param values: The row values in declaration order.
+   :param names: The corresponding output names.
+   :param resolver: An optional lazy value resolver.
+   :param guard: An optional callback that rejects access to expired values.
+
+
+   .. py:property:: names
+      :type: tuple[str, ...]
+
+
+      Return the declared output names.
+
+
+   .. py:property:: values
+      :type: tuple[Any, ...]
+
+
+      Return the row values in declaration order.
+
+
+.. py:class:: ResultRowLike
+
+   Bases: :py:obj:`Protocol`
+
+
+   Require named access to one result row.
+
+
+   .. py:property:: names
+      :type: tuple[str, ...]
+
+
+      Return the row's declared output names.
+
+
+.. py:class:: ResultSetLike
+
+   Bases: :py:obj:`Protocol`
+
+
+   Require the common operations of a materialized result set.
+
+
+   .. py:method:: first()
+
+      Return the first row, or ``None`` when no row matches.
+
+
+
+   .. py:method:: one()
+
+      Return the only row, or raise when the count is not one.
+
+
+
+   .. py:method:: scalars(name = None)
+
+      Iterate over one named scalar output.
+
+
+
+.. py:class:: Searcher
+
+   Bases: :py:obj:`Protocol`
+
+
+   Build one query and iterate its results.
+
+   Iteration yields one :class:`SearchResult` per match, so ``item[0][0]`` is
+   the first declared output of the match (typically the matched row object).
+   The expressions received by ``add`` are always ones produced by this same
+   backend's search variables, so implementations may type them as their own
+   expression class; a backend that needs a second (post-filter) evaluation
+   position decides that from the expression itself, not from the caller.
+
+
+   .. py:attribute:: offset
+      :type:  int
+
+
+   .. py:method:: variable(target)
+
+      Bind a query variable to ``target``.
+
+
+
+   .. py:method:: output(variable, name)
+
+      Declare ``variable`` as a named result output.
+
+      A relationship-namespace value (``v.links.<name>``, not chained
+      further) is a set-valued output: it yields a tuple of related records
+      per row, resolved after the query, rather than a single value.
+
+
+
+   .. py:method:: add(expression)
+
+      Add a filter expression to the query.
+
+
+
+   .. py:method:: count()
+
+      Return the exact count of the current query.
+
+
+
+   .. py:method:: set_limit(limit)
+
+      Set the query limit.
+
+
+
+   .. py:method:: add_offset(offset)
+
+      Add an offset to the query.
+
+
+
+   .. py:method:: add_sort(field, descending)
+
+      Add a field sort to the query.
+
+
+
+   .. py:method:: results(**outputs)
+
+      Return a result set for the requested named outputs.
+
+
+
+.. py:class:: SearchExpression
+
+   Bases: :py:obj:`Protocol`
+
+
+   Require composable backend search expressions.
+
+
+.. py:class:: SearchField
+
+   Bases: :py:obj:`Protocol`
+
+
+   Expose a queryable field of a search variable.
+
+   In addition to the methods below, fields support the rich comparison
+   operators (``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``), returning
+   :class:`SearchExpression`. The handlers invoke those via
+   ``getattr(field, '__eq__')(value)`` since the comparison dunders cannot be
+   typed as expression-returning.
+
+   The three string-matching methods take **literal** text: no wildcard or
+   pattern syntax whatsoever crosses this contract, so ``%`` and ``_`` (and
+   any other metacharacter) match themselves. A backend is therefore free to
+   implement them with SQL ``LIKE`` over an escaped pattern, with a regular
+   expression, or with a full-text index — the choice is invisible here.
+
+
+   .. py:method:: has(value)
+
+      Match a list field containing ``value``.
+
+
+
+   .. py:method:: has_any(*values)
+
+      Match a list field containing any of ``values``.
+
+
+
+   .. py:method:: has_only(*values)
+
+      Match a list field containing no values outside ``values``.
+
+
+
+   .. py:method:: is_in(*values)
+
+      Match a root scalar field whose value is one of ``values``.
+
+      ``None`` is an explicit member: it matches a null field value, and its
+      negation excludes nulls rather than inheriting SQL's three-valued
+      ``NOT IN (..., NULL)`` behavior.
+
+      Backends define the corresponding semantics for child or set fields;
+      for example, a backend may use the existing ``has_only``-style
+      all-values reading for a child field.
+
+
+
+   .. py:method:: contains(text)
+
+      Match values containing ``text`` as a literal substring.
+
+
+
+   .. py:method:: startswith(prefix)
+
+      Match values beginning with the literal ``prefix``.
+
+
+
+   .. py:method:: endswith(suffix)
+
+      Match values ending with the literal ``suffix``.
+
+
+
+.. py:class:: SearchResult
+
+   Bases: :py:obj:`NamedTuple`
+
+
+   Represent one match with declared output values and names.
+
+   ``values`` holds one entry per :meth:`Searcher.output` call in declaration
+   order; it is a tuple, so ``values, names = result`` and ``result[0][0]``
+   both work. A relationship-namespace output yields a tuple of related
+   records for that entry, rather than a single value.
+
+
+   .. py:attribute:: values
+      :type:  tuple[Any, ...]
+
+
+   .. py:attribute:: names
+      :type:  tuple[str, ...]
+
+
+.. py:class:: SearchVariable
+
+   Bases: :py:obj:`Protocol`
+
+
+   Bind a query variable to a target type whose attributes yield fields.
+
+   ``always_true``/``always_false`` are reserved names: they are real methods
+   of the variable, never stored fields resolved through ``__getattr__``.
+   They exist so a translation layer can express a constant truth value
+   without inventing a probe field. A ``field == field`` probe is NULL-unsound,
+   since it yields NULL (not true) for a NULL field.
+
+   ``links.<name>`` is a reserved relationship namespace: usable as a
+   predicate root (``v.links.p == other``, field chaining, set operations)
+   and, on its own, as a set-valued :meth:`Searcher.output`.
+
+
+   .. py:method:: always_true()
+
+      An expression that matches every row.
+
+
+
+   .. py:method:: always_false()
+
+      An expression that matches no row.
+
+
+
+.. py:class:: Store
+
+   Bases: :py:obj:`Protocol`
+
+
+   Require a store that can create a query searcher.
+
+   Implementations predating the ``as_of`` keyword may omit it and remain
+   usable for current-state queries, but cannot honor historic queries.
+
+
+   .. py:method:: searcher(*, as_of = None)
+
+      Create an empty searcher, optionally at a historic cutoff.
+
+      :param as_of: Optional canonical historic timestamp cutoff.
+      :return: An empty query searcher.
+
+
+
+.. py:exception:: UnsupportedQueryError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Report that a valid query operation is outside a store's supported profile.
+
+
+.. py:function:: portable_query_capabilities(definition)
+
+   Derive the portable operation subset for ``definition``.
+
+   The operation names are ``"equality"``, ``"ordering"``,
+   ``"stringmatching"``, and ``"set"``.  They intentionally describe the
+   query-language operation families rather than storage implementation.
+   ``IS [NOT] KNOWN`` is part of the equality family because it is the NULL
+   spelling of equality/inequality in the OPTIMADE filter language.
+
+   :param definition: The OPTIMADE property definition to inspect.
+   :return: The guaranteed portable query capabilities.
+
+
+.. py:function:: portable_query_fields(entry_type, *, include = (), exclude = ())
+
+   Return the ordered portable query fields described by ``entry_type``.
+
+   By default, this selects scalar fields and flat lists with at least one
+   operation guaranteed by their definition. ``include`` is an explicit
+   binding override for named existing properties; it is appended as a second
+   ordered group after the derived fields, in entry-definition order among the
+   included names, but does not manufacture query capabilities absent from that
+   definition. ``exclude`` always wins. Both arguments reject unknown or
+   duplicate names so binding mistakes cannot silently broaden a profile.
+
+   :param entry_type: The entry definition whose properties are inspected.
+   :param include: Existing property names to append to the derived selection.
+   :param exclude: Existing property names to remove from the selection.
+   :return: Derived property names followed by explicitly included names.
+   :raises ValueError: If ``include`` or ``exclude`` contains an unknown or
+       duplicate property name.
+
+
+.. py:type:: FilterTranslationCategory
+   :canonical: Literal['unrecognized-property', 'not-implemented', 'type-mismatch', 'internal']
+
+
+   Why a filter could not be translated (see :class:`FilterTranslationError`).
+
+.. py:exception:: FilterTranslationError(message, category, detail = None)
+
+   Bases: :py:obj:`Exception`
+
+
+   Report that a filter cannot be translated into a search expression.
+
+   The exception message describes the failure; :attr:`category` classifies it
+   neutrally (this module knows nothing about transports, so consumers map
+   each category onto their own error codes):
+
+   - ``"unrecognized-property"`` — the filter names an unknown property
+     carrying a recognized prefix (a caller error);
+   - ``"type-mismatch"`` — a filter constant does not match the property's
+     declared type (a caller error);
+   - ``"not-implemented"`` — the filter uses a construct this translation (or
+     the supplied handler table) does not support;
+   - ``"internal"`` — an inconsistency in the translation itself.
+
+   ``detail`` optionally carries extra machine-readable context.
+
+   :param message: The human-readable translation failure.
+   :param category: The neutral failure category.
+   :param detail: Optional machine-readable failure context.
+
+
+   .. py:attribute:: category
+      :type:  FilterTranslationCategory
+
+
+   .. py:attribute:: detail
+      :value: None
+
+
+
+.. py:function:: filter_searcher(store, target, filter_string, *, entry_type, property_fulltypes, property_keys = None, handlers = None, recognized_prefixes = (), relationship_targets = (), related_property_resolver = None)
+
+   Build a :class:`~httk.store.query.Searcher` over ``store`` applying an OPTIMADE filter.
+
+   ``filter_string`` is an OPTIMADE filter string (parsed with
+   :func:`httk.core.optimade.parse_optimade_filter`) or an already-parsed
+   :py:type:`~httk.core.optimade.FilterAst`. The searcher binds one search variable to
+   ``target`` (the store-specific query target, declared as the searcher
+   output named ``entry_type``) and applies the translated filter. When
+   ``handlers`` is not supplied, a default table is built with
+   :func:`~httk.store.query.optimade_filters.simple_property_handlers` from ``property_keys`` (or, when
+   ``property_keys`` is also None, from an identity map over
+   ``property_fulltypes``). The
+   remaining keyword arguments are passed through to
+   :func:`~httk.store.query.optimade_filters.translate_filter_ast`.
+
+   :param store: The backend store on which to build the searcher.
+   :param target: The backend query target to bind.
+   :param filter_string: An OPTIMADE filter string or parsed filter AST.
+   :param entry_type: The output name and served entry type.
+   :param property_fulltypes: Fulltypes keyed by recognized property name.
+   :param property_keys: Optional mapping from property names to backend field names.
+   :param handlers: Optional prebuilt property handler table.
+   :param recognized_prefixes: Prefixes whose unknown properties are errors.
+   :param relationship_targets: Related entry types that support dotted filters.
+   :param related_property_resolver: Optional resolver for related-property filters.
+   :return: A searcher with the translated filter already applied.
+   :raises FilterTranslationError: If the filter cannot be translated.
+   :raises httk.core.optimade.ParserSyntaxError: If a filter string does not parse.
+
+
+.. py:class:: EntryFamilyDeclaration
+
+   Declare one application-owned entry family without global registration.
+
+   Explicit declarations provide stable persistence identities directly to a
+   store.  They are intended for application-private families which should
+   not participate in plugin discovery.  The same declaration must be
+   supplied whenever such a store is reopened.
+
+   :param name: Stable family identity persisted in the store declaration.
+   :param family: Logical entry-family class exposed through ``entry_layout``.
+   :param records: Ordered concrete record declarations belonging to the family.
+   :param definition_id: Optional entry-type definition IRI for the family.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: family
+      :type:  type
+
+
+   .. py:attribute:: records
+      :type:  tuple[EntryRecordDeclaration, ...]
+
+
+   .. py:attribute:: definition_id
+      :type:  str | None
+      :value: None
+
+
+
+.. py:exception:: EntryLayoutBindingError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A persisted application-owned layout needs explicit Python class bindings.
+
+
+.. py:class:: EntryRecordDeclaration
+
+   Bind one stable store-local name to a concrete record class.
+
+   :param name: Stable record identity persisted in the store declaration.
+   :param record: Concrete frozen dataclass used for storage and hydration.
+   :param definition_id: Optional entry-type definition IRI described by the record.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: record
+      :type:  type
+
+
+   .. py:attribute:: definition_id
+      :type:  str | None
+      :value: None
+
+
+
+.. py:exception:: EntryIdConflictError(table_name, entry_id, existing_logical_id, requested_logical_id)
+
+   Bases: :py:obj:`ValueError`
+
+
+   An entry id is already owned by a different lineage or alternative group.
+
+   :param table_name: The table containing the conflicting identifier.
+   :param entry_id: The conflicting entry identifier.
+   :param existing_logical_id: The lineage or group already owning the identifier.
+   :param requested_logical_id: The lineage or group requesting it, when known.
+
+
+   .. py:attribute:: table_name
+
+
+   .. py:attribute:: entry_id
+
+
+   .. py:attribute:: existing_logical_id
+
+
+   .. py:attribute:: requested_logical_id
+
+
+.. py:class:: EntryIdScheme
+
+   Configuration used to mint human-readable entry identifiers.
+
+   :param base: Dot-separated database namespace.
+   :param series: Campaign-series token.
+   :param type_in_base: Whether the served entry type is appended to ``base``.
+
+
+   .. py:attribute:: base
+      :type:  str
+
+
+   .. py:attribute:: series
+      :type:  str
+
+
+   .. py:attribute:: type_in_base
+      :type:  bool
+      :value: False
+
+
+
+.. py:class:: EntryStore
+
+   Bases: :py:obj:`Protocol`
+
+
+   The store surface consumed by :mod:`httk.store.backend.sql.stored_federation`.
+
+   This protocol deliberately describes the small backend seam used by the
+   federation.  The stored-property plan and candidate-stream objects remain
+   backend-specific; their SQL implementations use :meth:`searcher`.
+
+
+   .. py:property:: entry_layout
+      :type: tuple[httk.store.storage_layout.EntryFamilyLayout, ...]
+
+
+      Return the configured entry-family layouts in stable order.
+
+
+   .. py:method:: searcher(*, as_of = None)
+
+      Return a backend searcher used to build candidate ID streams.
+
+
+
+   .. py:method:: fetch(cls, sid, *, eager = False)
+
+      Fetch the stored record of ``cls`` identified by ``sid``.
+
+      :param cls: The storable record class.
+      :param sid: The stored row identifier to fetch.
+      :param eager: Whether to fully materialize the record instead of returning a lazy row.
+      :return: The reconstructed instance.
+
+
+
+   .. py:method:: fetch_many(cls, sids, *, eager = False)
+
+      Fetch the stored records of ``cls`` identified by ``sids``.
+
+      Batched counterpart of :meth:`fetch`.
+
+      :param cls: The storable record class.
+      :param sids: The stored row identifiers to fetch.
+      :param eager: Whether to fully materialize each record instead of returning lazy rows.
+      :return: The reconstructed instances in ``sids`` order.
+      :raises KeyError: When any requested row is absent.
+
+
+
+   .. py:method:: stored_property_plan(family)
+
+      Return the backend-specific stored-property plan for one family.
+
+      :param family: The logical entry-family class to plan.
+      :return: The validated stored-property plan consumed by federation.
+
+
+
+.. py:exception:: PropertyValidationError(name, message)
+
+   Bases: :py:obj:`ValueError`
+
+
+   Report that a value did not conform to its OPTIMADE property definition.
+
+   Carries the offending property ``name`` and a human-readable ``message``. For
+   single-value failures the message wraps the underlying ``jsonschema`` error
+   message, and that ``jsonschema.exceptions.ValidationError`` is preserved
+   as the chained ``__cause__``.
+
+   :param name: The name of the invalid property.
+   :param message: The validation failure message.
+
+
+   .. py:attribute:: name
+
+
+   .. py:attribute:: message
+
+
+.. py:function:: validate_property(definition, value)
+
+   Validate a single ``value`` against ``definition``'s JSON-Schema payload.
+
+   Builds a ``jsonschema.Draft202012Validator`` directly from the
+   definition's document (with the ``$schema`` meta-schema reference removed)
+   and validates ``value`` against it using the local format checker. Returns
+   ``None`` on success; raises :class:`PropertyValidationError` on failure,
+   chaining the underlying ``jsonschema.exceptions.ValidationError`` as the
+   cause. No network access or registry lookup ever happens.
+
+   :param definition: The self-contained OPTIMADE property definition.
+   :param value: The value to validate.
+   :return: None.
+   :raises PropertyValidationError: If ``value`` violates ``definition``.
+
+
+.. py:function:: validate_record(entry_type, record)
+
+   Validate every property present in ``record`` against ``entry_type``.
+
+   Each key in ``record`` must be described by ``entry_type``; unknown property
+   names are rejected with a :class:`PropertyValidationError` naming them and the
+   entry type. ``id`` and ``type`` must both be present. Properties described by
+   the definition but absent from ``record`` are simply not checked (serving a
+   subset of the described properties is normal). The value of every property
+   that *is* present is validated via :func:`validate_property`. Returns ``None``
+   on success.
+
+   :param entry_type: The entry definition describing allowed properties.
+   :param record: The record mapping to validate.
+   :return: None.
+   :raises PropertyValidationError: If a property is unknown, ``id`` or ``type``
+       is missing, or a value violates its property definition.
+
+

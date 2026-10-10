@@ -1,0 +1,396 @@
+httk.store.optimade.client
+==========================
+
+.. py:module:: httk.store.optimade.client
+
+.. autoapi-nested-parse::
+
+   Synchronous, read-only discovery for remote OPTIMADE services.
+
+   This module establishes lossless schema snapshots and strict definition-IRI
+   recognition. Query construction and paginated execution live in
+   ``remote_query`` and are imported lazily by :meth:`OptimadeStore.searcher`.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.store.optimade.client.ALL_ADVERTISED
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.optimade.client.OptimadeClientError
+   httk.store.optimade.client.OptimadeTransportError
+   httk.store.optimade.client.OptimadeHTTPError
+   httk.store.optimade.client.OptimadeErrorDocumentError
+   httk.store.optimade.client.OptimadeDiscoveryError
+   httk.store.optimade.client.OptimadeVersionNegotiationError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.optimade.client.ServiceDeviation
+   httk.store.optimade.client.RemoteEntryType
+   httk.store.optimade.client.OptimadeStore
+
+
+Module Contents
+---------------
+
+.. py:data:: ALL_ADVERTISED
+
+.. py:exception:: OptimadeClientError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   Base class for safe, client-side OPTIMADE failures.
+
+
+.. py:exception:: OptimadeTransportError(source_url, detail)
+
+   Bases: :py:obj:`OptimadeClientError`
+
+
+   Report that the HTTP client could not complete a request.
+
+   :param source_url: Redacted URL of the failed request.
+   :param detail: Safe transport detail.
+
+
+   .. py:attribute:: source_url
+
+
+   .. py:attribute:: detail
+
+
+.. py:exception:: OptimadeHTTPError(source_url, status_code, detail = None)
+
+   Bases: :py:obj:`OptimadeClientError`
+
+
+   Report a non-success HTTP status from a remote endpoint.
+
+   :param source_url: Redacted URL of the response.
+   :param status_code: HTTP status code returned by the service.
+   :param detail: Optional safe error detail.
+
+
+   .. py:attribute:: source_url
+
+
+   .. py:attribute:: status_code
+
+
+   .. py:attribute:: detail
+      :value: None
+
+
+
+.. py:exception:: OptimadeErrorDocumentError(source_url, status_code, detail = None)
+
+   Bases: :py:obj:`OptimadeHTTPError`
+
+
+   Report a non-success response with a parseable OPTIMADE error document.
+
+
+.. py:exception:: OptimadeDiscoveryError(source_url, detail)
+
+   Bases: :py:obj:`OptimadeClientError`
+
+
+   Report a malformed or inconsistent ``/info`` discovery document.
+
+   :param source_url: Redacted URL of the malformed document.
+   :param detail: Safe discovery detail.
+
+
+   .. py:attribute:: source_url
+
+
+   .. py:attribute:: detail
+
+
+.. py:exception:: OptimadeVersionNegotiationError(source_url, detail)
+
+   Bases: :py:obj:`OptimadeClientError`
+
+
+   Report failure to negotiate a supported OPTIMADE API version.
+
+   :param source_url: Redacted URL used for negotiation.
+   :param detail: Safe negotiation detail.
+
+
+   .. py:attribute:: source_url
+
+
+   .. py:attribute:: detail
+
+
+.. py:class:: ServiceDeviation
+
+   One specification deviation the client tolerated for a service.
+
+   :param kind: Deviation category -- ``"versions-endpoint"``,
+       ``"entry-info-identity"``, or ``"continuation-scheme"``.
+   :param url: Redacted URL the deviation was observed at.
+   :param detail: One factual sentence describing the applied fallback.
+
+
+   .. py:attribute:: kind
+      :type:  str
+
+
+   .. py:attribute:: url
+      :type:  str
+
+
+   .. py:attribute:: detail
+      :type:  str
+
+
+.. py:class:: RemoteEntryType
+
+   Describe one immutable remote entry endpoint discovered from ``/info``.
+
+   ``name`` is solely the service's transport endpoint name.  Semantic
+   recognition is intentionally represented by ``binding`` and is derived
+   exclusively from definition IRIs.
+
+   :param name: Transport endpoint name.
+   :param definition_id: Entry-definition IRI, when advertised.
+   :param schema: Lossless schema snapshot from discovery.
+   :param property_iris: Transport property names keyed by definition IRI.
+   :param property_names: Local property names keyed by definition IRI.
+   :param property_types: Property kinds keyed by transport name.
+   :param advertised_properties: Properties advertised by the service.
+   :param default_response_properties: Properties returned by default.
+   :param sortable_properties: Properties accepted by remote sorting.
+   :param binding: Recognized semantic binding, when available.
+   :param backend: Backend class associated with the binding.
+   :param binding_evidence: Why the binding was selected -- ``"declared"`` when
+       a ``links.describedby`` IRI selected it, ``"property-ids"`` when an
+       unambiguous set of declared property definition IRIs did,
+       ``"standard-name"`` when the declared specification version's standard
+       namespace did, and ``None`` when the endpoint stays unbound.
+   :param inferred_properties: Sorted transport names whose definition IRI
+       came from standard-name completion rather than a declared ``$id``.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: definition_id
+      :type:  str | None
+
+
+   .. py:attribute:: schema
+      :type:  httk.core.optimade.OptimadeSchemaSnapshot
+
+
+   .. py:attribute:: property_iris
+      :type:  collections.abc.Mapping[str, str]
+
+
+   .. py:attribute:: property_names
+      :type:  collections.abc.Mapping[str, str]
+
+
+   .. py:attribute:: property_types
+      :type:  collections.abc.Mapping[str, tuple[str, str | None]]
+
+
+   .. py:attribute:: advertised_properties
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: default_response_properties
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: sortable_properties
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: binding
+      :type:  httk.core.register.OptimadeEntryBinding | None
+
+
+   .. py:attribute:: backend
+      :type:  type
+
+
+   .. py:attribute:: binding_evidence
+      :type:  str | None
+
+
+   .. py:attribute:: inferred_properties
+      :type:  tuple[str, ...]
+
+
+.. py:class:: OptimadeStore(base_url, *, client = None, timeout = 120.0, page_limit = 50, max_pages = 10000, allow_cross_origin_pagination = False, response_fields = None, count_by_pagination = False, infer_standard_definitions = True, tolerate_deviations = True)
+
+   Connect synchronously to a read-only OPTIMADE service and discover it eagerly.
+
+   Unversioned bases negotiate strictly through the preference-ordered
+   ``/versions`` CSV. Query pagination validates complete pages before yielding,
+   uses lazy one-root exact-literal requests, and bounds continuation links by
+   page count and origin.
+
+   :param base_url: Absolute HTTP(S) service base URL.
+   :param client: Optional borrowed synchronous HTTP client; when given, its own timeout configuration applies and ``timeout`` is ignored.
+   :param timeout: Request timeout in seconds for the client this store creates when ``client`` is not given (default 120; public providers routinely take several seconds per filtered query). ``None`` disables the timeout.
+   :param page_limit: Requested default remote page size; lowered automatically when a service rejects it with HTTP 403.
+   :param max_pages: Maximum continuation pages followed by one query.
+   :param allow_cross_origin_pagination: Permit continuation links on another origin.
+   :param response_fields: Default response-field selection for new searchers.
+   :param count_by_pagination: Count IDs across all pages when the service omits ``meta.data_returned``.
+   :param infer_standard_definitions: Complete unprefixed standard property names on standard endpoints from the declared specification version (the info document's ``meta.api_version``) when the service publishes no ``$id``. This governs discovery, entry-type binding, and typed query fields; set False for strict definition-only auditing, where only declared ``$id`` definitions are recognized. It does not affect an entry backend constructed directly over a raw ``OptimadeResource``, which always applies the standard-name rule.
+   :param tolerate_deviations: Apply specification-anchored fallbacks for known service deviations and record them in ``deviations``; set False to fail strictly, for conformance auditing.
+   :raises OptimadeVersionNegotiationError: If the service cannot select a supported version.
+   :raises OptimadeDiscoveryError: If discovery documents are malformed.
+
+
+   .. py:attribute:: requested_base_url
+
+
+   .. py:attribute:: base_url
+
+
+   .. py:attribute:: page_limit
+      :value: 50
+
+
+
+   .. py:attribute:: max_pages
+      :value: 10000
+
+
+
+   .. py:attribute:: timeout
+      :value: 120.0
+
+
+
+   .. py:attribute:: allow_cross_origin_pagination
+      :value: False
+
+
+
+   .. py:attribute:: response_fields
+      :value: None
+
+
+
+   .. py:attribute:: count_by_pagination
+      :value: False
+
+
+
+   .. py:attribute:: infer_standard_definitions
+      :value: True
+
+
+
+   .. py:attribute:: tolerate_deviations
+      :value: True
+
+
+
+   .. py:attribute:: api_version
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:property:: deviations
+      :type: tuple[ServiceDeviation, ...]
+
+
+      Specification deviations this client tolerated, in observation order.
+
+
+   .. py:property:: entry_types
+      :type: tuple[RemoteEntryType, ...]
+
+
+      Discovered entry endpoints in the service-advertised order.
+
+
+   .. py:property:: entry_types_by_name
+      :type: collections.abc.Mapping[str, RemoteEntryType]
+
+
+      An immutable transport-name lookup for :attr:`entry_types`.
+
+
+   .. py:method:: entry_type(name)
+
+      Return one discovered endpoint by transport name.
+
+      :param name: Service-advertised endpoint name.
+      :return: Discovered endpoint descriptor.
+      :raises KeyError: If no endpoint has that name.
+
+
+
+   .. py:method:: refresh()
+
+      Refresh discovery state after a fully successful rediscovery.
+
+      :raises OptimadeClientError: If the store is closed or discovery fails.
+
+
+
+   .. py:method:: close()
+
+      Close an internally owned HTTP client; borrowed clients stay open.
+
+
+
+   .. py:method:: searcher(*, response_fields = ..., as_of = None)
+
+      Create one synchronous, read-only remote search plan.
+
+      Passing ``response_fields`` overrides the store-level selection. An
+      omitted value inherits it, while explicit ``None`` requests the
+      service default.
+
+      :param response_fields: Per-search field selection override.
+      :param as_of: Historic cutoff; unsupported because remote snapshot negotiation is unavailable.
+      :return: New remote search plan.
+      :raises OptimadeClientError: If the store is closed.
+      :raises ValueError: If a historic cutoff is requested.
+
+
+
+   .. py:method:: slicer(target)
+
+      A pandas-style ``[]`` indexing view over one discovered entry endpoint.
+
+      ``target`` is a discovered :class:`RemoteEntryType`, or its transport
+      endpoint name resolved the same way as :meth:`entry_type`. Each
+      terminal indexing operation runs its own fresh search against a
+      searcher created with this store's default ``response_fields``
+      policy. No sorting is offered here -- use :meth:`searcher` directly
+      for a sorted or relationship query.
+
+      :param target: A discovered endpoint descriptor, or its endpoint name.
+      :return: A slicer over the endpoint's records.
+      :raises KeyError: If ``target`` is a name with no discovered endpoint.
+
+
+

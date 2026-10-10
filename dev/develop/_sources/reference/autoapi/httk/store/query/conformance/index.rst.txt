@@ -1,0 +1,134 @@
+httk.store.query.conformance
+============================
+
+.. py:module:: httk.store.query.conformance
+
+.. autoapi-nested-parse::
+
+   State the neutral :class:`~httk.store.query.protocols.Store` query contract as data.
+
+   This module is the executable statement of the truth table every store that
+   implements :mod:`httk.store.query.protocols` must follow:
+
+   - Scalar comparisons (``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``) and literal
+     string matching (``contains``/``startswith``/``endswith``, in which ``%``
+     and ``_`` match themselves) against a NULL value are *unknown*. ``~unknown``
+     is unknown, unknown rows do not match, and ``&``/``|`` follow Kleene logic.
+     ``field == None`` and ``field != None`` are ``IS [NOT] NULL`` and definite.
+     (OPTIMADE: comparisons involving unknown values MUST NOT match.)
+   - ``is_in(...)`` is definite: NULL matches only an explicit ``None`` member,
+     and ``~is_in(1)`` keeps NULL rows.
+   - Set operations treat a NULL list as the empty set: ``has``/``has_any`` are
+     false, ``has_only`` is true, and all stay definite under ``~``.
+   - ``count()`` is exact and ignores limit and offset.
+   - Sorting places NULLs last in both directions.
+   - String-matching case sensitivity is backend-defined, so no case depends on it.
+
+   A third-party store loads :func:`conformance_rows` into one table or
+   collection (``rid`` is the row id, ``tags`` a list field) and then either calls
+   :func:`check_query_conformance` or parametrizes its own tests over
+   :func:`conformance_cases`.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.query.conformance.ConformanceCase
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.query.conformance.conformance_rows
+   httk.store.query.conformance.conformance_cases
+   httk.store.query.conformance.check_query_conformance
+
+
+Module Contents
+---------------
+
+.. py:function:: conformance_rows()
+
+   Return fresh copies of the canonical conformance fixture rows.
+
+   Each row has a non-null string id ``rid`` (``"a"`` to ``"f"``), nullable
+   scalars ``name``, ``n`` and ``x``, and a nullable list ``tags``.
+
+   :return: Six new row dictionaries.
+
+
+.. py:class:: ConformanceCase
+
+   Describe one query over :func:`conformance_rows` and its expected ids.
+
+   :param name: A unique case name.
+   :param build: Build the filter expression from the search variable, or ``None`` for no filter.
+   :param expected: The expected row ids; order matters only when ``ordered``.
+   :param sort: ``(field, descending)`` sort keys, most significant first.
+   :param limit: An optional result limit.
+   :param offset: A result offset.
+   :param ordered: Whether ``expected`` is compared in order.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: build
+      :type:  collections.abc.Callable[[Any], Any] | None
+
+
+   .. py:attribute:: expected
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: sort
+      :type:  tuple[tuple[str, bool], ...]
+      :value: ()
+
+
+
+   .. py:attribute:: limit
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: offset
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: ordered
+      :type:  bool
+      :value: False
+
+
+
+.. py:function:: conformance_cases()
+
+   Return the conformance cases over :func:`conformance_rows`.
+
+   :return: The cases, with unique names.
+
+
+.. py:function:: check_query_conformance(store, target, *, id_field = 'rid')
+
+   Run every conformance case against ``store`` holding :func:`conformance_rows`.
+
+   Each case uses a fresh ``store.searcher()`` bound to ``target``. Besides the
+   returned ids, ``count()`` must equal the unpaged match count, both before
+   and after the case's limit and offset are applied.
+
+   :param store: A :class:`~httk.store.query.protocols.Store` loaded with the conformance rows.
+   :param target: The backend target the rows are stored under.
+   :param id_field: The field or mapping key holding the row id.
+   :raises AssertionError: If any case fails; the message lists every failing case.
+
+

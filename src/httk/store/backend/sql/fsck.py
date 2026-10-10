@@ -304,7 +304,7 @@ def _repair_dispatches(
 
 def dispatch_derivation(
     backings: Sequence[tuple[str, sqlalchemy.Table]],
-) -> tuple[tuple[str, sqlalchemy.Select[tuple[str, int]]], ...]:
+) -> tuple[tuple[str, sqlalchemy.Select], ...]:  # Bare: SQLAlchemy 2.0 and 2.1 spell row types differently.
     """Derive an entry family's dispatch associations from its backing tables.
 
     A dispatch row exists exactly for every *main* (``_httk_role = 1``) row of a

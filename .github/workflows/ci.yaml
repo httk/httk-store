@@ -34,7 +34,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e .[dev]
+          pip install -e .[dev,ci]
 
       - name: Run CI
         run: make ci
@@ -93,7 +93,7 @@ jobs:
         run: echo 'HTTK_TEST_MONGODB_URI=mongodb://127.0.0.1:27127/?replicaSet=rs0' >> "$GITHUB_ENV"
 
       - name: Install dependencies
-        run: pip install -e ".[dev,mongodb]"
+        run: pip install -e ".[dev,ci]"
 
       - name: Run the default test profile
         run: python -m pytest tests/ -q
@@ -160,7 +160,7 @@ jobs:
         run: echo 'HTTK_TEST_CLICKHOUSE_URI=clickhousedb://default:@127.0.0.1:28123/httk_p5' >> "$GITHUB_ENV"
 
       - name: Install dependencies
-        run: pip install -c constraints/clickhouse-p5.txt -e ".[dev,clickhouse,parallel]"
+        run: pip install -c constraints/clickhouse-p5.txt -e ".[dev,ci]"
 
       - name: Run the default test profile
         env:
@@ -218,7 +218,7 @@ jobs:
         run: echo 'HTTK_TEST_POSTGRES_URI=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/httk' >> "$GITHUB_ENV"
 
       - name: Install dependencies
-        run: pip install -e ".[dev,postgresql,parallel]"
+        run: pip install -e ".[dev,ci]"
 
       - name: Run the default test profile
         env:

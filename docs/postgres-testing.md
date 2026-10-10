@@ -31,7 +31,7 @@ Install the client with the `postgresql` extra, which pins psycopg 3:
 python -m pip install "httk-store[postgresql]"
 ```
 
-CI installs `.[dev,postgresql,parallel]`; there is no committed constraints
+CI installs `.[dev,ci]` (the `ci` extra includes `postgresql`); there is no committed constraints
 file for PostgreSQL, so the `pyproject.toml` extra range applies directly.
 
 ## Skipping when unset

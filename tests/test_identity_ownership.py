@@ -2,6 +2,7 @@
 
 import multiprocessing
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 from typing import Annotated, ClassVar
 
 import pytest
@@ -17,6 +18,10 @@ from httk.store.storage_layout import (
     EntryRecordDeclaration,
     StorageLayoutUpgradeRequiredError,
 )
+
+# DuckDB is an optional driver in the [ci] extra; its cases skip without it.
+NEEDS_DUCKDB = pytest.mark.skipif(find_spec("duckdb_engine") is None, reason="needs the httk-store[duckdb] extra")
+DUCKDB_PARAM = pytest.param("duckdb", marks=NEEDS_DUCKDB)
 
 
 class Owners:
@@ -121,7 +126,7 @@ def test_process_race_is_arbitrated_across_backings(tmp_path, immutable):
         assert claim_counts(database) == (1, 1)
 
 
-@pytest.mark.parametrize("dialect", ("sqlite", "duckdb"))
+@pytest.mark.parametrize("dialect", ("sqlite", DUCKDB_PARAM))
 def test_revision_alternative_rollback_and_retry(dialect):
     with getattr(Backend, dialect)() as database:
         store = opened(database)
@@ -139,7 +144,7 @@ def test_revision_alternative_rollback_and_retry(dialect):
         assert claim_counts(database) == (2, 4)
 
 
-@pytest.mark.parametrize("dialect", ("sqlite", "duckdb"))
+@pytest.mark.parametrize("dialect", ("sqlite", DUCKDB_PARAM))
 @pytest.mark.parametrize("finalize", ("parity", "deferred"))
 @pytest.mark.parametrize("workers", (1, 2))
 def test_bulk_claims_protect_later_writers(dialect, finalize, workers, monkeypatch):
@@ -165,7 +170,7 @@ def test_bulk_claims_protect_later_writers(dialect, finalize, workers, monkeypat
         assert claim_counts(database) == (1, 1)
 
 
-@pytest.fixture(params=("sqlite", "duckdb", POSTGRES_PARAM))
+@pytest.fixture(params=("sqlite", DUCKDB_PARAM, POSTGRES_PARAM))
 def append_database(request):
     factory = postgres_database if request.param == "postgresql" else getattr(Backend, request.param)
     with factory() as database:
@@ -385,7 +390,7 @@ def test_caught_identity_conflict_cannot_commit_a_partial_parent():
         assert claim_counts(database) == (1, 1)
 
 
-@pytest.mark.parametrize("dialect", ("sqlite", "duckdb"))
+@pytest.mark.parametrize("dialect", ("sqlite", DUCKDB_PARAM))
 def test_caught_conflict_aborts_prior_writes_and_expires_lazy_rows(dialect):
     from httk.store.backend.sql.rows import ExpiredLazyRecordError
 
@@ -407,6 +412,7 @@ def test_caught_conflict_aborts_prior_writes_and_expires_lazy_rows(dialect):
         assert claim_counts(database) == (1, 1)
 
 
+@NEEDS_DUCKDB
 def test_legacy_duckdb_can_open_on_a_readonly_connection(tmp_path):
     path = tmp_path / "old.duckdb"
     with Backend.duckdb(path) as database:

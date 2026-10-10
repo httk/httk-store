@@ -49,8 +49,12 @@ dev = [
   "pyright",
   "mypy",
   "pydoclint>=0.9,<1",
-  "httk-store[clickhouse,duckdb,mongodb,parallel]"
+  # The MongoDB test modules import pymongo; their live arms skip without a server.
+  "httk-store[db,mongodb]"
 ]
+# Full-source type checks and the backend tests cover these optional drivers;
+# the full CI gate installs [dev,ci].
+ci = ["httk-store[clickhouse,duckdb,parallel,postgresql]"]
 docs = [
   "sphinx",
   "furo",
@@ -67,7 +71,9 @@ release = [
 default = ["httk-store[db]"]
 db = ["sqlalchemy>=2.0,<3"]
 # Pandas avoids repeated failed import probes during DuckDB scalar binding.
-duckdb = ["httk-store[db]", "duckdb_engine>=0.13", "duckdb>=1.0", "numpy", "pandas"]
+# duckdb_engine (through 0.17.0) reflects columns with SQLAlchemy's PostgreSQL
+# catalog query, which from SQLAlchemy 2.1 joins pg_collation, absent in DuckDB.
+duckdb = ["httk-store[db]", "sqlalchemy>=2.0,<2.1", "duckdb_engine>=0.13", "duckdb>=1.0", "numpy", "pandas"]
 # clickhouse-connect 1.6.0 was probed for G0/P5; keep the compatible major range.
 clickhouse = ["httk-store[db]", "clickhouse-connect>=1.6,<2"]
 postgresql = ["httk-store[db]", "psycopg[binary]>=3.1"]

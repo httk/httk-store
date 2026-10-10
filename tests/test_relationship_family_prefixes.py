@@ -1,6 +1,7 @@
 """Family identity survives internal-type collisions in relationship mounts."""
 
 from dataclasses import dataclass
+from importlib.util import find_spec
 from typing import ClassVar
 
 import pytest
@@ -106,7 +107,17 @@ def test_loose_types_require_consistent_prefixes_across_mounted_families(sibling
         assert page.relationships[0]["_httk_has_input"][0].id == "D:" + target.id
 
 
-@pytest.mark.parametrize("dialect", ("sqlite", "duckdb"))
+# DuckDB is an optional driver in the [ci] extra; its case skips without it.
+@pytest.mark.parametrize(
+    "dialect",
+    (
+        "sqlite",
+        pytest.param(
+            "duckdb",
+            marks=pytest.mark.skipif(find_spec("duckdb_engine") is None, reason="needs the httk-store[duckdb] extra"),
+        ),
+    ),
+)
 def test_loose_ids_only_prefix_resolved_mounted_targets(dialect: str) -> None:
     with getattr(Backend, dialect)() as database:
         store = _store(database)

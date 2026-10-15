@@ -9,7 +9,6 @@ import sqlalchemy
 from conftest import clickhouse_test_uri
 from sqlalchemy import text
 
-from httk.store.backend.sql import Backend, SqlStore
 from httk.store.backend.clickhouse import support as clickhouse_adapter
 from httk.store.backend.clickhouse.support import (
     acquire_lease,
@@ -18,6 +17,7 @@ from httk.store.backend.clickhouse.support import (
     verify_lease,
     write_ingest_marker,
 )
+from httk.store.backend.sql import Backend, SqlStore
 from httk.store.backend.sql.layout import StoreUnderConstructionError
 
 

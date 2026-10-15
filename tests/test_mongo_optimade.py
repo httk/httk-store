@@ -175,9 +175,7 @@ def test_child_of_storable_target(store):
     store.save(assembly_2)
     searcher = optimade_filter_searcher(store, Assembly, "parts._httk_custom_val > 2", related_classes={"parts": Part})
     assert results(searcher) == [assembly_1]
-    searcher = optimade_filter_searcher(
-        store, Assembly, f'parts.id HAS "{part_a.id}"', related_classes={"parts": Part}
-    )
+    searcher = optimade_filter_searcher(store, Assembly, f'parts.id HAS "{part_a.id}"', related_classes={"parts": Part})
     assert results(searcher) == [assembly_1, assembly_2]
 
 

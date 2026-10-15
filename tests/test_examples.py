@@ -103,6 +103,7 @@ def test_example_runs_cleanly(example: Path, tmp_path: Path) -> None:
             text=True,
             timeout=EXAMPLE_TIMEOUT_SECONDS,
             cwd=tmp_path,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         pytest.fail(

@@ -73,7 +73,7 @@ def test_driver_query_formats_preserve_options_and_percent_escaping(monkeypatch,
             assert QueryContext(query_formats=formats).active_fmt("String") == "bytes"
             if native:
                 assert formats == {"String": "bytes", "Date": "int", "String*": "str", "*": "str", "UUID": "string"}
-                assert list(formats)[0] == "String"
+                assert next(iter(formats)) == "String"
         elif native:
             assert formats == {**statement_formats, **connection_formats}
             assert context.invoked_statement is statement

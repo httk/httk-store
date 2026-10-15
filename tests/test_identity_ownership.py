@@ -7,8 +7,8 @@ from typing import Annotated, ClassVar
 
 import pytest
 import sqlalchemy
-from postgres_support import POSTGRES_PARAM, postgres_database
 from httk.core.storage import IdentitySkip, Indexed, StorageInfo, Unique
+from postgres_support import POSTGRES_PARAM, postgres_database
 
 from httk.store import EntryIdConflictError, EntryIdScheme
 from httk.store.backend.sql import Backend, SqlStore
@@ -231,10 +231,9 @@ def test_bulk_append_durable_cross_backing_conflict_rolls_back(append_database, 
     monkeypatch.setattr(store, "_entry_family_tables", lambda record_type: ())
     values = {"id": "test-1-20", "immutable_id": "test-1-20~1"}
     values[field] = "test-1-10" if field == "id" else "test-1-10~1"
-    with pytest.raises(EntryIdConflictError):
-        with store.bulk_ingest(finalize="parity", chunk_size=1) as bulk:
-            bulk.save(Second(2))
-            bulk.save(Second(3, **values))
+    with pytest.raises(EntryIdConflictError), store.bulk_ingest(finalize="parity", chunk_size=1) as bulk:
+        bulk.save(Second(2))
+        bulk.save(Second(3, **values))
     assert claim_counts(database) == (1, 1)
     with database.engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT count(*) FROM ownership_second").scalar_one() == 0
@@ -276,9 +275,8 @@ def test_bulk_append_rejects_existing_owner_with_another_identity(append_databas
                 family="ownership-test", backing="second", **{id_column: "reserved", owner_column: 1}
             )
         )
-    with pytest.raises(EntryIdConflictError):
-        with store.bulk_ingest(finalize="parity") as bulk:
-            bulk.save(Second(1))
+    with pytest.raises(EntryIdConflictError), store.bulk_ingest(finalize="parity") as bulk:
+        bulk.save(Second(1))
     assert claim_counts(database) == ((1, 0) if field == "id" else (0, 1))
     with database.engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT count(*) FROM ownership_second").scalar_one() == 0
@@ -382,9 +380,12 @@ def test_caught_identity_conflict_cannot_commit_a_partial_parent():
         store.save(First(1, "test-1-10"))
         store.ensure_tables(Second)
         store._entry_family_tables = lambda record_type: ()
-        with pytest.raises(RuntimeError, match="rolled back"), store.transaction():
-            with pytest.raises(EntryIdConflictError):
-                store.save(Second(2, "test-1-10", "test-1-10~2"))
+        with (
+            pytest.raises(RuntimeError, match="rolled back"),
+            store.transaction(),
+            pytest.raises(EntryIdConflictError),
+        ):
+            store.save(Second(2, "test-1-10", "test-1-10~2"))
         with database.engine.connect() as connection:
             assert connection.execute(sqlalchemy.text("SELECT count(*) FROM ownership_second")).scalar_one() == 0
         assert claim_counts(database) == (1, 1)

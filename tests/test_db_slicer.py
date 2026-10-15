@@ -127,9 +127,7 @@ def test_compound_and_or_not(store):
     note = slicer(store)
     mask = (note["value"] > 10) & (note["title"] != "dummy") | (note["other"] < 3)
     got = set(note[mask])
-    expected = hand_records(
-        store, lambda v: (v.value > 10) & (v.title != "dummy") | (v.other < 3)
-    )
+    expected = hand_records(store, lambda v: (v.value > 10) & (v.title != "dummy") | (v.other < 3))
     assert got == expected
 
 
@@ -144,9 +142,7 @@ def test_xor(store):
     left = note["value"] > 10
     right = note["other"] < 3
     got = set(note[left ^ right])
-    expected = hand_records(
-        store, lambda v: ((v.value > 10) | (v.other < 3)) & ~((v.value > 10) & (v.other < 3))
-    )
+    expected = hand_records(store, lambda v: ((v.value > 10) | (v.other < 3)) & ~((v.value > 10) & (v.other < 3)))
     assert got == expected
 
 
@@ -161,8 +157,8 @@ def test_isin(store):
 
 def test_isna_and_notna(store):
     note = slicer(store)
-    assert set(note[note["weight"].isna()]) == hand_records(store, lambda v: v.weight == None)  # noqa: E711
-    assert set(note[note["weight"].notna()]) == hand_records(store, lambda v: v.weight != None)  # noqa: E711
+    assert set(note[note["weight"].isna()]) == hand_records(store, lambda v: v.weight == None)
+    assert set(note[note["weight"].notna()]) == hand_records(store, lambda v: v.weight != None)
 
 
 def test_between(store):
@@ -175,9 +171,7 @@ def test_str_contains(store):
     note = slicer(store)
     got = set(note[note["title"].str.contains("a")])
     assert got == hand_records(store, lambda v: v.title.contains("a"))
-    assert set(note[note["title"].str.startswith("de")]) == hand_records(
-        store, lambda v: v.title.startswith("de")
-    )
+    assert set(note[note["title"].str.startswith("de")]) == hand_records(store, lambda v: v.title.startswith("de"))
     assert set(note[note["title"].str.endswith("a")]) == hand_records(store, lambda v: v.title.endswith("a"))
 
 
@@ -332,9 +326,7 @@ def test_federated_slicer_over_in_memory_sqlite():
         return store
 
     with Backend.sqlite() as first_db, Backend.sqlite() as second_db:
-        federation = FederatedStore(
-            {"first": _store(first_db, NOTES[:3]), "second": _store(second_db, NOTES[3:])}
-        )
+        federation = FederatedStore({"first": _store(first_db, NOTES[:3]), "second": _store(second_db, NOTES[3:])})
         note = federation.searcher().slicer(Note)
         assert set(note) == set(NOTES)
         assert len(note) == len(NOTES)

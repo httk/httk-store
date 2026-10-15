@@ -7,8 +7,8 @@ import pytest
 from test_db_stored_federation import FederatedCalculation, FederationFirst, FederationSecond, _record
 
 from httk.store import EntryIdScheme
-from httk.store.backend.sql import Backend, DuplicateEntryIdError, SqlStore, StoredEntryFederation, StoredEntrySource
 from httk.store.backend.mongo import MongoDatabase, MongoStore
+from httk.store.backend.sql import Backend, DuplicateEntryIdError, SqlStore, StoredEntryFederation, StoredEntrySource
 
 
 def _mongo_store(database):

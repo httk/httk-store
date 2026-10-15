@@ -298,7 +298,7 @@ def test_validate_anchor_types_accepts_and_rejects_by_key_type():
     with pytest.raises(PaginationCursorError, match="anchor 0"):
         _validate_anchor_types((True,), (int,))
     with pytest.raises(PaginationCursorError, match="anchor 0"):
-        _validate_anchor_types((datetime.datetime(2026, 7, 30, 1, 2, 3),), (datetime.date,))
+        _validate_anchor_types((datetime.datetime(2026, 7, 30, 1, 2, 3),), (datetime.date,))  # noqa: DTZ001  naive datetime checked against a date column
     # A float is never accepted where an int key is expected.
     with pytest.raises(PaginationCursorError, match="incompatible"):
         _validate_anchor_types((1.0,), (int,))

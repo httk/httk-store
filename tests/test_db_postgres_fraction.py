@@ -15,11 +15,6 @@ import uuid
 import pytest
 import sqlalchemy
 from sqlalchemy.engine import make_url
-
-from httk.store import EntryIdScheme
-from httk.store.backend.sql import Backend, SqlStore, stored_property_sql_plan
-from httk.store.backend.sql.engine import _fraction_scaled_equal
-
 from test_db_stored_properties import (
     FIRST,
     SECOND,
@@ -28,6 +23,10 @@ from test_db_stored_properties import (
     GenericCalculationSecond,
     _records,
 )
+
+from httk.store import EntryIdScheme
+from httk.store.backend.sql import Backend, SqlStore, stored_property_sql_plan
+from httk.store.backend.sql.engine import _fraction_scaled_equal
 
 
 def _admin_uri() -> str:

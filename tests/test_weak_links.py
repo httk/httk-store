@@ -327,7 +327,7 @@ def test_two_thread_same_pair_link_race_on_sqlite():
             try:
                 barrier.wait()
                 store.link(result, "projects", p1)
-            except BaseException as error:  # noqa: BLE001 - recorded and re-asserted
+            except BaseException as error:
                 errors.append(error)
 
         threads = [threading.Thread(target=worker) for _ in range(2)]

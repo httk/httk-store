@@ -26,9 +26,9 @@ from test_db_bulk_deferred import (
 )
 from test_db_bulk_parallel import TwoFloatMeta
 
+from httk.store.backend.clickhouse.support import ClickHouseBulkIntegrityError
 from httk.store.backend.sql import Backend, SqlStore
 from httk.store.backend.sql.bulk import BulkIngest
-from httk.store.backend.clickhouse.support import ClickHouseBulkIntegrityError
 from httk.store.backend.sql.layout import StoreUnderConstructionError, actual_schema_objects
 from httk.store.backend.sql.mapping import ENTRY_ID_OWNERS_TABLE_NAME, IMMUTABLE_ID_OWNERS_TABLE_NAME
 from httk.store.store_common import EntryMetadataConflictError

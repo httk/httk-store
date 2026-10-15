@@ -61,5 +61,7 @@ try:
 finally:
     backend.dispose()
 """
-    result = subprocess.run([sys.executable, "-c", code, str(pandas_available)], capture_output=True, text=True, timeout=60)
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(pandas_available)], capture_output=True, text=True, timeout=60, check=False
+    )
     assert result.returncode == 0, result.stdout + result.stderr

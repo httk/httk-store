@@ -89,9 +89,7 @@ def _disable_failpoint(client) -> None:
 
 def test_transaction_commit_visibility_rollback_and_flat_nesting(mongo_test_database) -> None:
     store = _store(mongo_test_database)
-    other_database = MongoDatabase(
-        os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name
-    )
+    other_database = MongoDatabase(os.environ["HTTK_TEST_MONGODB_URI"], database=mongo_test_database.database.name)
     other = _store(other_database)
     try:
         record = TxEntry("visible", [TxChild("child")])

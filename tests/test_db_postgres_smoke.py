@@ -11,10 +11,9 @@ import uuid
 import pytest
 import sqlalchemy
 from sqlalchemy.engine import make_url
+from test_db_store import Sample, make_sample
 
 from httk.store.backend.sql import Backend, SqlStore
-
-from test_db_store import Sample, make_sample
 
 
 def _admin_uri() -> str:

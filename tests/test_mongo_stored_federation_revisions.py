@@ -27,11 +27,15 @@ def _federation(database):
     latest_a = store.fetch(RevisionRecord, replacement_sid)
     second_sid = store.save(RevisionRecord("B"))
     latest_b = store.fetch(RevisionRecord, second_sid)
-    return store, StoredEntryFederation((StoredEntrySource(store, RevisionCalculation, "test"),)), {
-        first_stored.label: first_stored.immutable_id,
-        latest_a.label: latest_a.immutable_id,
-        latest_b.label: latest_b.immutable_id,
-    }
+    return (
+        store,
+        StoredEntryFederation((StoredEntrySource(store, RevisionCalculation, "test"),)),
+        {
+            first_stored.label: first_stored.immutable_id,
+            latest_a.label: latest_a.immutable_id,
+            latest_b.label: latest_b.immutable_id,
+        },
+    )
 
 
 def test_mongo_revision_query_fetch_and_as_of(mongo_test_database):

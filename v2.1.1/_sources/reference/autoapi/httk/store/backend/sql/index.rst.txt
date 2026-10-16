@@ -1,0 +1,137 @@
+httk.store.backend.sql
+======================
+
+.. py:module:: httk.store.backend.sql
+
+.. autoapi-nested-parse::
+
+   The SQL storage layer of httk-store: store frozen dataclasses in relational databases.
+
+   This subpackage turns plain frozen dataclasses — declared storable with the
+   stdlib-only marker vocabulary in httk-core (``Indexed``, ``Unique``, ``Skip``,
+   ``Shape``, ``StorageInfo``, ``stored_property``) — into relational storage.
+   The driver-free, backend-neutral foundation lives one level up, in the
+   :mod:`httk.store.backend` package, and is shared by every backend:
+
+   - :mod:`httk.store.backend.schema` — :func:`~httk.store.backend.schema.resolve_schema` reads a storable class
+     into a :class:`~httk.store.backend.schema.TableSchema`, the single source of truth for DDL, inserts,
+     selects, and reconstruction;
+   - :mod:`httk.store.backend.codecs` — the :class:`~httk.store.backend.codecs.ValueCodec` registry with exact,
+     round-trippable encodings for rationals, surds, and datetimes;
+   - :mod:`httk.core.storage` — ``canonical_form`` and ``content_id``,
+     the content identity used for deduplication.
+
+   These modules import cleanly without sqlalchemy. The SQL layer proper builds
+   on them and requires the ``httk-store[db]`` extra (sqlalchemy):
+
+   - :class:`~httk.store.backend.sql.engine.Backend` — the engine wrapper naming where
+     data lives (``Backend.sqlite(...)``, ``Backend.duckdb(...)``,
+     ``Backend.postgresql(...)``, or the Keeper-backed ``Backend.clickhouse(...)``);
+   - :class:`~httk.store.backend.sql.store.SqlStore` — save/fetch/dedup/transactions for
+     storable instances, on top of the schema-to-table mapping in
+     :mod:`httk.store.backend.sql.mapping`;
+   - :class:`~httk.store.backend.sql.searcher.SqlSearcher` (from
+     :meth:`~httk.store.backend.sql.store.SqlStore.searcher`) — the query DSL implementing
+     the :mod:`httk.store.query` search protocols, with
+     :class:`~httk.store.backend.sql.searcher.SqlVariable`,
+     :class:`~httk.store.backend.sql.searcher.SqlColumn` and
+     :class:`~httk.store.backend.sql.searcher.SqlExpression`;
+   - :class:`~httk.store.backend.sql.entry_provider.StoreEntryProvider` — the bridge that
+     serves stored classes through the neutral :class:`~httk.core.EntryProvider`
+     contract (e.g. as an OPTIMADE API via *httk-serve*);
+   - :func:`~httk.store.backend.sql.optimade.optimade_filter_searcher` — OPTIMADE-filter
+     querying over storable classes, tying the generic filter translation in
+     :mod:`httk.store.query.optimade_filters` to the SQL layer.
+
+   The sqlalchemy-backed names are imported lazily on first attribute access, so
+   ``import httk.store.backend.sql`` keeps working without sqlalchemy; touching them
+   without sqlalchemy installed raises :class:`ImportError` naming the extra.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/store/backend/sql/bulk/index
+   /reference/autoapi/httk/store/backend/sql/bulk_deferred/index
+   /reference/autoapi/httk/store/backend/sql/bulk_parallel/index
+   /reference/autoapi/httk/store/backend/sql/engine/index
+   /reference/autoapi/httk/store/backend/sql/entry_provider/index
+   /reference/autoapi/httk/store/backend/sql/fsck/index
+   /reference/autoapi/httk/store/backend/sql/graph/index
+   /reference/autoapi/httk/store/backend/sql/layout/index
+   /reference/autoapi/httk/store/backend/sql/mapping/index
+   /reference/autoapi/httk/store/backend/sql/optimade/index
+   /reference/autoapi/httk/store/backend/sql/paging/index
+   /reference/autoapi/httk/store/backend/sql/provenance_edges/index
+   /reference/autoapi/httk/store/backend/sql/results/index
+   /reference/autoapi/httk/store/backend/sql/rows/index
+   /reference/autoapi/httk/store/backend/sql/searcher/index
+   /reference/autoapi/httk/store/backend/sql/store/index
+   /reference/autoapi/httk/store/backend/sql/stored_federation/index
+   /reference/autoapi/httk/store/backend/sql/stored_properties/index
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.MultipleResultsError
+   httk.store.backend.sql.NoResultError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.ResultRow
+
+
+Package Contents
+----------------
+
+.. py:exception:: MultipleResultsError
+
+   Bases: :py:obj:`LookupError`
+
+
+   Report that a result-set ``one()`` operation found multiple results.
+
+
+.. py:exception:: NoResultError
+
+   Bases: :py:obj:`LookupError`
+
+
+   Report that a result-set ``one()`` operation found no matching result.
+
+
+.. py:class:: ResultRow(values, names, resolver = None, guard = None)
+
+   Represent one named result row by position, name, or attribute.
+
+   :param values: The row values in declaration order.
+   :param names: The corresponding output names.
+   :param resolver: An optional lazy value resolver.
+   :param guard: An optional callback that rejects access to expired values.
+
+
+   .. py:property:: names
+      :type: tuple[str, ...]
+
+
+      Return the declared output names.
+
+
+   .. py:property:: values
+      :type: tuple[Any, ...]
+
+
+      Return the row values in declaration order.
+
+

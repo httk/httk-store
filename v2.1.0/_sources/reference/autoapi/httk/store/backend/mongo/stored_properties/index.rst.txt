@@ -1,0 +1,138 @@
+httk.store.backend.mongo.stored_properties
+==========================================
+
+.. py:module:: httk.store.backend.mongo.stored_properties
+
+.. autoapi-nested-parse::
+
+   Stored-property plans and exact query contexts for MongoDB.
+
+   The context builds the frozen neutral AST in :mod:`httk.store.backend.mongo.evaluator`.
+   MongoDB supplies a conservative candidate stream and the existing verified
+   iterator evaluates that AST over hydrated backing records.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.stored_properties.MongoStoredPropertyConfigurationError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.stored_properties.MongoStoredPropertyCandidateStream
+   httk.store.backend.mongo.stored_properties.MongoStoredPropertyPlan
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.stored_properties.stored_property_mongo_plan
+
+
+Module Contents
+---------------
+
+.. py:exception:: MongoStoredPropertyConfigurationError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A Mongo entry family cannot realize its stored-property declaration.
+
+
+.. py:class:: MongoStoredPropertyCandidateStream
+
+   An ID-only Mongo candidate stream for a configured concrete backing.
+
+
+   .. py:attribute:: backing
+      :type:  type
+
+
+   .. py:attribute:: backing_name
+      :type:  str
+
+
+   .. py:attribute:: searcher
+      :type:  Any
+
+
+   .. py:attribute:: sort_count
+      :type:  int
+
+
+   .. py:attribute:: timestamp_output
+      :type:  bool
+      :value: False
+
+
+
+.. py:class:: MongoStoredPropertyPlan(store, family, layout, entry_type, definition, backings)
+
+   Stored-property responses and verified Mongo candidate plans for one family.
+
+
+   .. py:property:: backings
+      :type: tuple[type, ...]
+
+
+
+   .. py:method:: records()
+
+
+   .. py:method:: filter_searchers(filter_string, *, sort = (), public_id_prefix = '', as_of = None, only_latest = False, revisions = False, alternatives = False)
+
+
+   .. py:method:: candidate_searchers(filter_string = None, *, sort = (), public_id_prefix = '', as_of = None, only_latest = False, revisions = False, alternatives = False)
+
+
+   .. py:method:: response_row(backing, record, *, public_id = None, httk_id = None, revisions = False, kind = None, store_timestamp = None, fields = None)
+
+      Render one hydrated backing record at the protocol boundary.
+
+      :param backing: The configured concrete record class.
+      :param record: The hydrated backing record.
+      :param public_id: The public id, or the record's canonical id when omitted.
+      :param httk_id: The plain group entry id rendered for ``_httk_id`` when serving revisions or alternatives.
+      :param revisions: Whether the row is served from a revision stream (synthesizes ``_httk_id``).
+      :param kind: The alternative kind rendered for ``_httk_kind`` when serving alternatives, else ``None``.
+      :param store_timestamp: An already-normalized candidate timestamp; otherwise the fallback lookup is used.
+      :param fields: The response property names to render, or ``None`` to render every configured property.
+      :return: The protocol response row.
+
+      Candidate/federation rows carry this value; ``records()`` and entry-provider paths may use the fallback lookup.
+
+
+
+.. py:function:: stored_property_mongo_plan(store, family, *, served = None)
+
+   Validate and return the Mongo property plan for one configured logical family.
+
+   The family's internal definition establishes identity only (that the family
+   and its records agree on one durable definition). Everything the plan then
+   serves — the entry ``type``, the property set response and filter/sort
+   validation run against, and the projection names backings must match — is
+   taken from ``served``: the OPTIMADE wire form of that definition (see
+   ``EntryTypeDefinition.served_form()``). A prefixed family
+   declares its ``__httk_stored_properties__`` projections under those served
+   names, so it MUST be planned with ``served=`` set; without it the bare
+   internal definition rejects the prefixed projection keys as unknown. When
+   ``served`` is omitted the internal definition serves itself, which is
+   byte-identical for standard (unprefixed) families.
+
+   :param store: The MongoStore containing the configured family.
+   :param family: The logical entry-family class to validate.
+   :param served: The served (wire) definition to serve, or ``None`` for the internal definition.
+   :return: The validated Mongo property plan.
+   :raises MongoStoredPropertyConfigurationError: If the family or any backing is inconsistent with its definition.
+
+

@@ -1,0 +1,52 @@
+httk.store.backend.sqlite.hooks
+===============================
+
+.. py:module:: httk.store.backend.sqlite.hooks
+
+.. autoapi-nested-parse::
+
+   SQLite engine hooks: the per-dialect behavior the neutral SQL engine dispatches to.
+
+   :mod:`httk.store.backend.sql.engine` keeps only neutral dialect dispatch; the
+   SQLite-specific bodies live here and are imported lazily on first use by the
+   ``_DIALECT_HOOKS`` registry in :mod:`httk.store.backend.sql.engine`.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.sqlite.hooks.install_engine_functions
+   httk.store.backend.sqlite.hooks.connection_uses_autocommit
+
+
+Module Contents
+---------------
+
+.. py:function:: install_engine_functions(engine)
+
+   Install the exact-fraction scalar function on every SQLite connection.
+
+   Fraction values are persisted canonically as text because SQL integer
+   products can overflow long before a valid Python :class:`~fractions.Fraction`
+   does; ``httk_fraction_scaled_equal`` preserves exact comparisons without
+   touching presentation float columns.
+
+   :param engine: The SQLite SQLAlchemy engine to install the function on.
+   :return: None.
+
+
+.. py:function:: connection_uses_autocommit(connection)
+
+   Return whether the live SQLite DBAPI connection is in autocommit mode.
+
+   ``sqlite3.Connection.isolation_level is None`` is SQLite's documented
+   autocommit mode; the SQLAlchemy checks cover alternate DBAPI wrappers while
+   still requiring the live connection to agree.
+
+   :param connection: The live SQLite SQLAlchemy connection to inspect.
+   :return: Whether the underlying DBAPI connection is in autocommit mode.
+
+

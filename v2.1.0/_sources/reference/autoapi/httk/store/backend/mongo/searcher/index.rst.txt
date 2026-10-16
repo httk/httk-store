@@ -1,0 +1,441 @@
+httk.store.backend.mongo.searcher
+=================================
+
+.. py:module:: httk.store.backend.mongo.searcher
+
+.. autoapi-nested-parse::
+
+   MongoDB query planning for the neutral :mod:`httk.store.query` protocols.
+
+   The planner keeps a truth/falsity pair for each predicate.  This is important
+   for embedded arrays: the negation of "some element matches" is "no element
+   matches", not MongoDB's row-like ``$ne`` interpretation.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.searcher.ComparisonNode
+   httk.store.backend.mongo.searcher.IsInNode
+   httk.store.backend.mongo.searcher.LinkPredicateNode
+   httk.store.backend.mongo.searcher.StringMatchNode
+   httk.store.backend.mongo.searcher.AndNode
+   httk.store.backend.mongo.searcher.OrNode
+   httk.store.backend.mongo.searcher.NotNode
+   httk.store.backend.mongo.searcher.AlwaysTrueNode
+   httk.store.backend.mongo.searcher.AlwaysFalseNode
+   httk.store.backend.mongo.searcher.MongoExpression
+   httk.store.backend.mongo.searcher.MongoField
+   httk.store.backend.mongo.searcher.MongoLinks
+   httk.store.backend.mongo.searcher.MongoLinkSet
+   httk.store.backend.mongo.searcher.MongoLinkField
+   httk.store.backend.mongo.searcher.MongoVariable
+   httk.store.backend.mongo.searcher.MongoSearcher
+
+
+Module Contents
+---------------
+
+.. py:class:: ComparisonNode
+
+   Compare one stored field with a literal or another field.
+
+
+   .. py:attribute:: field
+      :type:  MongoField
+
+
+   .. py:attribute:: op
+      :type:  Literal['eq', 'ne', 'lt', 'le', 'gt', 'ge']
+
+
+   .. py:attribute:: literal
+      :type:  Any
+
+
+.. py:class:: IsInNode
+
+   Test a scalar field for explicit membership.
+
+
+   .. py:attribute:: field
+      :type:  MongoField
+
+
+   .. py:attribute:: values
+      :type:  tuple[Any, ...]
+
+
+.. py:class:: LinkPredicateNode
+
+   A no-``$unwind`` existential/universal predicate over a weak-link target array.
+
+   The link ``$lookup`` leaves each source document carrying an array field at
+   ``path`` of its live, latest-of-lineage link elements (each with ``target_lid``
+   and an embedded ``_httk_target`` doc). ``predicate`` is an ``$elemMatch`` body
+   matching one such element. For an existential (``universal=False``: ``==`` /
+   ``has_any`` / a chained-field comparison) the truth is "some element matches"
+   and the falsity "no element matches" — the latter vacuously true for a
+   zero-link source, so ``~`` negates set-wise. For a universal (``universal=True``:
+   ``has_only``) ``predicate`` matches an *outsider*: truth is "no outsider",
+   falsity "some outsider".
+
+
+   .. py:attribute:: path
+      :type:  str
+
+
+   .. py:attribute:: predicate
+      :type:  dict[str, Any]
+
+
+   .. py:attribute:: universal
+      :type:  bool
+
+
+.. py:class:: StringMatchNode
+
+   Match literal text in a scalar string field.
+
+
+   .. py:attribute:: field
+      :type:  MongoField
+
+
+   .. py:attribute:: mode
+      :type:  Literal['contains', 'startswith', 'endswith']
+
+
+   .. py:attribute:: text
+      :type:  str
+
+
+.. py:class:: AndNode
+
+   Conjoin two AST nodes.
+
+
+   .. py:attribute:: left
+      :type:  Any
+
+
+   .. py:attribute:: right
+      :type:  Any
+
+
+.. py:class:: OrNode
+
+   Disjoin two AST nodes.
+
+
+   .. py:attribute:: left
+      :type:  Any
+
+
+   .. py:attribute:: right
+      :type:  Any
+
+
+.. py:class:: NotNode
+
+   Negate an AST node by swapping its truth and falsity filters.
+
+
+   .. py:attribute:: child
+      :type:  Any
+
+
+.. py:class:: AlwaysTrueNode
+
+   An AST constant that is true for every document.
+
+
+.. py:class:: AlwaysFalseNode
+
+   An AST constant that is false for every document.
+
+
+.. py:class:: MongoExpression(node)
+
+   A composable MongoDB expression backed by a neutral AST node.
+
+
+   .. py:attribute:: node
+
+
+.. py:class:: MongoField(variable, key_path, spec, codec = None, child_keys = (), presentation_prefix = '', operand_converter = None, presentation_converter = None, alternative_composite = False)
+
+   A scalar field, or the value channel of an embedded child field.
+
+
+   .. py:method:: is_in(*values)
+
+      Match a scalar member, or universally constrain a child field.
+
+
+
+   .. py:method:: has(value)
+
+      Match a child collection containing ``value``.
+
+
+
+   .. py:method:: has_any(*values)
+
+      Match a child collection containing any supplied value.
+
+
+
+   .. py:method:: has_only(*values)
+
+      Match a child collection containing no value outside those supplied.
+
+
+
+   .. py:method:: contains(text)
+
+      Match a literal substring, case-sensitively.
+
+
+
+   .. py:method:: startswith(prefix)
+
+      Match a literal, case-sensitive prefix.
+
+
+
+   .. py:method:: endswith(suffix)
+
+      Match a literal, case-sensitive suffix.
+
+
+
+.. py:class:: MongoLinks(variable)
+
+   The ``links`` namespace of a query variable: one weak link per attribute.
+
+   Each attribute access resolves the declared :class:`~httk.store.backend.schema.LinkSpec`
+   and returns a **fresh** :class:`MongoLinkSet` — a new link ``$lookup`` array
+   every time, never memoized on ``(variable, name)``. That freshness lets
+   AND-composed predicates on the same link constrain independent link elements
+   (so ``(v.links.p.name == 'A') & (v.links.p.name == 'B')`` is a HAS-ALL over
+   two distinct linked targets), matching the SQL backend and OPTIMADE HAS ALL.
+
+   :param variable: The query variable whose weak links this namespace exposes.
+
+
+.. py:class:: MongoLinkSet(variable, spec)
+
+   One weak-link traversal from a query variable to the latest live-linked targets.
+
+   Construction registers nothing: the ``$lookup`` that leaves each source
+   document carrying an array field (``_httk_link_<n>``) of its live,
+   latest-of-lineage link elements, each embedding the latest revision of its
+   target lineage as ``_httk_target`` (bounded by ``as_of`` when set), is
+   appended lazily by ``_register()`` on first use as a predicate operand —
+   so a link set used only as a set-valued ``results()`` output (resolved
+   after the query, from the parent document's own ``logical_id``) never adds
+   a ``$lookup`` stage. The array is deliberately **not** ``$unwind``-ed once
+   registered — that would multiply source documents and break grouped
+   multiplicity and count(); predicates are no-unwind ``$elemMatch`` array
+   predicates instead (see :class:`LinkPredicateNode`).
+
+   Identity comparisons (``== stored_object``, :meth:`has_any`, :meth:`has_only`)
+   run over each element's ``target_lid``; attribute access chains into a scalar
+   or encoded field of the latest target revision.
+
+   :param variable: The query variable the link traverses from.
+   :param spec: The resolved weak-link declaration.
+
+
+   .. py:method:: has(value)
+
+      Match a live linked target among ``value``.
+
+      :param value: The stored target to match.
+      :return: The matching expression.
+
+
+
+   .. py:method:: has_any(*values)
+
+      Match at least one live linked target among ``values``.
+
+      :param \*values: The stored targets to match.
+      :return: The matching expression.
+
+
+
+   .. py:method:: has_only(*values)
+
+      Require every live linked target to be among ``values`` (a no-links source matches).
+
+      :param \*values: The complete set of allowed stored targets.
+      :return: The condition requiring every linked target to match.
+
+
+
+.. py:class:: MongoLinkField(link_set, spec)
+
+   A scalar or encoded field of a weak-link target, compared existentially.
+
+   Each comparison yields a :class:`LinkPredicateNode` whose ``$elemMatch`` body
+   reaches into the embedded ``_httk_target`` doc of a link element: the match is
+   "some live-linked target satisfies the comparison", and ``~`` negates set-wise
+   (including a vacuous match on a zero-link source).
+
+   :param link_set: The traversal supplying the link array path and target codec context.
+   :param spec: The resolved scalar or encoded target field.
+
+
+   .. py:method:: contains(text)
+
+      Match a live-linked target whose field contains ``text`` (case-sensitive).
+
+
+
+   .. py:method:: startswith(prefix)
+
+      Match a live-linked target whose field starts with ``prefix``.
+
+
+
+   .. py:method:: endswith(suffix)
+
+      Match a live-linked target whose field ends with ``suffix``.
+
+
+
+.. py:class:: MongoVariable(searcher, cls, schema, alias)
+
+   A query variable, optionally produced by a lookup from another variable.
+
+
+   .. py:property:: sid
+      :type: MongoField
+
+
+      Return the store-managed sid field.
+
+
+   .. py:method:: always_true()
+
+      Return an expression matching every stored document.
+
+
+
+   .. py:method:: always_false()
+
+      Return an expression matching no stored document.
+
+
+
+   .. py:property:: links
+      :type: MongoLinks
+
+
+      Return the weak-link namespace of this variable.
+
+
+.. py:class:: MongoSearcher(store, *, as_of = None, only_latest = False, only_main_alt = True)
+
+   Build and execute a MongoDB query over reference-connected variables.
+
+   An historic cutoff is injected for every root and lookup variable; visible
+   rows' dependencies are always visible because references only point at
+   earlier-or-equal rows from the same transaction. When ``only_latest`` is set,
+   every declared (root) variable is additionally restricted to the latest
+   document of its ``logical_id`` lineage by sid (bounded by ``as_of`` when
+   given); reference/lookup variables stay unfiltered so pinned references may
+   still resolve replaced documents.
+
+
+   .. py:attribute:: offset
+      :value: 0
+
+
+
+   .. py:method:: set_row_verifier(verifier, identity)
+
+      Attach the client-authoritative candidate verifier and its frozen identity.
+
+      The identity must be the canonical logical predicate payload, including
+      every verifier constant.  It is folded into continuation fingerprints,
+      so cursors never cross between otherwise identical server plans.
+
+      :param verifier: Return whether a server candidate is a real match.
+      :param identity: Canonical text or bytes identifying the verifier logic.
+      :raises TypeError: If either attachment component has the wrong type.
+
+
+
+   .. py:method:: variable(target)
+
+      Bind a query variable; each additional one must be join-connected.
+
+
+
+   .. py:method:: output(variable, name)
+
+      Declare an object variable, scalar field, or weak-link-set output.
+
+      A weak-link-set output (a bare ``v.links.<name>``) yields a tuple of
+      the latest live-linked targets per row, resolved after the query from
+      the source document's own ``logical_id``; it registers no ``$lookup``,
+      unlike predicate use of the same link set. Chaining into a target
+      field (``v.links.<name>.<field>``) stays rejected.
+
+
+
+   .. py:method:: add(expression)
+
+      Add a filter expression, conjoined with earlier filters.
+
+
+
+   .. py:method:: add_sort(field, descending = False, *, nulls = 'last')
+
+      Append a stable scalar sort with an explicit null rank.
+
+
+
+   .. py:method:: set_limit(limit)
+
+      Set the iteration limit; negative values clear it.
+
+
+
+   .. py:method:: add_offset(offset)
+
+      Add rows to the iteration offset.
+
+
+
+   .. py:method:: count()
+
+      Return the exact filtered count, ignoring offset and limit.
+
+
+
+   .. py:method:: results(**outputs)
+
+      Return a materialized :class:`~httk.store.backend.mongo.results.MongoResultSet` for this query.
+
+
+
+   .. py:method:: slicer(target)
+
+      A pandas-style ``[]`` indexing view over ``target`` records.
+
+      Each terminal indexing operation runs against a fresh searcher minted
+      with this searcher's ``as_of``/``only_latest``/``only_main_alt`` scope,
+      so slicer operations never share filter state.
+
+      :param target: The stored record class to index.
+      :return: A slicer over ``target``.
+
+
+

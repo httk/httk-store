@@ -1,0 +1,1081 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../../../genindex.html"><link rel="search" title="Search" href="../../../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.store.backend.sql.tables - httk-store dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../../../index.html"><div class="brand">httk-store dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-store dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../data.html">Data management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../db.html">Backend storage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../connecting_entries.html">Connecting entries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../mongo.html">MongoDB storage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../federation.html">Federated stores</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../migrating_from_v1.html">Migrating from httk v1</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../testing.html">Test tiers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../clickhouse-testing.html">ClickHouse testing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../postgres-testing.html">PostgreSQL testing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../examples/index.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/db.html">Backend storage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/mongo.html">MongoDB storage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/migrating_from_v1.html">Migrating from httk v1 in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../reference/autoapi/index.html">API Reference</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for httk.store.backend.sql.tables</h1><div class="highlight"><pre>
+<span></span><span class="sd">"""Query existing SQL tables in place through the neutral store protocol.</span>
+
+<span class="sd">:class:`TableStore` implements :class:`~httk.store.query.Store` over tables that</span>
+<span class="sd">*httk-store* did not create: each target names one existing parent table,</span>
+<span class="sd">reflected when the store is constructed, optionally with list fields stored</span>
+<span class="sd">as child rows (:class:`ListTable`) or as delimited text (:class:`DelimitedColumn`).</span>
+<span class="sd">The store is read-only and follows the truth table of</span>
+<span class="sd">:mod:`httk.store.query.conformance`:</span>
+
+<span class="sd">- Search expressions are plain SQLAlchemy boolean clauses, so ``&amp;``, ``|`` and</span>
+<span class="sd">  ``~`` follow SQL three-valued logic. Comparisons and literal string matching</span>
+<span class="sd">  against NULL are unknown; ``== None``/``!= None`` and :meth:`TableField.is_in`</span>
+<span class="sd">  are definite.</span>
+<span class="sd">- Set operations read a NULL or absent list as the empty set and are definite.</span>
+<span class="sd">  :class:`ListTable` set operations assume a non-NULL key such as a primary</span>
+<span class="sd">  key: ``has``/``has_any`` and their negations never match a NULL-key row.</span>
+<span class="sd">  NULL child values are ignored.</span>
+<span class="sd">- Result rows are read-only mappings of the parent row's column values, as</span>
+<span class="sd">  returned by the driver through SQLAlchemy's column types, plus every</span>
+<span class="sd">  declared list as a tuple ordered by value.</span>
+<span class="sd">"""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">datetime</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">operator</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">types</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Iterator</span><span class="p">,</span> <span class="n">Mapping</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Self</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">sqlalchemy</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy.exc</span><span class="w"> </span><span class="kn">import</span> <span class="n">NoSuchTableError</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.store.query</span><span class="w"> </span><span class="kn">import</span> <span class="n">MultipleResultsError</span><span class="p">,</span> <span class="n">NoResultError</span><span class="p">,</span> <span class="n">ResultRow</span><span class="p">,</span> <span class="n">UnsupportedQueryError</span>
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">"DelimitedColumn"</span><span class="p">,</span>
+    <span class="s2">"ListTable"</span><span class="p">,</span>
+    <span class="s2">"TableField"</span><span class="p">,</span>
+    <span class="s2">"TableResultSet"</span><span class="p">,</span>
+    <span class="s2">"TableSearcher"</span><span class="p">,</span>
+    <span class="s2">"TableSource"</span><span class="p">,</span>
+    <span class="s2">"TableStore"</span><span class="p">,</span>
+    <span class="s2">"TableVariable"</span><span class="p">,</span>
+<span class="p">]</span>
+
+<span class="n">_HYDRATION_BATCH_SIZE</span> <span class="o">=</span> <span class="mi">500</span>
+<span class="sd">"""The most parent keys bound into one :class:`ListTable` hydration query."""</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_escape_like</span><span class="p">(</span><span class="n">text</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="c1"># "!" rather than backslash: duckdb_engine renders ESCAPE '\\' as a two-character escape.</span>
+    <span class="k">return</span> <span class="n">text</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"!"</span><span class="p">,</span> <span class="s2">"!!"</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"%"</span><span class="p">,</span> <span class="s2">"!%"</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"_"</span><span class="p">,</span> <span class="s2">"!_"</span><span class="p">)</span>
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="ListTable">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.ListTable">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ListTable</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Declare a list field stored as child rows of another table.</span>
+
+<span class="sd">    :param table: The child table name.</span>
+<span class="sd">    :param parent_column: The child column holding the parent row's key.</span>
+<span class="sd">    :param value_column: The child column holding one list value.</span>
+<span class="sd">    :param schema: The child table's schema, or ``None`` for the default schema.</span>
+<span class="sd">    """</span>
+
+<div class="viewcode-block" id="ListTable.table">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.ListTable.table">[docs]</a>
+    <span class="n">table</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="ListTable.parent_column">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.ListTable.parent_column">[docs]</a>
+    <span class="n">parent_column</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="ListTable.value_column">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.ListTable.value_column">[docs]</a>
+    <span class="n">value_column</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="ListTable.schema">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.ListTable.schema">[docs]</a>
+    <span class="n">schema</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+</div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="DelimitedColumn">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.DelimitedColumn">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">DelimitedColumn</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Declare a list field stored as delimited text in a parent column.</span>
+
+<span class="sd">    Empty items are ignored, so ``''`` and NULL both read as the empty list in</span>
+<span class="sd">    queries; a NULL column hydrates as ``None`` and ``''`` as ``()``.</span>
+
+<span class="sd">    :param column: The parent column holding the delimited text.</span>
+<span class="sd">    :param separator: The non-empty item separator.</span>
+<span class="sd">    :raises ValueError: If ``separator`` is empty.</span>
+<span class="sd">    """</span>
+
+<div class="viewcode-block" id="DelimitedColumn.column">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.DelimitedColumn.column">[docs]</a>
+    <span class="n">column</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="DelimitedColumn.separator">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.DelimitedColumn.separator">[docs]</a>
+    <span class="n">separator</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">","</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">separator</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"DelimitedColumn separator must be non-empty"</span><span class="p">)</span></div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="TableSource">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSource">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">TableSource</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Describe one existing parent table served as a :class:`TableStore` target.</span>
+
+<span class="sd">    :param name: The parent table name.</span>
+<span class="sd">    :param schema: The parent table's schema, or ``None`` for the default schema.</span>
+<span class="sd">    :param key: The column list tables join on; defaults to the single-column primary key.</span>
+<span class="sd">    :param lists: Declared list fields by field name.</span>
+<span class="sd">    """</span>
+
+<div class="viewcode-block" id="TableSource.name">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSource.name">[docs]</a>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="TableSource.schema">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSource.schema">[docs]</a>
+    <span class="n">schema</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="TableSource.key">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSource.key">[docs]</a>
+    <span class="n">key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="TableSource.lists">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSource.lists">[docs]</a>
+    <span class="n">lists</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">ListTable</span> <span class="o">|</span> <span class="n">DelimitedColumn</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">ListTable</span> <span class="o">|</span> <span class="n">DelimitedColumn</span><span class="p">])</span></div>
+</div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">_Target</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""One reflected target: its parent table, key column and list declarations."""</span>
+
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">table</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Table</span>
+    <span class="n">key</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Column</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="n">lists</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ListTable</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Table</span><span class="p">]</span> <span class="o">|</span> <span class="n">DelimitedColumn</span><span class="p">]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_reflect</span><span class="p">(</span><span class="n">engine</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Engine</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">schema</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Table</span><span class="p">:</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Table</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">MetaData</span><span class="p">(),</span> <span class="n">autoload_with</span><span class="o">=</span><span class="n">engine</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">schema</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">NoSuchTableError</span><span class="p">:</span>
+        <span class="n">qualified</span> <span class="o">=</span> <span class="n">name</span> <span class="k">if</span> <span class="n">schema</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">schema</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">"</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"TableStore target </span><span class="si">{</span><span class="n">target</span><span class="si">!r}</span><span class="s2">: table </span><span class="si">{</span><span class="n">qualified</span><span class="si">!r}</span><span class="s2"> does not exist"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="kc">None</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_reflect_target</span><span class="p">(</span><span class="n">engine</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Engine</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">source</span><span class="p">:</span> <span class="n">TableSource</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">_Target</span><span class="p">:</span>
+    <span class="n">table</span> <span class="o">=</span> <span class="n">_reflect</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">source</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">source</span><span class="o">.</span><span class="n">schema</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">source</span><span class="o">.</span><span class="n">key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">source</span><span class="o">.</span><span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">table</span><span class="o">.</span><span class="n">c</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"TableStore target </span><span class="si">{</span><span class="n">target</span><span class="si">!r}</span><span class="s2">: key column </span><span class="si">{</span><span class="n">source</span><span class="o">.</span><span class="n">key</span><span class="si">!r}</span><span class="s2"> is not in </span><span class="si">{</span><span class="n">source</span><span class="o">.</span><span class="n">name</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">key</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Column</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">source</span><span class="o">.</span><span class="n">key</span><span class="p">]</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">primary</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">primary_key</span><span class="o">.</span><span class="n">columns</span><span class="p">)</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="n">primary</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">primary</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span> <span class="k">else</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">source</span><span class="o">.</span><span class="n">lists</span> <span class="ow">and</span> <span class="n">key</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"TableStore target </span><span class="si">{</span><span class="n">target</span><span class="si">!r}</span><span class="s2">: lists need a key, but </span><span class="si">{</span><span class="n">source</span><span class="o">.</span><span class="n">name</span><span class="si">!r}</span><span class="s2"> has no single-column "</span>
+            <span class="s2">"primary key and no key was given"</span>
+        <span class="p">)</span>
+    <span class="n">lists</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ListTable</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Table</span><span class="p">]</span> <span class="o">|</span> <span class="n">DelimitedColumn</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">list_name</span><span class="p">,</span> <span class="n">spec</span> <span class="ow">in</span> <span class="n">source</span><span class="o">.</span><span class="n">lists</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">list_name</span> <span class="ow">in</span> <span class="n">table</span><span class="o">.</span><span class="n">c</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"TableStore target </span><span class="si">{</span><span class="n">target</span><span class="si">!r}</span><span class="s2">: list </span><span class="si">{</span><span class="n">list_name</span><span class="si">!r}</span><span class="s2"> collides with a column of that name"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">DelimitedColumn</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">column</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">table</span><span class="o">.</span><span class="n">c</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"TableStore target </span><span class="si">{</span><span class="n">target</span><span class="si">!r}</span><span class="s2">: delimited list </span><span class="si">{</span><span class="n">list_name</span><span class="si">!r}</span><span class="s2"> column </span><span class="si">{</span><span class="n">spec</span><span class="o">.</span><span class="n">column</span><span class="si">!r}</span><span class="s2"> "</span>
+                    <span class="sa">f</span><span class="s2">"is not in </span><span class="si">{</span><span class="n">source</span><span class="o">.</span><span class="n">name</span><span class="si">!r}</span><span class="s2">"</span>
+                <span class="p">)</span>
+            <span class="n">lists</span><span class="p">[</span><span class="n">list_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">spec</span>
+            <span class="k">continue</span>
+        <span class="n">child</span> <span class="o">=</span> <span class="n">_reflect</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">table</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">schema</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">column</span> <span class="ow">in</span> <span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">parent_column</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">value_column</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">column</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">child</span><span class="o">.</span><span class="n">c</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"TableStore target </span><span class="si">{</span><span class="n">target</span><span class="si">!r}</span><span class="s2">: list </span><span class="si">{</span><span class="n">list_name</span><span class="si">!r}</span><span class="s2"> column </span><span class="si">{</span><span class="n">column</span><span class="si">!r}</span><span class="s2"> is not in </span><span class="si">{</span><span class="n">spec</span><span class="o">.</span><span class="n">table</span><span class="si">!r}</span><span class="s2">"</span>
+                <span class="p">)</span>
+        <span class="n">lists</span><span class="p">[</span><span class="n">list_name</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">child</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">_Target</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="n">table</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">lists</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="TableStore">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableStore">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">TableStore</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Query existing SQL tables in place, read-only, through the neutral store protocol.</span>
+
+<span class="sd">    Every table is reflected when the store is constructed.</span>
+
+<span class="sd">    :param engine: A SQLAlchemy engine owned by the caller, or a SQLAlchemy URL</span>
+<span class="sd">        from which the store creates, and on :meth:`close` disposes, its own engine.</span>
+<span class="sd">    :param tables: The served tables by target name.</span>
+<span class="sd">    :raises ValueError: If a table, key or list column does not exist, a list</span>
+<span class="sd">        name collides with a column, or lists are declared without a usable key.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">engine</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Engine</span> <span class="o">|</span> <span class="nb">str</span><span class="p">,</span> <span class="n">tables</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">TableSource</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_owned</span> <span class="o">=</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">create_engine</span><span class="p">(</span><span class="n">engine</span><span class="p">)</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="n">engine</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_targets</span> <span class="o">=</span> <span class="p">{</span><span class="n">target</span><span class="p">:</span> <span class="n">_reflect_target</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">source</span><span class="p">)</span> <span class="k">for</span> <span class="n">target</span><span class="p">,</span> <span class="n">source</span> <span class="ow">in</span> <span class="n">tables</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+        <span class="k">except</span> <span class="ne">BaseException</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+            <span class="k">raise</span>
+
+<div class="viewcode-block" id="TableStore.searcher">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableStore.searcher">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">searcher</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">as_of</span><span class="p">:</span> <span class="nb">object</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"TableSearcher"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Create an empty searcher.</span>
+
+<span class="sd">        :param as_of: Must be ``None``; historic queries are not supported.</span>
+<span class="sd">        :return: An empty searcher over this store's tables.</span>
+<span class="sd">        :raises ValueError: If ``as_of`` is given.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="n">as_of</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"TableStore does not support historic queries"</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">TableSearcher</span><span class="o">.</span><span class="n">_of</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_targets</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableStore.close">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableStore.close">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">close</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Dispose the engine if this store created it from a URL."""</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_owned</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="o">.</span><span class="n">dispose</span><span class="p">()</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__enter__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__exit__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">exc_info</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">close</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="TableVariable">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableVariable">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">TableVariable</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Bind a search to one :class:`TableStore` target; attributes yield its fields.</span>
+
+<span class="sd">    Obtained from :meth:`TableSearcher.variable`.</span>
+<span class="sd">    """</span>
+
+    <span class="vm">__slots__</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"_target"</span><span class="p">,)</span>
+    <span class="n">_target</span><span class="p">:</span> <span class="n">_Target</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_of</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="n">_Target</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
+        <span class="n">variable</span> <span class="o">=</span> <span class="nb">object</span><span class="o">.</span><span class="fm">__new__</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span>
+        <span class="n">variable</span><span class="o">.</span><span class="n">_target</span> <span class="o">=</span> <span class="n">target</span>
+        <span class="k">return</span> <span class="n">variable</span>
+
+<div class="viewcode-block" id="TableVariable.always_true">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableVariable.always_true">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">always_true</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return an expression that matches every row.</span>
+
+<span class="sd">        :return: The constant true clause.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">true</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="TableVariable.always_false">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableVariable.always_false">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">always_false</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return an expression that matches no row.</span>
+
+<span class="sd">        :return: The constant false clause.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">false</span><span class="p">()</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__getattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"TableField"</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"__"</span><span class="p">)</span> <span class="ow">or</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">TableVariable</span><span class="o">.</span><span class="vm">__slots__</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">AttributeError</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+        <span class="n">target</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">target</span><span class="o">.</span><span class="n">table</span><span class="o">.</span><span class="n">c</span> <span class="ow">or</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">target</span><span class="o">.</span><span class="n">lists</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">TableField</span><span class="o">.</span><span class="n">_of</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">available</span> <span class="o">=</span> <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">([</span><span class="o">*</span><span class="n">target</span><span class="o">.</span><span class="n">table</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="n">keys</span><span class="p">(),</span> <span class="o">*</span><span class="n">target</span><span class="o">.</span><span class="n">lists</span><span class="p">])</span>
+        <span class="k">raise</span> <span class="ne">AttributeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"table </span><span class="si">{</span><span class="n">target</span><span class="o">.</span><span class="n">table</span><span class="o">.</span><span class="n">name</span><span class="si">!r}</span><span class="s2"> has no field </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">; available fields: </span><span class="si">{</span><span class="n">available</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_literal</span><span class="p">(</span><span class="n">column</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="n">value</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Coerce a string literal to an integer or date/time column's type where it has that form."""</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">value</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">column</span><span class="o">.</span><span class="n">type</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Integer</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="k">if</span> <span class="n">re</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="sa">r</span><span class="s2">"-?[0-9]+"</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span> <span class="k">else</span> <span class="n">value</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">column</span><span class="o">.</span><span class="n">type</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Date</span> <span class="o">|</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">DateTime</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">value</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">column</span><span class="o">.</span><span class="n">type</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">DateTime</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">datetime</span><span class="o">.</span><span class="n">date</span><span class="o">.</span><span class="n">fromisoformat</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+        <span class="n">parsed</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">fromisoformat</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"column </span><span class="si">{</span><span class="n">column</span><span class="o">.</span><span class="n">name</span><span class="si">!r}</span><span class="s2">: </span><span class="si">{</span><span class="n">value</span><span class="si">!r}</span><span class="s2"> is not an ISO-8601 timestamp"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="kc">None</span>
+    <span class="k">if</span> <span class="n">parsed</span><span class="o">.</span><span class="n">tzinfo</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">column</span><span class="o">.</span><span class="n">type</span><span class="o">.</span><span class="n">timezone</span><span class="p">:</span>
+        <span class="n">parsed</span> <span class="o">=</span> <span class="n">parsed</span><span class="o">.</span><span class="n">astimezone</span><span class="p">(</span><span class="n">datetime</span><span class="o">.</span><span class="n">UTC</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">tzinfo</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">parsed</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_non_integer_text</span><span class="p">(</span><span class="n">column</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="n">value</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Whether a coerced literal is text that is not an integer, compared to an integer column."""</span>
+    <span class="k">return</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">column</span><span class="o">.</span><span class="n">type</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Integer</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="TableField">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">TableField</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""A queryable scalar column or declared list of a :class:`TableVariable`.</span>
+
+<span class="sd">    Scalar columns support comparisons, literal string matching and</span>
+<span class="sd">    :meth:`is_in`; lists support :meth:`has`, :meth:`has_any` and</span>
+<span class="sd">    :meth:`has_only`. Using an operation of the other kind raises</span>
+<span class="sd">    :class:`TypeError`.</span>
+
+<span class="sd">    String literals are coerced to the column: an ISO-8601 string compared to a</span>
+<span class="sd">    date/time column is parsed (an aware one converted to naive UTC for a naive</span>
+<span class="sd">    column), and decimal integer text compared to an integer column is read as</span>
+<span class="sd">    an integer. Other text compares against the column's text form and is</span>
+<span class="sd">    dropped from :meth:`is_in`. String matching on a non-string column matches its text form.</span>
+
+<span class="sd">    Obtained by attribute access on a :class:`TableVariable`.</span>
+<span class="sd">    """</span>
+
+    <span class="vm">__slots__</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"_name"</span><span class="p">,</span> <span class="s2">"_target"</span><span class="p">)</span>
+    <span class="n">_name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">_target</span><span class="p">:</span> <span class="n">_Target</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_of</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="n">_Target</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
+        <span class="n">field</span> <span class="o">=</span> <span class="nb">object</span><span class="o">.</span><span class="fm">__new__</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span>
+        <span class="n">field</span><span class="o">.</span><span class="n">_target</span> <span class="o">=</span> <span class="n">target</span>
+        <span class="n">field</span><span class="o">.</span><span class="n">_name</span> <span class="o">=</span> <span class="n">name</span>
+        <span class="k">return</span> <span class="n">field</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_label</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="si">}</span><span class="s2">"</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_column</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Column</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_name</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">lists</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"field </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_label</span><span class="p">()</span><span class="si">!r}</span><span class="s2"> is a list; only has/has_any/has_only apply"</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">table</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_compare</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">operation</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">Any</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span> <span class="n">Any</span><span class="p">],</span> <span class="n">other</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+        <span class="n">column</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_column</span><span class="p">()</span>
+        <span class="n">value</span> <span class="o">=</span> <span class="n">_literal</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">_non_integer_text</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">operation</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+        <span class="c1"># Non-integer text compares against the column's text form, so NULL stays unknown.</span>
+        <span class="k">return</span> <span class="n">operation</span><span class="p">(</span><span class="n">sqlalchemy</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">String</span><span class="p">),</span> <span class="n">value</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__eq__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>  <span class="c1"># type: ignore[override]</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_column</span><span class="p">()</span><span class="o">.</span><span class="n">is_</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span> <span class="k">if</span> <span class="n">other</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compare</span><span class="p">(</span><span class="n">operator</span><span class="o">.</span><span class="n">eq</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__ne__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>  <span class="c1"># type: ignore[override]</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_column</span><span class="p">()</span><span class="o">.</span><span class="n">is_not</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span> <span class="k">if</span> <span class="n">other</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compare</span><span class="p">(</span><span class="n">operator</span><span class="o">.</span><span class="n">ne</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__hash__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">id</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__lt__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compare</span><span class="p">(</span><span class="n">operator</span><span class="o">.</span><span class="n">lt</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__le__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compare</span><span class="p">(</span><span class="n">operator</span><span class="o">.</span><span class="n">le</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__gt__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compare</span><span class="p">(</span><span class="n">operator</span><span class="o">.</span><span class="n">gt</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__ge__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compare</span><span class="p">(</span><span class="n">operator</span><span class="o">.</span><span class="n">ge</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_like</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">pattern</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+        <span class="n">column</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_column</span><span class="p">()</span>
+        <span class="n">text</span> <span class="o">=</span> <span class="n">column</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">column</span><span class="o">.</span><span class="n">type</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">String</span><span class="p">)</span> <span class="k">else</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">String</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">text</span><span class="o">.</span><span class="n">like</span><span class="p">(</span><span class="n">pattern</span><span class="p">,</span> <span class="n">escape</span><span class="o">=</span><span class="s2">"!"</span><span class="p">)</span>
+
+<div class="viewcode-block" id="TableField.contains">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField.contains">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">contains</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">text</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Match values containing ``text`` as a literal substring.</span>
+
+<span class="sd">        :param text: The literal text.</span>
+<span class="sd">        :return: The match clause.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_like</span><span class="p">(</span><span class="sa">f</span><span class="s2">"%</span><span class="si">{</span><span class="n">_escape_like</span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="si">}</span><span class="s2">%"</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableField.startswith">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField.startswith">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">startswith</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prefix</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Match values beginning with the literal ``prefix``.</span>
+
+<span class="sd">        :param prefix: The literal prefix.</span>
+<span class="sd">        :return: The match clause.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_like</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">_escape_like</span><span class="p">(</span><span class="n">prefix</span><span class="p">)</span><span class="si">}</span><span class="s2">%"</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableField.endswith">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField.endswith">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">endswith</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">suffix</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Match values ending with the literal ``suffix``.</span>
+
+<span class="sd">        :param suffix: The literal suffix.</span>
+<span class="sd">        :return: The match clause.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_like</span><span class="p">(</span><span class="sa">f</span><span class="s2">"%</span><span class="si">{</span><span class="n">_escape_like</span><span class="p">(</span><span class="n">suffix</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableField.is_in">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField.is_in">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_in</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">values</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sa">r</span><span class="sd">"""Match values equal to one of ``values``, definitely: NULL matches only a ``None`` member.</span>
+
+<span class="sd">        :param \*values: The members.</span>
+<span class="sd">        :return: The membership clause.</span>
+<span class="sd">        """</span>
+        <span class="n">column</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_column</span><span class="p">()</span>
+        <span class="n">members</span> <span class="o">=</span> <span class="p">[</span><span class="n">_literal</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span> <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">]</span>
+        <span class="n">members</span> <span class="o">=</span> <span class="p">[</span><span class="n">member</span> <span class="k">for</span> <span class="n">member</span> <span class="ow">in</span> <span class="n">members</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">_non_integer_text</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="n">member</span><span class="p">)]</span>
+        <span class="n">clause</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">and_</span><span class="p">(</span><span class="n">column</span><span class="o">.</span><span class="n">is_not</span><span class="p">(</span><span class="kc">None</span><span class="p">),</span> <span class="n">column</span><span class="o">.</span><span class="n">in_</span><span class="p">(</span><span class="n">members</span><span class="p">))</span> <span class="k">if</span> <span class="n">members</span> <span class="k">else</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">false</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">or_</span><span class="p">(</span><span class="n">column</span><span class="o">.</span><span class="n">is_</span><span class="p">(</span><span class="kc">None</span><span class="p">),</span> <span class="n">clause</span><span class="p">)</span> <span class="k">if</span> <span class="kc">None</span> <span class="ow">in</span> <span class="n">values</span> <span class="k">else</span> <span class="n">clause</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_members</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="o">...</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">lists</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"field </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_label</span><span class="p">()</span><span class="si">!r}</span><span class="s2"> is a scalar column; set operations need a declared list"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">value</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"None is not a valid member of a set operation"</span><span class="p">)</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">lists</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">DelimitedColumn</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">:</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+                    <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"delimited list </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_label</span><span class="p">()</span><span class="si">!r}</span><span class="s2"> members must be str, got </span><span class="si">{</span><span class="n">value</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">value</span> <span class="ow">or</span> <span class="n">spec</span><span class="o">.</span><span class="n">separator</span> <span class="ow">in</span> <span class="n">value</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"delimited list </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_label</span><span class="p">()</span><span class="si">!r}</span><span class="s2"> members must be non-empty and not contain "</span>
+                        <span class="sa">f</span><span class="s2">"the separator </span><span class="si">{</span><span class="n">spec</span><span class="o">.</span><span class="n">separator</span><span class="si">!r}</span><span class="s2">, got </span><span class="si">{</span><span class="n">value</span><span class="si">!r}</span><span class="s2">"</span>
+                    <span class="p">)</span>
+        <span class="k">return</span> <span class="n">values</span>
+
+<div class="viewcode-block" id="TableField.has">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField.has">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">has</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Match lists containing ``value``.</span>
+
+<span class="sd">        :param value: The member.</span>
+<span class="sd">        :return: The set clause.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">has_any</span><span class="p">(</span><span class="n">value</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableField.has_any">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField.has_any">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">has_any</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">values</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sa">r</span><span class="sd">"""Match lists containing any of ``values``.</span>
+
+<span class="sd">        :param \*values: The members.</span>
+<span class="sd">        :return: The set clause.</span>
+<span class="sd">        """</span>
+        <span class="n">values</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_members</span><span class="p">(</span><span class="n">values</span><span class="p">)</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">lists</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">DelimitedColumn</span><span class="p">):</span>
+            <span class="n">wrapped</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped</span><span class="p">(</span><span class="n">spec</span><span class="p">)</span>
+            <span class="n">patterns</span> <span class="o">=</span> <span class="p">[</span><span class="sa">f</span><span class="s2">"%</span><span class="si">{</span><span class="n">_escape_like</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">separator</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">spec</span><span class="o">.</span><span class="n">separator</span><span class="p">)</span><span class="si">}</span><span class="s2">%"</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">]</span>
+            <span class="k">return</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">or_</span><span class="p">(</span><span class="n">sqlalchemy</span><span class="o">.</span><span class="n">false</span><span class="p">(),</span> <span class="o">*</span><span class="p">(</span><span class="n">wrapped</span><span class="o">.</span><span class="n">like</span><span class="p">(</span><span class="n">pattern</span><span class="p">,</span> <span class="n">escape</span><span class="o">=</span><span class="s2">"!"</span><span class="p">)</span> <span class="k">for</span> <span class="n">pattern</span> <span class="ow">in</span> <span class="n">patterns</span><span class="p">))</span>
+        <span class="n">list_table</span><span class="p">,</span> <span class="n">child</span> <span class="o">=</span> <span class="n">spec</span>
+        <span class="n">parent</span><span class="p">,</span> <span class="n">value_column</span> <span class="o">=</span> <span class="n">child</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">list_table</span><span class="o">.</span><span class="n">parent_column</span><span class="p">],</span> <span class="n">child</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">list_table</span><span class="o">.</span><span class="n">value_column</span><span class="p">]</span>
+        <span class="n">members</span> <span class="o">=</span> <span class="p">[</span><span class="n">_literal</span><span class="p">(</span><span class="n">value_column</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">]</span>
+        <span class="n">subquery</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">value_column</span><span class="o">.</span><span class="n">in_</span><span class="p">(</span><span class="n">members</span><span class="p">),</span> <span class="n">parent</span><span class="o">.</span><span class="n">is_not</span><span class="p">(</span><span class="kc">None</span><span class="p">))</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_key</span><span class="p">()</span><span class="o">.</span><span class="n">in_</span><span class="p">(</span><span class="n">subquery</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableField.has_only">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableField.has_only">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">has_only</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">values</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sa">r</span><span class="sd">"""Match lists with no member outside ``values``.</span>
+
+<span class="sd">        :param \*values: The allowed members.</span>
+<span class="sd">        :return: The set clause.</span>
+<span class="sd">        """</span>
+        <span class="n">values</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_members</span><span class="p">(</span><span class="n">values</span><span class="p">)</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">lists</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">DelimitedColumn</span><span class="p">):</span>
+            <span class="n">separator</span> <span class="o">=</span> <span class="n">spec</span><span class="o">.</span><span class="n">separator</span>
+            <span class="c1"># Doubling every separator gives each item its own pair, so removing</span>
+            <span class="c1"># separator+value+separator strips every occurrence, duplicates included.</span>
+            <span class="n">remainder</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_wrapped</span><span class="p">(</span><span class="n">spec</span><span class="p">),</span> <span class="n">separator</span><span class="p">,</span> <span class="n">separator</span> <span class="o">+</span> <span class="n">separator</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">dict</span><span class="o">.</span><span class="n">fromkeys</span><span class="p">(</span><span class="n">values</span><span class="p">):</span>
+                <span class="n">remainder</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">remainder</span><span class="p">,</span> <span class="n">separator</span> <span class="o">+</span> <span class="n">value</span> <span class="o">+</span> <span class="n">separator</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">remainder</span><span class="p">,</span> <span class="n">separator</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span> <span class="o">==</span> <span class="s2">""</span>
+        <span class="n">list_table</span><span class="p">,</span> <span class="n">child</span> <span class="o">=</span> <span class="n">spec</span>
+        <span class="n">parent</span><span class="p">,</span> <span class="n">value_column</span> <span class="o">=</span> <span class="n">child</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">list_table</span><span class="o">.</span><span class="n">parent_column</span><span class="p">],</span> <span class="n">child</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">list_table</span><span class="o">.</span><span class="n">value_column</span><span class="p">]</span>
+        <span class="n">members</span> <span class="o">=</span> <span class="p">[</span><span class="n">_literal</span><span class="p">(</span><span class="n">value_column</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">]</span>
+        <span class="n">subquery</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+            <span class="n">value_column</span><span class="o">.</span><span class="n">is_not</span><span class="p">(</span><span class="kc">None</span><span class="p">),</span> <span class="n">value_column</span><span class="o">.</span><span class="n">not_in</span><span class="p">(</span><span class="n">members</span><span class="p">),</span> <span class="n">parent</span><span class="o">.</span><span class="n">is_not</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_key</span><span class="p">()</span><span class="o">.</span><span class="n">not_in</span><span class="p">(</span><span class="n">subquery</span><span class="p">)</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_key</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Column</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">key</span>
+        <span class="k">assert</span> <span class="n">key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>  <span class="c1"># construction rejects lists without a key</span>
+        <span class="k">return</span> <span class="n">key</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_wrapped</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">spec</span><span class="p">:</span> <span class="n">DelimitedColumn</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+        <span class="n">separator</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">literal</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">separator</span><span class="p">,</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">String</span><span class="p">)</span>
+        <span class="n">column</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">table</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">spec</span><span class="o">.</span><span class="n">column</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">separator</span> <span class="o">+</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="n">coalesce</span><span class="p">(</span><span class="n">column</span><span class="p">,</span> <span class="s2">""</span><span class="p">,</span> <span class="n">type_</span><span class="o">=</span><span class="n">sqlalchemy</span><span class="o">.</span><span class="n">String</span><span class="p">)</span> <span class="o">+</span> <span class="n">separator</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__getattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"__"</span><span class="p">)</span> <span class="ow">or</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">TableField</span><span class="o">.</span><span class="vm">__slots__</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">AttributeError</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+        <span class="k">raise</span> <span class="ne">AttributeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"field </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_label</span><span class="p">()</span><span class="si">!r}</span><span class="s2"> is not a reference; TableStore fields do not chain (</span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">)"</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="TableResultSet">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableResultSet">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">TableResultSet</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""A materialized page of :class:`TableSearcher` results.</span>
+
+<span class="sd">    :param rows: The result rows.</span>
+<span class="sd">    :param names: The declared output names.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rows</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ResultRow</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="n">names</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rows</span> <span class="o">=</span> <span class="n">rows</span>
+<div class="viewcode-block" id="TableResultSet.names">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableResultSet.names">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">names</span> <span class="o">=</span> <span class="n">names</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__iter__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">ResultRow</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="nb">iter</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_rows</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_rows</span><span class="p">)</span>
+
+<div class="viewcode-block" id="TableResultSet.first">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableResultSet.first">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">first</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ResultRow</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the first row, or ``None`` when no row matched.</span>
+
+<span class="sd">        :return: The first row, if any.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rows</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rows</span> <span class="k">else</span> <span class="kc">None</span></div>
+
+
+<div class="viewcode-block" id="TableResultSet.one">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableResultSet.one">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">one</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ResultRow</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the only row.</span>
+
+<span class="sd">        :return: The sole row.</span>
+<span class="sd">        :raises ~httk.store.query.NoResultError: If no row matched.</span>
+<span class="sd">        :raises ~httk.store.query.MultipleResultsError: If more than one row matched.</span>
+<span class="sd">        """</span>
+        <span class="k">match</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rows</span><span class="p">:</span>
+            <span class="k">case</span> <span class="p">():</span>
+                <span class="k">raise</span> <span class="n">NoResultError</span><span class="p">(</span><span class="s2">"expected exactly one result, found none"</span><span class="p">)</span>
+            <span class="k">case</span> <span class="p">(</span><span class="n">row</span><span class="p">,):</span>
+                <span class="k">return</span> <span class="n">row</span>
+            <span class="k">case</span><span class="w"> </span><span class="k">_</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">MultipleResultsError</span><span class="p">(</span><span class="s2">"expected exactly one result, found more than one"</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableResultSet.scalars">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableResultSet.scalars">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">scalars</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Yield one output from each row.</span>
+
+<span class="sd">        :param name: The output name, required when several outputs are declared.</span>
+<span class="sd">        :return: An iterator over the output values.</span>
+<span class="sd">        :raises ValueError: If ``name`` is omitted while several outputs are declared.</span>
+<span class="sd">        :raises KeyError: If ``name`` is not a declared output.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">names</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"scalars() without a name requires exactly one output; declared: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">names</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+            <span class="n">name</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">names</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">names</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">KeyError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unknown output </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">; declared: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">names</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rows</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="TableSearcher">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">TableSearcher</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Build and run one read-only query over a :class:`TableStore` target.</span>
+
+<span class="sd">    Obtained from :meth:`TableStore.searcher`.</span>
+<span class="sd">    """</span>
+
+<div class="viewcode-block" id="TableSearcher.offset">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.offset">[docs]</a>
+    <span class="n">offset</span><span class="p">:</span> <span class="nb">int</span></div>
+
+<span class="w">    </span><span class="sd">"""The number of leading result rows skipped; :meth:`add_offset` adds to it."""</span>
+    <span class="n">_engine</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Engine</span>
+    <span class="n">_targets</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">_Target</span><span class="p">]</span>
+    <span class="n">_target</span><span class="p">:</span> <span class="n">_Target</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="n">_filters</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">]]</span>
+    <span class="n">_sorts</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Column</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="nb">bool</span><span class="p">]]</span>
+    <span class="n">_limit</span><span class="p">:</span> <span class="nb">int</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_of</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">engine</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Engine</span><span class="p">,</span> <span class="n">targets</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">_Target</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
+        <span class="n">searcher</span> <span class="o">=</span> <span class="nb">object</span><span class="o">.</span><span class="fm">__new__</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span>
+        <span class="n">searcher</span><span class="o">.</span><span class="n">_engine</span> <span class="o">=</span> <span class="n">engine</span>
+        <span class="n">searcher</span><span class="o">.</span><span class="n">_targets</span> <span class="o">=</span> <span class="n">targets</span>
+        <span class="n">searcher</span><span class="o">.</span><span class="n">_target</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">searcher</span><span class="o">.</span><span class="n">_filters</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">searcher</span><span class="o">.</span><span class="n">_sorts</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">searcher</span><span class="o">.</span><span class="n">_limit</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+        <span class="n">searcher</span><span class="o">.</span><span class="n">offset</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">return</span> <span class="n">searcher</span>
+
+<div class="viewcode-block" id="TableSearcher.variable">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.variable">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">variable</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TableVariable</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Bind the search variable to ``target``.</span>
+
+<span class="sd">        :param target: A target name of the store.</span>
+<span class="sd">        :return: The search variable.</span>
+<span class="sd">        :raises ValueError: If ``target`` is not a target of the store.</span>
+<span class="sd">        :raises ~httk.store.query.UnsupportedQueryError: If the searcher is already bound to another target.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="n">target</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_targets</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unknown TableStore target </span><span class="si">{</span><span class="n">target</span><span class="si">!r}</span><span class="s2">; targets: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_targets</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">name</span> <span class="o">!=</span> <span class="n">target</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">UnsupportedQueryError</span><span class="p">(</span><span class="s2">"a TableStore searcher queries a single target"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_target</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_targets</span><span class="p">[</span><span class="n">target</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">TableVariable</span><span class="o">.</span><span class="n">_of</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_target</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableSearcher.add">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.add">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">expression</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">ColumnElement</span><span class="p">[</span><span class="nb">bool</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Add a filter expression.</span>
+
+<span class="sd">        :param expression: An expression built from this searcher's variable.</span>
+<span class="sd">        """</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_filters</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">expression</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="TableSearcher.add_sort">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.add_sort">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_sort</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">field</span><span class="p">:</span> <span class="n">TableField</span><span class="p">,</span> <span class="n">descending</span><span class="p">:</span> <span class="nb">bool</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Sort by a scalar column, NULLs last in both directions.</span>
+
+<span class="sd">        :param field: A scalar field of this searcher's variable.</span>
+<span class="sd">        :param descending: Whether to sort descending.</span>
+<span class="sd">        :raises ~httk.store.query.UnsupportedQueryError: If ``field`` is a list.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="n">field</span><span class="o">.</span><span class="n">_name</span> <span class="ow">in</span> <span class="n">field</span><span class="o">.</span><span class="n">_target</span><span class="o">.</span><span class="n">lists</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">UnsupportedQueryError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"cannot sort by list field </span><span class="si">{</span><span class="n">field</span><span class="o">.</span><span class="n">_label</span><span class="p">()</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sorts</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">field</span><span class="o">.</span><span class="n">_column</span><span class="p">(),</span> <span class="n">descending</span><span class="p">))</span></div>
+
+
+<div class="viewcode-block" id="TableSearcher.set_limit">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.set_limit">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limit</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">limit</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Set the maximum number of result rows.</span>
+
+<span class="sd">        :param limit: The limit; negative means unbounded.</span>
+<span class="sd">        """</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_limit</span> <span class="o">=</span> <span class="n">limit</span></div>
+
+
+<div class="viewcode-block" id="TableSearcher.add_offset">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.add_offset">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_offset</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">offset</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Skip ``offset`` more result rows.</span>
+
+<span class="sd">        :param offset: The rows to skip, added to :attr:`offset`.</span>
+<span class="sd">        """</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">offset</span> <span class="o">+=</span> <span class="n">offset</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_bound</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">_Target</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"no search variable is bound; call variable(target) first"</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target</span>
+
+<div class="viewcode-block" id="TableSearcher.count">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.count">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">count</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the exact number of matching rows, ignoring limit and offset.</span>
+
+<span class="sd">        :return: The match count.</span>
+<span class="sd">        """</span>
+        <span class="n">statement</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">sqlalchemy</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="n">count</span><span class="p">())</span><span class="o">.</span><span class="n">select_from</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_bound</span><span class="p">()</span><span class="o">.</span><span class="n">table</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_filters</span><span class="p">)</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">connection</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">connection</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">statement</span><span class="p">)</span><span class="o">.</span><span class="n">scalar_one</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="TableSearcher.results">
+<a class="viewcode-back" href="../../../../../reference/autoapi/httk/store/backend/sql/tables/index.html#httk.store.backend.sql.tables.TableSearcher.results">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">results</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">outputs</span><span class="p">:</span> <span class="n">TableVariable</span> <span class="o">|</span> <span class="n">TableField</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TableResultSet</span><span class="p">:</span>
+<span class="w">        </span><span class="sa">r</span><span class="sd">"""Run the query and return the materialized page.</span>
+
+<span class="sd">        :param \*\*outputs: Named outputs: the search variable (the matched row</span>
+<span class="sd">            mapping) or one of its fields (that field's value).</span>
+<span class="sd">        :return: The result page.</span>
+<span class="sd">        :raises ValueError: If no output is given, or an output belongs to another target.</span>
+<span class="sd">        """</span>
+        <span class="n">target</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_bound</span><span class="p">()</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">outputs</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"results() requires at least one output"</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">output</span> <span class="ow">in</span> <span class="n">outputs</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">output</span><span class="p">,</span> <span class="n">TableVariable</span> <span class="o">|</span> <span class="n">TableField</span><span class="p">)</span> <span class="ow">or</span> <span class="n">output</span><span class="o">.</span><span class="n">_target</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">target</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"output </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2"> is not the search variable or one of its fields"</span><span class="p">)</span>
+        <span class="n">order</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">column</span><span class="p">,</span> <span class="n">descending</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sorts</span><span class="p">:</span>
+            <span class="n">order</span> <span class="o">+=</span> <span class="p">[</span><span class="n">sqlalchemy</span><span class="o">.</span><span class="n">case</span><span class="p">((</span><span class="n">column</span><span class="o">.</span><span class="n">is_</span><span class="p">(</span><span class="kc">None</span><span class="p">),</span> <span class="mi">1</span><span class="p">),</span> <span class="n">else_</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span> <span class="n">column</span><span class="o">.</span><span class="n">desc</span><span class="p">()</span> <span class="k">if</span> <span class="n">descending</span> <span class="k">else</span> <span class="n">column</span><span class="o">.</span><span class="n">asc</span><span class="p">()]</span>
+        <span class="k">if</span> <span class="n">target</span><span class="o">.</span><span class="n">key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span><span class="n">order</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_limit</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">offset</span><span class="p">):</span>
+            <span class="n">order</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">target</span><span class="o">.</span><span class="n">key</span><span class="p">)</span>
+        <span class="n">statement</span> <span class="o">=</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">target</span><span class="o">.</span><span class="n">table</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_filters</span><span class="p">)</span><span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="o">*</span><span class="n">order</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_limit</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">statement</span> <span class="o">=</span> <span class="n">statement</span><span class="o">.</span><span class="n">limit</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_limit</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">offset</span><span class="p">:</span>
+            <span class="n">statement</span> <span class="o">=</span> <span class="n">statement</span><span class="o">.</span><span class="n">offset</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">offset</span><span class="p">)</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">connection</span><span class="p">:</span>
+            <span class="n">rows</span> <span class="o">=</span> <span class="p">[</span><span class="nb">dict</span><span class="p">(</span><span class="n">row</span><span class="p">)</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">connection</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">statement</span><span class="p">)</span><span class="o">.</span><span class="n">mappings</span><span class="p">()]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_hydrate</span><span class="p">(</span><span class="n">connection</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">rows</span><span class="p">)</span>
+        <span class="n">names</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">outputs</span><span class="p">)</span>
+        <span class="n">values</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="n">types</span><span class="o">.</span><span class="n">MappingProxyType</span><span class="p">(</span><span class="n">row</span><span class="p">)</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">output</span><span class="p">,</span> <span class="n">TableVariable</span><span class="p">)</span> <span class="k">else</span> <span class="n">row</span><span class="p">[</span><span class="n">output</span><span class="o">.</span><span class="n">_name</span><span class="p">]</span>
+            <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">rows</span>
+            <span class="k">for</span> <span class="n">output</span> <span class="ow">in</span> <span class="n">outputs</span><span class="o">.</span><span class="n">values</span><span class="p">()</span>
+        <span class="p">]</span>
+        <span class="n">width</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">names</span><span class="p">)</span>
+        <span class="n">result_rows</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">ResultRow</span><span class="p">(</span><span class="nb">tuple</span><span class="p">(</span><span class="n">values</span><span class="p">[</span><span class="n">i</span> <span class="p">:</span> <span class="n">i</span> <span class="o">+</span> <span class="n">width</span><span class="p">]),</span> <span class="n">names</span><span class="p">)</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">values</span><span class="p">),</span> <span class="n">width</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">TableResultSet</span><span class="p">(</span><span class="n">result_rows</span><span class="p">,</span> <span class="n">names</span><span class="p">)</span></div>
+
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_hydrate</span><span class="p">(</span><span class="n">connection</span><span class="p">:</span> <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">Connection</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="n">_Target</span><span class="p">,</span> <span class="n">rows</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Add every declared list to ``rows``, with one child query per key batch per :class:`ListTable`."""</span>
+        <span class="k">for</span> <span class="n">list_name</span><span class="p">,</span> <span class="n">spec</span> <span class="ow">in</span> <span class="n">target</span><span class="o">.</span><span class="n">lists</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">DelimitedColumn</span><span class="p">):</span>
+                <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">:</span>
+                    <span class="n">text</span> <span class="o">=</span> <span class="n">row</span><span class="p">[</span><span class="n">spec</span><span class="o">.</span><span class="n">column</span><span class="p">]</span>
+                    <span class="n">row</span><span class="p">[</span><span class="n">list_name</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">text</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="nb">filter</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">text</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">separator</span><span class="p">))))</span>
+                <span class="k">continue</span>
+            <span class="k">assert</span> <span class="n">target</span><span class="o">.</span><span class="n">key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>  <span class="c1"># construction rejects lists without a key</span>
+            <span class="n">list_table</span><span class="p">,</span> <span class="n">child</span> <span class="o">=</span> <span class="n">spec</span>
+            <span class="n">parent</span><span class="p">,</span> <span class="n">value</span> <span class="o">=</span> <span class="n">child</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">list_table</span><span class="o">.</span><span class="n">parent_column</span><span class="p">],</span> <span class="n">child</span><span class="o">.</span><span class="n">c</span><span class="p">[</span><span class="n">list_table</span><span class="o">.</span><span class="n">value_column</span><span class="p">]</span>
+            <span class="n">keys</span> <span class="o">=</span> <span class="nb">list</span><span class="p">({</span><span class="n">row</span><span class="p">[</span><span class="n">target</span><span class="o">.</span><span class="n">key</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">}</span> <span class="o">-</span> <span class="p">{</span><span class="kc">None</span><span class="p">})</span>
+            <span class="n">members</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+            <span class="k">for</span> <span class="n">start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">keys</span><span class="p">),</span> <span class="n">_HYDRATION_BATCH_SIZE</span><span class="p">):</span>
+                <span class="n">batch</span> <span class="o">=</span> <span class="n">keys</span><span class="p">[</span><span class="n">start</span> <span class="p">:</span> <span class="n">start</span> <span class="o">+</span> <span class="n">_HYDRATION_BATCH_SIZE</span><span class="p">]</span>
+                <span class="n">statement</span> <span class="o">=</span> <span class="p">(</span>
+                    <span class="n">sqlalchemy</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+                    <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">in_</span><span class="p">(</span><span class="n">batch</span><span class="p">),</span> <span class="n">value</span><span class="o">.</span><span class="n">is_not</span><span class="p">(</span><span class="kc">None</span><span class="p">))</span>
+                    <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+                <span class="p">)</span>
+                <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">member</span> <span class="ow">in</span> <span class="n">connection</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">statement</span><span class="p">):</span>
+                    <span class="n">members</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="p">[])</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">member</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">:</span>
+                <span class="n">row</span><span class="p">[</span><span class="n">list_name</span><span class="p">]</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">members</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="n">target</span><span class="o">.</span><span class="n">key</span><span class="o">.</span><span class="n">name</span><span class="p">],</span> <span class="p">()))</span></div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-store AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../../../_static/documentation_options.js?v=952df46a"></script>
+    <script src="../../../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../../../_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>

@@ -13,7 +13,7 @@ python -m pip install "httk-store[mongodb]"
 from httk.store.backend.mongo import MongoDatabase, MongoStore
 
 uri = "mongodb://127.0.0.1:27017/?replicaSet=httk2rs"
-with MongoDatabase.connect(uri, database="materials") as database:
+with MongoDatabase(uri, database="materials") as database:
     store = MongoStore(database, entry_records={})
     # store.save(), store.fetch(), store.searcher() work as with SqlStore
 ```

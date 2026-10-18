@@ -38,7 +38,7 @@ set for a development or CI database:
 from httk.store.backend.mongo import MongoDatabase, MongoStore
 
 uri = "mongodb://127.0.0.1:27017/?replicaSet=httk2rs"
-with MongoDatabase.connect(uri, database="materials", transactions="require") as database:
+with MongoDatabase(uri, database="materials", transactions="require") as database:
     store = MongoStore(database, entry_records={})
     # Use store.save(), store.fetch(), and store.searcher() here.
 ```
@@ -81,7 +81,7 @@ after the transaction has ended, or serialize writers yourself when that is
 unacceptable. Within one explicit transaction, saves are not retried at all: a
 conflict aborts the whole transaction with the driver's error.
 
-`MongoDatabase.connect()` configures PyMongo with `w="majority"`,
+`MongoDatabase(uri, ...)` connects PyMongo (when given a URI string) with `w="majority"`,
 `journal=True`, and `readConcernLevel="majority"`. Explicit store
 transactions also use majority read and write concern with journaling. These
 defaults provide the intended durability behavior on a properly configured

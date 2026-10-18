@@ -126,7 +126,7 @@ search_variable, has_type)`` and returns a plain
 as ``handler(owner, literal, search_variable, has_type)`` with a
 ``httk.core.storage.ZipLiteral`` and ``has_type`` one of
 ``"HAS_ZIP_ALL"``, ``"HAS_ZIP_ANY"``, ``"HAS_ZIP_ONLY"``; it raises
-:class:`FilterTranslationError` (``"not-implemented"``) for combinations it
+:class:`~httk.store.query.optimade_filters.FilterTranslationError` (``"not-implemented"``) for combinations it
 does not support. The caller applies ``NOT`` as
 ``~``; handlers do not receive negation state or report post-filter placement.
 Dotted ``'<type>.id'`` entries provide relationship-id filtering (see

@@ -59,6 +59,29 @@ lineage integrity), and a `retracted` value outside `{0, 1}`. More than one live
 lineage for one `(source, target)` pair is reported as a *repairable note*, not
 corruption (concurrent writers may mint duplicate pairs).
 
+Pass `data_dir` to also verify the files that stored `FileRecord` rows point
+at. It is the local directory that stored `data/...` URLs are relative to (the
+directory published under serve's `--data-path`):
+
+```python
+summary = store.fsck(data_dir="/srv/project/data")
+summary.files_missing     # ((sid, url), ...) of files that are absent, symlinks, or unreadable
+summary.files_mismatched  # ((sid, url), ...) of files whose SHA-256 differs from sha256
+```
+
+Every `FileRecord` row is read, whether it was saved on its own or as a field of
+another record. A relative `data/<rest>` URL is checked as `data_dir/<rest>`:
+the file must exist and its streamed SHA-256 must equal the row's `sha256`.
+Symlinks are not followed; a path with a symlink in any component below
+`data_dir` is reported as missing. `files_checked` counts these rows.
+`files_unchecked` counts the others: absolute URLs (`https://…`, `file://…`,
+`/abs/...`) and paths that contain `..`. The rows are read under the fsck lock
+and the files are hashed after it is released, so hashing does not block
+writers. The check reads files only. It never changes a row, and a problem it
+finds is reported in these fields rather than raised. Rows removed by the same
+run's garbage collection are not checked. `MongoStore.fsck` accepts the same
+keyword and reports the same fields.
+
 ## ClickHouse bulk-fenced writes
 
 For local/CI server setup and the required `_httk_bootstrap` KeeperMap DDL,

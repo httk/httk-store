@@ -16,7 +16,10 @@ documents, plus the store-managed columns:
   dedup policy — a unique-indexed ``content_id`` text column;
 - every child table gets a ``<parent table>_sid`` integer sid column (NOT NULL,
   indexed) and a ``<field>_index`` integer ordering column ahead of its element
-  columns; logical references are defined by :mod:`httk.store.backend.sql.graph`.
+  columns; logical references are defined by :mod:`httk.store.backend.sql.graph`;
+- a :class:`~httk.core.storage.StrongLink` field's child table also indexes its
+  edge column, and its edge table indexes ``entry_id`` (performance only, outside
+  the schema fingerprint).
 
 Index names are deterministic and table-scoped — ``ix_<table>_<column>`` for
 plain indexes, ``uq_<table>_<column>`` for unique ones, columns joined by
@@ -238,7 +241,28 @@ def table_for(schema: TableSchema, metadata: sqlalchemy.MetaData, *, store_times
         link_table_for(link, metadata, store_timestamps=store_timestamps)
     for target in schema.referenced_classes():
         table_for(resolve_schema(target), metadata, store_timestamps=store_timestamps)
+    for spec in schema.fields:
+        if spec.strong_link is not None:
+            _index_strong_link_edges(spec, metadata)
     return table
+
+
+def _index_strong_link_edges(spec: FieldSpec, metadata: sqlalchemy.MetaData) -> None:
+    """Index a StrongLink field's link rows by edge and its edge table by ``entry_id``.
+
+    Inverted relationship filters walk edge id -> edge row -> link row -> run;
+    these two indexes make every step an index search. They are physical
+    performance indexes only: no :class:`~httk.store.backend.schema.ColumnSpec`
+    changes, so the schema fingerprint is unchanged and existing stores open as
+    before (``upgrade=True`` creates them there).
+    """
+    assert spec.child is not None and spec.target is not None
+    edge = metadata.tables[resolve_schema(spec.target).table_name]
+    link = metadata.tables[spec.child.table_name]
+    for table, column in ((link, spec.child.element_columns[0].name), (edge, "entry_id")):
+        name = _index_name("ix", table.name, (column,))
+        if all(index.name != name for index in table.indexes):
+            sqlalchemy.Index(name, table.c[column])
 
 
 def link_table_for(link: LinkSpec, metadata: sqlalchemy.MetaData, *, store_timestamps: bool = True) -> sqlalchemy.Table:

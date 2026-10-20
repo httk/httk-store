@@ -300,6 +300,15 @@ alternative's revisions never enter a revision stream. Pass
 alternatives through `StoredEntryFederation` (see [Federated stores](../federation.md)), not through
 `StoreEntryProvider`, which stays main-only.
 
+A `StrongLink` edge (such as a run's `RunEdge`) may name an alternative by its
+composite `<id>~<kind>`. Reverse relationships are derived by exact match on the
+named id: an edge naming `<id>` gives the main its reverse block, an edge naming
+`<id>~<kind>` gives only that alternative one, and neither is inherited across
+the group. An edge naming an immutable revision id stays a loose reference.
+Conforming entry ids never contain `~`; a store that also holds a non-conforming
+main id containing `~` makes an edge id such as `a~conventional` ambiguous
+between that main and the `conventional` alternative of `a`.
+
 Because `alt_id`/`alt_kind` are new physical columns, a store created before
 this change is not version-bumped automatically. An old SQL store still reads
 its mains correctly, but the first query or write that touches the alternative

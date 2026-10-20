@@ -649,14 +649,9 @@ def test_file_entry_dispatch_round_trips(store_factory):
     with pytest.raises(EntryMetadataConflictError):
         store.save(replace(record, immutable_id="different"))
     assert store.save(record) == sid
-    other = replace(
-        record,
-        url="https://mirror.example.org/files/data.json",
-        immutable_id="file-immutable-other",
-    )
-    other_sid = store.save(other)
-    assert other_sid != sid
-    assert store_factory.reopen(store).fetch(FileRecord, other_sid, eager=True).id != fetched.id
+    # The same bytes from another location are one entry that keeps its first url (KeepStored).
+    assert store.save(replace(record, url="https://mirror.example.org/files/data.json")) == sid
+    assert store_factory.reopen(store).fetch(FileRecord, sid, eager=True).url == record.url
 
 
 # Keep this record declaration local to the behavior module: it is used only

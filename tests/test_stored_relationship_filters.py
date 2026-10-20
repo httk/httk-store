@@ -4,7 +4,7 @@ Exercises the durable federation's SQL filter path built in
 ``backend/sql/stored_properties.py``: StrongLink forward/reverse semantic keys,
 typed reference and weak-link keys under both the bare and the
 ``_httk_relationships.<type>.id`` alias spellings, the HAS family (incl. the S4
-HAS ALL fix and vacuous HAS ONLY), the ``~alts`` reverse suppression, and the
+HAS ALL fix and vacuous HAS ONLY), the ``~alts`` reverse exact-id match, and the
 per-revision ``~revs`` forward pin. Every filter asserts the exact expected id
 set, and every 400 is paired with a positive same-route filter.
 """
@@ -267,20 +267,20 @@ def test_reverse_excludes_non_latest_and_alternative_runs() -> None:
         assert _ids(_query(store, RecordFamily, f'_httk_relationships._httk_is_input.id HAS "{run_id}"')) == []
 
 
-def test_reverse_suppressed_on_alternatives_with_group_targeted_edge() -> None:
-    """~alts reverse no-match even when a run edge targets the alternative's group id."""
+def test_reverse_not_matched_on_alternatives_with_group_targeted_edge() -> None:
+    """~alts reverse no-match when a run edge targets the alternative's group id."""
     with Backend.sqlite() as database:
         store = _store(database)
         target = store.fetch(RecordRow, store.save(RecordRow("t")), eager=True)
         # An alternative of the SAME lineage: its raw id column carries the group
-        # id, which the run below targets -- the suppression, not chance, is what
-        # keeps it out of the ~alts result.
+        # id, which the run below targets -- the exact <id>~<kind> match, not
+        # chance, is what keeps it out of the ~alts result.
         store.save(RecordRow("t-conv"), alternative_of=target.id, alternative_kind="conventional")
         run_id = _save(store, Run(inputs=(RunEdge("in", "records", target.id),), source_id="j"))
 
         # Positive control on the mains page: the reverse filter matches the main.
         assert _ids(_query(store, RecordFamily, f'_httk_relationships._httk_is_input.id HAS "{run_id}"')) == [target.id]
-        # The alternatives page suppresses reverse keys: no alt row matches.
+        # The edge names the main, not the alternative: no alt row matches.
         alts = _query(store, RecordFamily, f'_httk_relationships._httk_is_input.id HAS "{run_id}"', alternatives=True)
         assert _ids(alts) == []
 

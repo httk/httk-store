@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import os
 from collections import defaultdict, deque
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from httk.core import FileRecord
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from httk.store.backend.schema import TableSchema, resolve_schema
+from httk.store.store_common import _check_stored_files
 from httk.store.store_timestamp import FUTURE_TIMESTAMP_SLACK_NS
 
 from .leases import acquire_fsck
@@ -52,11 +56,23 @@ class FsckSummary:
     :param generation: Metadata generation after this run's single increment.
     :param collections: Per-collection repair and collection counters.
     :param violations: Human-readable violations reported during the run.
+    :param files_checked: Stored ``FileRecord`` documents whose ``data/`` URL
+        was checked against ``data_dir`` (``0`` when no ``data_dir`` was given).
+    :param files_missing: ``(sid, url)`` of checked documents whose file is
+        missing, a symlink, or not a readable regular file.
+    :param files_mismatched: ``(sid, url)`` of checked documents whose file's
+        SHA-256 differs from the stored ``sha256``.
+    :param files_unchecked: Stored ``FileRecord`` documents whose URL is not a
+        relative ``data/`` path and so was not checked.
     """
 
     generation: int
     collections: Mapping[str, FsckCollectionSummary]
     violations: tuple[str, ...]
+    files_checked: int = 0
+    files_missing: tuple[tuple[int, str], ...] = ()
+    files_mismatched: tuple[tuple[int, str], ...] = ()
+    files_unchecked: int = 0
 
 
 class _Counters:
@@ -486,6 +502,7 @@ def run_fsck(
     force: bool = False,
     clamp_future_timestamps: bool = False,
     known_types: tuple[type, ...] = (),
+    data_dir: str | os.PathLike[str] | None = None,
 ) -> FsckSummary:
     """Run the exclusive MongoStore integrity repair and garbage collector.
 
@@ -497,6 +514,9 @@ def run_fsck(
     :param clamp_future_timestamps: Clamp timestamps beyond the allowed future slack when repairing.
     :param known_types: Record classes needed to attribute ordinary collections
         after reopening a store.
+    :param data_dir: When given, the local directory that stored ``data/...``
+        URLs are relative to; every stored ``FileRecord`` document is read under
+        the fsck lease and its file verified read-only after the lease is released.
     :return: Immutable per-collection counters and all reported violations.
     """
     counters: dict[str, _Counters] = defaultdict(_Counters)
@@ -547,10 +567,29 @@ def run_fsck(
                 store._sync_identity_ownership(lease, reconcile=True)
             store._identity._clear_identity_caches()
             store._last_generation = generation
-            return FsckSummary(
+            file_rows = None
+            if data_dir is not None:
+                file_rows = [
+                    (int(document["_id"]), document.get("f", {}).get("url"), document.get("f", {}).get("sha256"))
+                    for name, schema in schemas.items()
+                    if issubclass(schema.cls, FileRecord)
+                    for document in store._database.database[name].find({}, {"f.url": 1, "f.sha256": 1}).sort("_id", 1)
+                ]
+            summary = FsckSummary(
                 generation=generation,
                 collections=MappingProxyType({name: value.freeze() for name, value in sorted(counters.items())}),
                 violations=tuple(violations),
             )
         finally:
             lease.release()
+    if file_rows is None or data_dir is None:
+        return summary
+    # Hash only after the write lock and fsck lease are released.
+    files = _check_stored_files(file_rows, data_dir)
+    return dataclasses.replace(
+        summary,
+        files_checked=files.checked,
+        files_missing=files.missing,
+        files_mismatched=files.mismatched,
+        files_unchecked=files.unchecked,
+    )

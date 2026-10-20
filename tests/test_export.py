@@ -20,7 +20,7 @@ def _store(path: Path) -> None:
             entry_records={FileEntry: FileRecord},
             entry_ids=EntryIdScheme("httk.test", "1"),
         )
-        store.save(FileRecord("file:///presentation", "presentation", size=3, sha256="abc"))
+        store.save(FileRecord("file:///presentation", "presentation", size=3, sha256="abc" + "0" * 61))
 
 
 def test_export_contains_store_manifest_and_every_definition(tmp_path: Path) -> None:

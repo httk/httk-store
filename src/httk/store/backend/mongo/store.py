@@ -6,6 +6,7 @@ import datetime
 import functools
 import json
 import logging
+import os
 import threading
 import time
 import typing
@@ -1618,6 +1619,7 @@ class MongoStore:
         force: bool = False,
         clamp_future_timestamps: bool = False,
         known_types: tuple[type, ...] = (),
+        data_dir: str | os.PathLike[str] | None = None,
     ) -> FsckSummary:
         """Exclusively repair dispatch integrity and collect orphan dependencies.
 
@@ -1632,6 +1634,11 @@ class MongoStore:
         :param clamp_future_timestamps: Clamp timestamps beyond the allowed future slack when repairing.
         :param known_types: Record classes that attribute ordinary collections
             from earlier store sessions, allowing a safe sweep after reopen.
+        :param data_dir: The local directory that stored ``data/...`` URLs are
+            relative to (the directory published under serve's ``--data-path``);
+            when given, every stored ``FileRecord`` is checked read-only for an
+            existing, non-symlink file matching its ``sha256``, reported in the
+            summary's ``files_*`` fields.
         :return: An immutable :class:`~httk.store.backend.mongo.fsck.FsckSummary`.
         """
         from .fsck import run_fsck
@@ -1646,6 +1653,7 @@ class MongoStore:
             force=force,
             clamp_future_timestamps=clamp_future_timestamps,
             known_types=known_types,
+            data_dir=data_dir,
         )
 
     def _refresh_writer_lease(self) -> None:

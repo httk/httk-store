@@ -111,8 +111,9 @@ offending collections (`{"schema": {collection: {"expected", "actual"}}}`).
 `MongoStore(database, ..., upgrade=True)` applies a purely additive change under
 the same rule as
 [`SqlStore`](db-schema.md#applying-a-purely-additive-change-with-upgradetrue) — new
-tables plus new non-child, non-derived, `IdentitySkip` fields whose columns are
-all nullable. Documents are schemaless, so the apply is only the fingerprint
+tables plus new non-child, non-derived fields marked `IdentitySkip` or
+`IdentitySkipWhenNone` whose columns are all nullable, including a nullable
+reference such as `Annotated[FileRecord | None, IdentitySkipWhenNone()]`. Documents are schemaless, so the apply is only the fingerprint
 re-stamp (done last, after every other check passes, since Mongo has no
 transaction to roll a bad open back); old documents read back with the new
 fields as `None` and keep their `content_id`. Non-additive or non-schema
@@ -423,7 +424,8 @@ are operational behavior, not guarantees to be inferred from SQL parity.
     path serves the `StrongLink` provenance relationships in both directions,
     matching SQL. Mongo *federation* serves no relationships (its per-row
     relationships channel is empty), and there is no `_httk_relationships`
-    relationship filtering on a Mongo-federated route.
+    relationship filtering on a Mongo-federated route; this includes edges that
+    name an alternative's composite `<id>~<kind>`, which only SQL federation serves.
 
 ## Testing profiles
 

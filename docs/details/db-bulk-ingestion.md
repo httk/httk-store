@@ -105,7 +105,9 @@ in-memory occurrence — or against the stored row for a hit against existing
 data — reproducing `save()` and raising
 `httk.store.store_common.EntryMetadataConflictError` on a conflict. Pass
 `verify_metadata=False` to skip the comparison when the stream is
-known-consistent.
+known-consistent. A field marked `KeepStored` (for example the `url` and `name`
+of `FileRecord`) is never compared, here or in `save()`: the row keeps its
+first stored value and a differing incoming value is ignored.
 
 **`index_strategy`** (`"auto"`, `"keep"`, or `"rebuild"`, default `"auto"`)
 governs only how an *existing* table's separable indexes are handled during an

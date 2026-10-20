@@ -57,8 +57,8 @@ from httk.store.backend.sql.optimade import (
 )
 from httk.store.backend.sql.provenance_edges import (
     StrongLinkFamily,
+    edge_public_id_in,
     latest_main_condition,
-    local_edge_public_id,
     strong_link_families,
 )
 from httk.store.backend.sql.rows import RowHydrator
@@ -1117,9 +1117,8 @@ class StoredPropertySqlPlan:
         ``relationship_targets`` so the 2-segment dispatch reaches it) and the
         ``_httk_relationships.<type>.id`` alias, and each StrongLink forward /
         reverse semantic key under ``_httk_relationships.<wire key>.id`` only.
-        Reverse keys become constant-false on an alternatives stream (an
-        alternative cell must not claim a reverse relationship; its raw id column
-        carries the group id the reverse join would otherwise match).
+        On an alternatives stream, reverse keys match the composite
+        ``<id>~<kind>`` an edge names, never the group id its raw id column carries.
 
         :param backing: The concrete backing class whose relationships are derived.
         :param alternatives: Whether this is an alternatives (``~alts``) stream.
@@ -1200,11 +1199,7 @@ class StoredPropertySqlPlan:
             for wire_key, families_fields in reverse_by_key.items():
                 handlers.setdefault(
                     f"{_REL_ROOT}.{wire_key}.id",
-                    (
-                        _constant_false_has_handlers()
-                        if alternatives
-                        else _reverse_edge_has_handlers(store, families_fields, internal_target, source_map)
-                    ),
+                    _reverse_edge_has_handlers(store, families_fields, internal_target, source_map, alternatives),
                 )
         return handlers, tuple(targets)
 
@@ -1568,12 +1563,14 @@ def _forward_edge_has_handlers(
     """A forward StrongLink ``.id`` HAS handler over the filtered run's own edges.
 
     A run matches when one of its ``field_name`` edges names a listed target
-    (``edge.entry_id``), evaluated through a correlated ``EXISTS`` on the run
-    row being filtered — so per-revision on ``~revs``. Fields sharing one
-    forward wire key OR their per-field ``EXISTS``. ``HAS ALL`` ANDs one such
-    (OR-of-fields) ``EXISTS`` per value, ``HAS ANY`` matches any value, and
-    ``HAS ONLY`` is the ``NOT EXISTS`` complement (an edge-less run matches
-    vacuously).
+    (``edge.entry_id``), keyed on the filtered run row's own sid — so
+    per-revision on ``~revs``. ``HAS``/``HAS ANY``/``HAS ALL`` are inverted to
+    ``run.sid IN (link rows of the matching edges)``, which the edge-id and
+    link-edge indexes drive without visiting every run. Fields sharing one
+    forward wire key OR their per-field clauses. ``HAS ALL`` ANDs one such
+    (OR-of-fields) clause per value, ``HAS ANY`` matches any value, and
+    ``HAS ONLY`` is the correlated ``NOT EXISTS`` complement (an edge-less run
+    matches vacuously).
 
     :param store: The SQL store backing the run family.
     :param families_fields: The ``(family, field)`` pairs sharing one forward wire key.
@@ -1582,33 +1579,44 @@ def _forward_edge_has_handlers(
     """
     sources = [_edge_source(store, family, field_name) for family, field_name in families_fields]
 
-    def one_exists(
+    def one_source(
         source: tuple[Any, Any, Any, str, str],
         outer_sid: Any,
         edge_predicate: Callable[[Any], Any],
+        correlated: bool,
     ) -> Any:
         _run_table, child_table, edge_table, parent_fk, edge_fk = source
         child_alias = child_table.alias()
         edge_alias = edge_table.alias()
+        joined = child_alias.join(edge_alias, child_alias.c[edge_fk] == edge_alias.c[SID_COLUMN])
+        if not correlated:
+            # Inverted: the edge-id indexes locate the matching edges, the link
+            # table's edge-column index their runs; no per-run probe.
+            return outer_sid.in_(
+                sqlalchemy.select(child_alias.c[parent_fk]).select_from(joined).where(edge_predicate(edge_alias))
+            )
         statement = (
             sqlalchemy.select(sqlalchemy.literal(1))
-            .select_from(child_alias.join(edge_alias, child_alias.c[edge_fk] == edge_alias.c[SID_COLUMN]))
+            .select_from(joined)
             .where(child_alias.c[parent_fk] == outer_sid, edge_predicate(edge_alias))
         )
         return sqlalchemy.exists(statement)
 
     def has_handler(entry: str, ops: Any, values: Any, search_variable: SqlVariable, has_type: str) -> _SqlPredicate:
         outer_sid = search_variable._alias.c[SID_COLUMN]
+        # HAS ONLY tests every edge of a run against the complement, which no
+        # edge-id index can drive; it keeps the per-run NOT EXISTS.
+        correlated = has_type == "HAS_ONLY"
 
         def any_source(edge_predicate: Callable[[Any], Any]) -> Any:
-            return sqlalchemy.or_(*(one_exists(source, outer_sid, edge_predicate) for source in sources))
+            return sqlalchemy.or_(*(one_source(source, outer_sid, edge_predicate, correlated) for source in sources))
 
-        def public_id(row: Any) -> Any:
+        def matches(row: Any, selected: Sequence[Any]) -> Any:
             if source_map is None:
-                return row.c["entry_id"]
-            return local_edge_public_id(store, row, source_map.prefixes, source_map.target_backings)
+                return row.c["entry_id"].in_(selected)
+            return edge_public_id_in(store, row, selected, source_map.prefixes, source_map.target_backings)
 
-        clause = _has_family_clause(has_type, values, any_source, public_id)
+        clause = _has_family_clause(has_type, values, any_source, matches)
         return _SqlPredicate(_bool_clause(clause), correlation_depth=1)
 
     return {"HAS": has_handler}
@@ -1619,11 +1627,13 @@ def _reverse_edge_has_handlers(
     families_fields: list[tuple[StrongLinkFamily, str]],
     internal_target: str,
     source_map: RelationshipSourceMap | None = None,
+    alternatives: bool = False,
 ) -> Mapping[str, Callable[..., Any]]:
     """A reverse StrongLink ``.id`` HAS handler naming the runs that point at each row.
 
-    The filtered row (a data entry) matches when a run's edge names it
-    (``entry_type``/``entry_id`` on the raw stored id) and
+    The filtered row (a data entry) matches when a run's edge names it exactly
+    (``entry_type``/``entry_id`` against the raw stored id of a main, or the
+    composite ``<id>~<kind>`` of a named alternative) and
     that run is a lineage's latest main revision (the same constraint the
     reverse serving applies). The reverse edges of ALL run families/backings
     sharing one reverse wire key OR their per-source ``EXISTS`` — serving merges
@@ -1636,6 +1646,7 @@ def _reverse_edge_has_handlers(
     :param families_fields: The ``(family, field)`` pairs sharing one reverse wire key.
     :param internal_target: The filtered family's internal (unprefixed) type name.
     :param source_map: Resolved reverse mounts whose forward mapping points to this source.
+    :param alternatives: Whether the filtered stream serves named alternatives.
     :return: A handler mapping containing the ``HAS`` operation.
     """
     sources = [
@@ -1671,7 +1682,8 @@ def _reverse_edge_has_handlers(
         return sqlalchemy.exists(statement)
 
     def has_handler(entry: str, ops: Any, values: Any, search_variable: SqlVariable, has_type: str) -> _SqlPredicate:
-        outer_id = search_variable._alias.c["id"]
+        row = search_variable._alias
+        outer_id = row.c["id"] + sqlalchemy.literal("~") + row.c[ALT_KIND_COLUMN] if alternatives else row.c["id"]
 
         def any_source(run_id_predicate: Callable[[Any], Any]) -> Any:
             return sqlalchemy.or_(
@@ -1679,7 +1691,7 @@ def _reverse_edge_has_handlers(
                 *(one_exists(source, prefix, outer_id, run_id_predicate) for source, prefix in sources),
             )
 
-        clause = _has_family_clause(has_type, values, any_source, lambda value: value)
+        clause = _has_family_clause(has_type, values, any_source, lambda run_id, selected: run_id.in_(selected))
         return _SqlPredicate(_bool_clause(clause), correlation_depth=1)
 
     return {"HAS": has_handler}
@@ -1689,7 +1701,7 @@ def _has_family_clause(
     has_type: str,
     values: Any,
     any_source: Callable[[Callable[[Any], Any]], Any],
-    column: str | Callable[[Any], Any],
+    matches: Callable[[Any, Sequence[Any]], Any],
 ) -> Any:
     """Compose one HAS-family clause from a per-value EXISTS-over-sources builder.
 
@@ -1699,24 +1711,21 @@ def _has_family_clause(
     :param has_type: The ``HAS_ALL``/``HAS_ANY``/``HAS_ONLY`` operator.
     :param values: The filter id values.
     :param any_source: The OR-of-sources EXISTS builder for one row predicate.
-    :param column: The matched row-alias column (``entry_id`` forward, ``id`` reverse).
+    :param matches: ``(row, values) -> clause`` testing whether a matched row's id is one of ``values``.
     :return: The composed SQL boolean clause.
     :raises FilterTranslationError: If ``has_type`` is not a supported set operator.
     """
 
-    def value_of(row: Any) -> Any:
-        return row.c[column] if isinstance(column, str) else column(row)
-
     if has_type == "HAS_ANY":
-        return any_source(lambda row: value_of(row).in_(values))
+        return any_source(lambda row: matches(row, values))
     if has_type == "HAS_ALL":
 
         def match_value(value: Any) -> Any:
-            return any_source(lambda row: value_of(row) == value)
+            return any_source(lambda row: matches(row, [value]))
 
         return sqlalchemy.and_(*(match_value(value) for value in values))
     if has_type == "HAS_ONLY":
-        return sqlalchemy.not_(any_source(lambda row: value_of(row).notin_(values)))
+        return sqlalchemy.not_(any_source(lambda row: sqlalchemy.not_(matches(row, values))))
     raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
 
@@ -1763,11 +1772,6 @@ def _union_has_handlers(
         raise FilterTranslationError("Unexpected set operator type: " + str(has_type), "internal")
 
     return {"HAS": has_handler}
-
-
-def _constant_false_has_handlers() -> Mapping[str, Callable[..., Any]]:
-    """A HAS handler matching no row (reverse keys suppressed on an alternatives stream)."""
-    return {"HAS": lambda entry, ops, values, variable, has_type: _SqlPredicate(_bool_clause(sqlalchemy.false()))}
 
 
 def _empty_related_resolver(related_type: str, sub_ast: FilterAst) -> tuple[str, ...]:

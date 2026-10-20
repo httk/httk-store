@@ -45,6 +45,7 @@ __all__ = [
     "StorageLayoutUpgradeRequiredError",
     "StoreUnderConstructionError",
     "actual_columns",
+    "actual_index_names",
     "actual_schema_objects",
     "actual_table_names",
     "backend_facts_for_dialect",
@@ -356,6 +357,28 @@ def actual_columns(connection: sqlalchemy.Connection, table_name: str) -> frozen
     from httk.store.backend.clickhouse.support import actual_columns as clickhouse_actual_columns
 
     return frozenset(clickhouse_actual_columns(connection, table_name))
+
+
+def actual_index_names(connection: sqlalchemy.Connection) -> frozenset[str]:
+    """Return the index names in the current schema without SQLAlchemy reflection.
+
+    The DuckDB SQLAlchemy inspector does not reflect indexes, so this reads the
+    dialect catalogues directly, like :func:`actual_schema_objects`.
+
+    :param connection: The open SQLite, DuckDB, or PostgreSQL connection.
+    :return: The set of index names.
+    :raises ValueError: If the dialect has no index catalogue here (ClickHouse).
+    """
+    catalog = backend_facts_for_dialect(connection.dialect.name).system_catalog
+    queries = {
+        "sqlite": "SELECT name FROM sqlite_master WHERE type = 'index'",
+        "duckdb": "SELECT index_name FROM duckdb_indexes() "
+        "WHERE database_name = current_database() AND schema_name = current_schema()",
+        "postgresql": "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()",
+    }
+    if catalog not in queries:
+        raise ValueError(f"no index catalogue for {connection.dialect.name!r}")
+    return frozenset(str(row[0]) for row in connection.execute(sqlalchemy.text(queries[catalog])))
 
 
 def read_store_metadata(connection: sqlalchemy.Connection) -> Mapping[str, str] | None:

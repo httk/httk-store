@@ -7,7 +7,10 @@ review-pinned guards (alternatives excluded, lineage-level, store-scoped,
 wire-named, latest-revision-only).
 """
 
+import itertools
+import sqlite3
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Annotated, ClassVar
 
 import pytest
@@ -374,6 +377,162 @@ def test_reverse_relationship_union_of_run_mounts_needs_no_forward_target_overri
                 "D:" + target
             ]
         assert not records.query(f'{key} HAS ONLY "A:{run}"').rows
+
+
+_FILE_KIND = "file_0123456789abcdef"
+
+
+@pytest.fixture(params=["sqlite", "duckdb"])
+def backend(request: pytest.FixtureRequest):
+    if request.param == "duckdb":
+        pytest.importorskip("duckdb_engine")
+        database = Backend.duckdb()
+    else:
+        database = Backend.sqlite()
+    with database:
+        yield database
+
+
+def _mounted(store: SqlStore) -> tuple[StoredEntryFederation, StoredEntryFederation]:
+    sources = (
+        StoredEntrySource(store, RunEntry, "runs", "R:"),
+        StoredEntrySource(store, RecordFamily, "records", "D:"),
+    )
+    return (
+        StoredEntryFederation((sources[0],), source_inventory=sources),
+        StoredEntryFederation((sources[1],), source_inventory=sources),
+    )
+
+
+def test_edge_naming_alternative_serves_on_that_alternative_only(backend: Backend) -> None:
+    """An ``<id>~<kind>`` edge: prefixed forward id, reverse on the alternative only, filters both ways."""
+    store = _store(backend)
+    target = _save(store, RecordRow("main"))
+    store.save(RecordRow("as-read"), alternative_of=target, alternative_kind=_FILE_KIND)
+    named = f"{target}~{_FILE_KIND}"
+    run = _save(store, Run(inputs=(RunEdge("initial_structure", "records", named),), source_id="j"))
+    runs, records = _mounted(store)
+
+    forward = runs.query()
+    assert _block(forward.relationships[0], "_httk_has_input") == [
+        ("_httk_records", "D:" + named, "input", "initial_structure")
+    ]
+    has = '_httk_relationships._httk_has_input.id HAS "{}"'
+    assert [row["id"] for row in runs.query(has.format("D:" + named)).rows] == ["R:" + run]
+    assert not runs.query(has.format("D:" + target)).rows
+    # Unmounted (no prefix): the raw composite id is served and filterable.
+    plain = _federation(store, RunEntry, "runs")
+    assert plain.query().relationships[0]["_httk_has_input"][0].id == named
+    assert len(plain.query(has.format(named)).rows) == 1
+
+    expected = [("_httk_runs", "R:" + run, "input", "initial_structure")]
+    assert "_httk_is_input" not in records.query().relationships[0]
+    alternatives = records.query(alternatives=True)
+    assert [row["id"] for row in alternatives.rows] == ["D:" + named]
+    assert _block(alternatives.relationships[0], "_httk_is_input") == expected
+    # The served composite id resolves to the same alternative with the same block.
+    found = records.fetch_alternative(*("D:" + named).rsplit("~", 1))
+    assert found is not None and found[0]["id"] == "D:" + named
+    assert _block(found[1], "_httk_is_input") == expected
+
+    reverse = f'_httk_relationships._httk_is_input.id HAS "R:{run}"'
+    assert [row["id"] for row in records.query(reverse, alternatives=True).rows] == ["D:" + named]
+    assert not records.query(reverse).rows
+
+
+def test_edge_naming_main_gives_cell_alternatives_no_reverse(backend: Backend) -> None:
+    """The altermagnets shape: ``conventional``/``primitive`` cells are never named, so carry no reverse."""
+    store = _store(backend)
+    target = _save(store, RecordRow("main"))
+    for kind in ("conventional", "primitive"):
+        store.save(RecordRow(kind), alternative_of=target, alternative_kind=kind)
+    run = _save(store, Run(inputs=(RunEdge("in", "records", target),), source_id="j"))
+    runs, records = _mounted(store)
+
+    assert runs.query().relationships[0]["_httk_has_input"][0].id == "D:" + target
+    assert _block(records.query().relationships[0], "_httk_is_input") == [("_httk_runs", "R:" + run, "input", "in")]
+    alternatives = records.query(alternatives=True)
+    assert len(alternatives.rows) == 2
+    assert all(not rel for rel in alternatives.relationships)
+    reverse = f'_httk_relationships._httk_is_input.id HAS "R:{run}"'
+    assert [row["id"] for row in records.query(reverse).rows] == ["D:" + target]
+    assert not records.query(reverse, alternatives=True).rows
+
+
+def test_forward_has_filters_agree_with_served_edges(backend: Backend) -> None:
+    """Index-driven forward HAS/HAS ANY/HAS ALL (and per-run HAS ONLY) select exactly the served edges.
+
+    Every edge family and value kind -- prefixed or bare main and alternative
+    ids, a loose edge whose raw id carries the prefix, and unknown ids -- is
+    checked against the relationships the same federation serves.
+    """
+    store = _store(backend)
+    first, second = _save(store, RecordRow("first")), _save(store, RecordRow("second"))
+    store.save(RecordRow("as-read"), alternative_of=first, alternative_kind=_FILE_KIND)
+    named = f"{first}~{_FILE_KIND}"
+    edges = (first, second, named, "D:loose", "nosuch")
+    for index, (one, two) in enumerate(zip(edges, edges[1:] + edges[:1], strict=True)):
+        store.save(
+            Run(
+                inputs=(RunEdge("i", "records", one),),
+                outputs=(RunEdge("o1", "records", two), RunEdge("o2", "records", one)),
+                artifacts=(RunEdge("a", "records", two),),
+                source_id=f"run-{index}",
+            )
+        )
+    store.save(Run(inputs=(RunEdge("i", "records", first),), source_id="dup"))
+    store.save(Run(source_id="edgeless"))
+    runs, _records = _mounted(store)
+    values = [first, named, "D:" + first, "D:" + second, "D:" + named, "D:loose", "nosuch", "D:nosuch"]
+    for federation in (runs, _federation(store, RunEntry, "runs")):
+        page = federation.query()
+        assert len(page.rows) == 7
+        for key in ("_httk_has_input", "_httk_has_output", "_httk_has_artifact"):
+            served = {
+                row["id"]: {edge.id for edge in rel.get(key, ())}
+                for row, rel in zip(page.rows, page.relationships, strict=True)
+            }
+
+            def selected(
+                operator: str, chosen: list[str], key: str = key, federation: StoredEntryFederation = federation
+            ) -> set[str]:
+                listed = ", ".join(f'"{value}"' for value in chosen)
+                return {row["id"] for row in federation.query(f"_httk_relationships.{key}.id {operator} {listed}").rows}
+
+            for value in values:
+                assert selected("HAS", [value]) == {run for run, ids in served.items() if value in ids}
+            for pair in itertools.pairwise(values):
+                assert selected("HAS ANY", list(pair)) == {run for run, ids in served.items() if ids & set(pair)}
+                assert selected("HAS ALL", list(pair)) == {run for run, ids in served.items() if ids >= set(pair)}
+                assert selected("HAS ONLY", list(pair)) == {run for run, ids in served.items() if ids <= set(pair)}
+
+
+def test_upgrade_creates_edge_indexes_missing_from_an_older_store(tmp_path: Path) -> None:
+    """Stores built before the StrongLink edge indexes open unchanged; ``upgrade=True`` adds them."""
+    path = tmp_path / "store.sqlite"
+    with Backend.sqlite(path) as database:
+        target = _save(_store(database), RecordRow("r"))
+        _save(_store(database), Run(inputs=(RunEdge("in", "records", target),)))
+    indexes = {"ix_core_run_inputs_inputs_sid", "ix_core_run_edge_entry_id"}
+    with sqlite3.connect(path) as connection:
+        for name in indexes:
+            connection.execute(f'DROP INDEX "{name}"')
+
+    def present() -> set[str]:
+        with sqlite3.connect(path) as connection:
+            return {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+
+    with Backend.sqlite(path) as database:
+        plain = _federation(_store(database), RunEntry, "runs")
+        assert len(plain.query(f'_httk_relationships._httk_has_input.id HAS "{target}"').rows) == 1
+    assert not indexes & present()
+    with Backend.sqlite(path) as database:
+        SqlStore(
+            database,
+            entry_records={RunEntry: Run, RecordFamily: RecordRow, ReferenceFamily: ReferenceRow},
+            upgrade=True,
+        )
+    assert indexes <= present()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke check

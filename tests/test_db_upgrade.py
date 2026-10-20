@@ -7,7 +7,17 @@ from typing import Annotated, ClassVar
 
 import pytest
 import sqlalchemy
-from httk.core.storage import IdentitySkip, Indexed, StorageInfo, WeakLink, content_id, stored_property
+from httk.core import FileRecord
+from httk.core.storage import (
+    IdentitySkip,
+    IdentitySkipWhenNone,
+    Indexed,
+    StorageInfo,
+    WeakLink,
+    content_id,
+    stored_property,
+)
+from sqlalchemy import event
 
 from httk.store import EntryFamilyDeclaration, EntryRecordDeclaration
 from httk.store.backend.sql import Backend, SqlStore, StorageLayoutUpgradeRequiredError
@@ -136,6 +146,30 @@ class WeakLinkTarget:
     __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="weak_target", identity_name="weak-target")
 
     name: str
+
+
+@dataclass(frozen=True)
+class RecNewWhenNone:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="upgrade_rec", identity_name="upgrade-rec")
+
+    value: str
+    x: Annotated[int | None, IdentitySkipWhenNone()] = None
+
+
+@dataclass(frozen=True)
+class RecNewNoteWhenNone:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="upgrade_rec", identity_name="upgrade-rec")
+
+    value: str
+    note: Annotated[str | None, IdentitySkipWhenNone()] = None
+
+
+@dataclass(frozen=True)
+class RecNewFile:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="upgrade_rec", identity_name="upgrade-rec")
+
+    value: str
+    f: Annotated[FileRecord | None, IdentitySkipWhenNone()] = None
 
 
 @dataclass(frozen=True)
@@ -281,6 +315,33 @@ def test_classify_added_weak_link_is_rejected() -> None:
     new = _fingerprint(UpgradeFamily, "test-upgrade", RecWithWeakLink)
     reason = classify_schema_upgrade(old, new)
     assert isinstance(reason, str)
+
+
+def test_classify_added_identity_skip_when_none_field_is_additive() -> None:
+    old = _fingerprint(UpgradeFamily, "test-upgrade", RecOld)
+    new = _fingerprint(UpgradeFamily, "test-upgrade", RecNewWhenNone)
+    assert json.loads(new)["tables"]["upgrade_rec"]["fields"]["x"]["identity_skipped"] == "when_none"
+    plan = classify_schema_upgrade(old, new)
+    assert isinstance(plan, AdditiveUpgradePlan)
+    assert [column.name for column in plan.added_columns["upgrade_rec"]] == ["x"]
+
+
+def test_classify_added_identity_skip_when_none_reference_is_additive() -> None:
+    old = _fingerprint(UpgradeFamily, "test-upgrade", RecOld)
+    new = _fingerprint(UpgradeFamily, "test-upgrade", RecNewFile)
+    plan = classify_schema_upgrade(old, new)
+    assert isinstance(plan, AdditiveUpgradePlan)
+    # The parent gains the nullable reference column; core_file is a new table, created whole.
+    assert [(column.name, column.nullable) for column in plan.added_columns["upgrade_rec"]] == [("f_sid", True)]
+    assert "core_file" in json.loads(new)["tables"]
+
+
+def test_classify_switching_identity_marker_is_rejected() -> None:
+    old = _fingerprint(UpgradeFamily, "test-upgrade", RecNew)
+    new = _fingerprint(UpgradeFamily, "test-upgrade", RecNewNoteWhenNone)
+    reason = classify_schema_upgrade(old, new)
+    assert reason == "table 'upgrade_rec' changed field 'note'"
+    assert classify_schema_upgrade(new, old) == "table 'upgrade_rec' changed field 'note'"
 
 
 # --------------------------------------------------------------------------- end-to-end SqlStore tests
@@ -457,3 +518,59 @@ def test_index_heals_when_column_present_but_index_missing() -> None:
         inspector = sqlalchemy.inspect(database.engine)
         indexed_columns = {column for index in inspector.get_indexes("upgrade_rec") for column in index["column_names"]}
         assert "code" in indexed_columns
+
+
+_DIGEST = "ab" * 32
+
+
+@pytest.mark.parametrize(
+    ("record_type", "set_value"),
+    [
+        (RecNewWhenNone, 7),
+        (RecNewFile, FileRecord("data/w/POSCAR", "POSCAR", sha256=_DIGEST)),
+    ],
+    ids=["scalar", "file-reference"],
+)
+def test_upgrade_adds_identity_skip_when_none_field(
+    sql_database: Backend, record_type: type[RecNewWhenNone] | type[RecNewFile], set_value: object
+) -> None:
+    old_decl = (_decl(UpgradeFamily, "test-upgrade", RecOld),)
+    new_decl = (_decl(UpgradeFamily, "test-upgrade", record_type),)
+    store = SqlStore(sql_database, entry_families=old_decl)
+    sid = store.save(RecOld("kept"))
+    old_id = content_id(RecOld("kept"))
+
+    with pytest.raises(StorageLayoutUpgradeRequiredError) as error:
+        SqlStore(sql_database, entry_families=new_decl)
+    assert error.value.hint is not None and "upgrade=True" in error.value.hint
+
+    upgraded = SqlStore(sql_database, entry_families=new_decl, upgrade=True)
+    fetched = upgraded.fetch(record_type, sid)
+    assert fetched == record_type("kept")
+    assert content_id(fetched) == old_id
+    # Re-saving the unset value deduplicates onto the pre-existing row.
+    assert upgraded.save(record_type("kept")) == sid
+    # Setting the field makes it identity: a distinct content id and row.
+    with_value = record_type("kept", set_value)  # type: ignore[arg-type]
+    assert content_id(with_value) != old_id
+    new_sid = upgraded.save(with_value)
+    assert new_sid != sid
+    assert upgraded.fetch(record_type, new_sid) == with_value
+    assert SqlStore(sql_database, entry_families=new_decl).fetch(record_type, sid) == record_type("kept")
+
+
+def test_upgrade_reopen_of_current_store_issues_no_index_ddl(sql_database: Backend) -> None:
+    declaration = (_decl(UpgradeFamily, "test-upgrade", RecNewIndexed),)
+    SqlStore(sql_database, entry_families=declaration).save(RecNewIndexed("v", "c"))
+    statements: list[str] = []
+
+    def record(_conn: object, _cursor: object, statement: str, *_args: object) -> None:
+        statements.append(statement)
+
+    event.listen(sql_database.engine, "before_cursor_execute", record)
+    try:
+        SqlStore(sql_database, entry_families=declaration, upgrade=True)
+    finally:
+        event.remove(sql_database.engine, "before_cursor_execute", record)
+    assert statements
+    assert not [statement for statement in statements if "CREATE INDEX" in statement.upper()]

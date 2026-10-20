@@ -189,7 +189,15 @@ carried lineage-level on `~revs`.
 **Filtering.** The served relationships are filterable through the
 `_httk_relationships.<key>.id HAS ...` extension (the semantic keys plus typed
 aliases), part of the served-route relationship filtering that landed this
-series.
+series. On the SQL backends the forward `HAS`, `HAS ANY` and `HAS ALL` filters
+on a run's own edges are index-driven: the store looks up the named edges by id
+and then their runs, so the cost follows the number of matches, not the number
+of runs. For that, each edge table carries an `entry_id` index, and each run
+link table an index on its edge column. Neither index changes the schema
+fingerprint. A store built before these indexes existed still opens and filters
+correctly but more slowly; opening it once with `upgrade=True` creates the
+missing indexes. `HAS ONLY` and the reverse (`_httk_is_*`) keys still evaluate
+per filtered row.
 
 **Query DSL.** Strong links share the `links` namespace with weak links. A
 variable's own edge fields resolve by their forward `relationship` name

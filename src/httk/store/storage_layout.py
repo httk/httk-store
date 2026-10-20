@@ -23,7 +23,7 @@ from httk.core.register import (
     resolve_entry_family,
     resolve_entry_record,
 )
-from httk.core.storage import IdentitySkip, Indexed, Unique, storage_identity_name
+from httk.core.storage import IdentitySkip, IdentitySkipWhenNone, Indexed, Unique, storage_identity_name
 
 from httk.store.backend.schema import ChildTableSpec, ColumnSpec, FieldSpec, SchemaError, TableSchema, resolve_schema
 
@@ -850,7 +850,10 @@ def _field_fingerprint(spec: FieldSpec, annotation: Any) -> dict[str, Any]:
         "derived": spec.derived,
         # list-vs-tuple and identity participation both change content_id.
         "container": origin.__name__ if origin in (list, tuple) else None,
-        "identity_skipped": _has_identity_skip(annotation),
+        # ``IdentitySkipWhenNone`` is recorded as ``"when_none"`` (and only then,
+        # so existing fingerprints are unchanged); switching markers is a diff.
+        "identity_skipped": _has_identity_skip(annotation)
+        or ("when_none" if _has_identity_skip(annotation, IdentitySkipWhenNone) else False),
         "columns": [_column_fingerprint(column) for column in spec.columns],
         "child": None if spec.child is None else _child_fingerprint(spec.child),
         "target": None if spec.target is None else resolve_schema(spec.target).table_name,
@@ -907,10 +910,15 @@ def classify_schema_upgrade(stored: str | None, current: str) -> AdditiveUpgrade
     ``composite_indexes`` and ``links`` are byte-equal, it carries no
     unrecognized top-level key, every stored field is present and byte-equal in
     the current fingerprint, and every added field is a non-child, non-derived,
-    content-identity-excluded (``IdentitySkip``) field whose parent columns are
-    all nullable.  Identity participation is required so a pre-existing row's
-    ``content_id`` (and therefore dedup, dispatch, and federation identity) is
-    unchanged by the upgrade.  ``entry_id_tables`` may grow (a declaration
+    content-identity-excluded (``IdentitySkip`` or ``IdentitySkipWhenNone``)
+    field whose parent columns are all nullable.  The exclusion is required so a
+    pre-existing row's ``content_id`` (and therefore dedup, dispatch, and
+    federation identity) is unchanged by the upgrade: such a row reads the new
+    field back as ``None``, which ``IdentitySkipWhenNone`` leaves out of the
+    canonical form.  An added reference to a storable class (for example
+    ``Annotated[FileRecord | None, IdentitySkipWhenNone()]``) contributes one
+    nullable ``<field>_sid`` parent column; its target table, when new, is
+    created whole.  ``entry_id_tables`` may grow (a declaration
     upgrade attaches backings) but never lose a table.
 
     :param stored: The persisted fingerprint JSON, or ``None`` when absent.
@@ -992,10 +1000,10 @@ def _added_parent_columns(table: str, field: str, field_doc: Mapping[str, Any]) 
             f"table {table!r} adds derived field {field!r}; stored-property backfill is unimplemented, rebuild the store",
             [],
         )
-    if not field_doc["identity_skipped"]:
+    if field_doc["identity_skipped"] not in (True, "when_none"):
         reason = (
             f"table {table!r} adds field {field!r} that participates in content identity; "
-            f"mark it IdentitySkip or rebuild the store"
+            f"mark it IdentitySkip or IdentitySkipWhenNone, or rebuild the store"
         )
         return reason, []
     for column in field_doc["columns"]:

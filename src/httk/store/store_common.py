@@ -2,14 +2,17 @@
 
 import dataclasses
 import functools
+import os
 import re
 import types
 import typing
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Protocol, TypeVar, runtime_checkable
 
-from httk.core.storage import IdentitySkip, project_storage_record
+from httk.core.digests import sha256_file
+from httk.core.storage import IdentitySkip, KeepStored, project_storage_record
 from httk.core.storage.identity import _content_id_uncached, _trusted_content_id
 
 from httk.store.backend.schema import FieldSpec, LinkSpec, resolve_schema
@@ -250,7 +253,9 @@ def _metadata_has_plan(record_type: type) -> bool:
     for reachable_type in _metadata_reachable_types(record_type):
         hints = typing.get_type_hints(reachable_type, include_extras=True)
         if any(
-            not spec.derived and _has_identity_skip(hints.get(spec.field))
+            not spec.derived
+            and _has_identity_skip(hints.get(spec.field))
+            and not _has_identity_skip(hints.get(spec.field), KeepStored)
             for spec in resolve_schema(reachable_type).fields
         ):
             return True
@@ -265,10 +270,11 @@ def _metadata_plan(record_type: type) -> _MetadataPlan | None:
     skipped_nested: list[FieldSpec] = []
     descend_specs: list[FieldSpec] = []
     for spec in schema.fields:
-        if spec.derived:
+        # A KeepStored field keeps the stored value on a deduplicating re-save,
+        # so it is neither compared nor descended into.
+        if spec.derived or _has_identity_skip(hints.get(spec.field), KeepStored):
             continue
-        identity_skipped = _has_identity_skip(hints.get(spec.field))
-        if identity_skipped:
+        if _has_identity_skip(hints.get(spec.field)):
             if spec.role in {"scalar", "encoded", "fixed_array"}:
                 skipped_specs.append(spec)
             else:
@@ -280,13 +286,15 @@ def _metadata_plan(record_type: type) -> _MetadataPlan | None:
     return _MetadataPlan(tuple(skipped_specs), tuple(skipped_nested), tuple(descend_specs))
 
 
-def _has_identity_skip(annotation: Any) -> bool:
+def _has_identity_skip(annotation: Any, marker_type: type = IdentitySkip) -> bool:
     origin = typing.get_origin(annotation)
     if origin is Annotated:
         arguments = typing.get_args(annotation)
-        return any(isinstance(marker, IdentitySkip) for marker in arguments[1:]) or _has_identity_skip(arguments[0])
+        return any(isinstance(marker, marker_type) for marker in arguments[1:]) or _has_identity_skip(
+            arguments[0], marker_type
+        )
     if origin in (typing.Union, types.UnionType):
-        return any(_has_identity_skip(argument) for argument in typing.get_args(annotation))
+        return any(_has_identity_skip(argument, marker_type) for argument in typing.get_args(annotation))
     return False
 
 
@@ -334,3 +342,47 @@ class IdentityCaches:
             except TypeError:
                 return  # Tuples and other non-weakrefable sources use database lookup.
             self._sids_by_identity[key] = sid
+
+
+@dataclasses.dataclass(frozen=True)
+class _FileCheck:
+    checked: int
+    missing: tuple[tuple[int, str], ...]
+    mismatched: tuple[tuple[int, str], ...]
+    unchecked: int
+
+
+def _check_stored_files(rows: Iterable[tuple[int, object, object]], data_dir: str | os.PathLike[str]) -> _FileCheck:
+    """Verify stored ``FileRecord`` rows ``(sid, url, sha256)`` against the files under ``data_dir``.
+
+    Only a relative ``data/<rest>`` URL is checked, as ``data_dir/<rest>``
+    (``data_dir`` is the local directory that stored ``data/...`` URLs are
+    relative to); any other URL, including one with a ``..`` component, is
+    counted as unchecked.  Symlinks are not followed: a path with a symlink
+    in any component below ``data_dir``, or one that cannot be read as a
+    regular file, counts as missing.
+    """
+    root = Path(data_dir)
+    checked = unchecked = 0
+    missing: list[tuple[int, str]] = []
+    mismatched: list[tuple[int, str]] = []
+    for sid, url, sha256 in rows:
+        parts = PurePosixPath(url).parts if isinstance(url, str) else ()
+        if len(parts) < 2 or parts[0] != "data" or ".." in parts:
+            unchecked += 1
+            continue
+        checked += 1
+        path = root.joinpath(*parts[1:])
+        # ponytail: lstat-then-open race (a component swapped for a symlink in
+        # between) is accepted for a read-only audit; O_NOFOLLOW per component if it matters.
+        if any(root.joinpath(*parts[1:index]).is_symlink() for index in range(2, len(parts) + 1)):
+            missing.append((sid, str(url)))
+            continue
+        try:
+            digest = sha256_file(path)
+        except (OSError, ValueError):
+            missing.append((sid, str(url)))
+            continue
+        if digest != sha256:
+            mismatched.append((sid, str(url)))
+    return _FileCheck(checked, tuple(missing), tuple(mismatched), unchecked)

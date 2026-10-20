@@ -96,12 +96,20 @@ an additive `upgrade=True` change.
 When the *only* difference is additive, the reopen is applied instead of
 rejected by passing `SqlStore(db, ..., upgrade=True)`. Additive means: new
 tables, plus new fields that are each **non-child, non-derived, marked
-`IdentitySkip`, and whose columns are all nullable** — with every pre-existing
-table attribute and field byte-identical. The `IdentitySkip` requirement is the
-key one: a field that participates in content identity would change the
-`content_id` of byte-identical pre-existing rows, silently diverging dedup,
-dispatch, and federation identity, so such an added field is rejected (the error
-names the field and tells you to mark it `IdentitySkip` or rebuild). Added child,
+`IdentitySkip` or `IdentitySkipWhenNone`, and whose columns are all nullable** —
+with every pre-existing table attribute and field byte-identical. The identity
+marker is the key requirement: a field that participates in content identity
+would change the `content_id` of byte-identical pre-existing rows, silently
+diverging dedup, dispatch, and federation identity, so such an added field is
+rejected (the error names the field and tells you to mark it `IdentitySkip` or
+`IdentitySkipWhenNone`, or rebuild). An `IdentitySkipWhenNone` field leaves the
+canonical form only while it is `None`, which every pre-existing row reads back,
+so it is equally additive; the fingerprint records it as `"when_none"`, so
+switching a field between the two markers is a non-additive change. A nullable
+reference to another storable class qualifies too, for example
+`source_file: Annotated[FileRecord | None, IdentitySkipWhenNone()] = None`: the
+upgrade adds the nullable `source_file_sid` column and creates the referenced
+table if it does not exist yet. Added child (list/tuple),
 derived (`stored_property`), non-nullable, removed, or retyped fields, changed
 table attributes, and any protocol difference all still raise; `upgrade=True`
 never widens or drops. The one additive *declaration* change is appending
@@ -123,10 +131,12 @@ DDL escapes the open transaction) heals cleanly when you retry the same
 additive, the raised error carries a `hint` pointing at `upgrade=True`. Additive
 upgrade is not offered on the ClickHouse bulk-fenced backend.
 
-Because an added field must be `IdentitySkip`, it is identity-excluded metadata:
+Because an added `IdentitySkip` field is identity-excluded metadata,
 the store's metadata-agreement check means the new field can only carry a
 non-`None` value on content first saved *after* the upgrade. Re-saving content
 that already exists in order to populate the new field on it raises
 `EntryMetadataConflictError` (the existing, correct guard against silently
 mutating stored metadata), so plan to backfill by rebuilding rather than by
-re-saving old content.
+re-saving old content. An added `IdentitySkipWhenNone` field is identity when set: saving
+old content with the field set yields a new `content_id` and therefore a new
+row, while the pre-existing row stays as it was.

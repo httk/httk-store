@@ -84,6 +84,7 @@ from httk.store.backend.sql.layout import (
     StorageLayoutUpgradeRequiredError,
     StoreUnderConstructionError,
     actual_columns,
+    actual_index_names,
     actual_schema_objects,
     actual_table_names,
     backend_facts_for_dialect,
@@ -1074,6 +1075,8 @@ class SqlStore:
         elif upgrade_plan is not None:
             self._apply_additive_upgrade(connection, persisted, upgrade_plan)
             names_before = actual_table_names(connection)
+        if self._upgrade and self.backend_facts.supports_adhoc_indexes:
+            self._create_missing_indexes(connection, persisted, names_before)
         self._entry_id_offsets = entry_id_offsets
         self._install_layout(
             persisted,
@@ -1252,6 +1255,29 @@ class SqlStore:
                     statements = statements[1:]
                 for statement in statements:
                     connection.execute(sqlalchemy.text(statement))
+
+    def _create_missing_indexes(
+        self, connection: sqlalchemy.Connection, layout: StorageLayout, present: Collection[str]
+    ) -> None:
+        """Idempotently create declared non-unique indexes an existing table lacks (``upgrade=True``).
+
+        Plain indexes hold no data and stay outside the schema fingerprint, so a
+        store built before one was declared (the StrongLink edge indexes) opens
+        unchanged and only filters slower; this step adds them.  Only indexes
+        absent from the catalogue are created, so an up-to-date store issues no
+        DDL (no locks or CREATE privilege needed on PostgreSQL).
+
+        :param connection: The open initialization connection/transaction.
+        :param layout: The persisted layout whose declared indexes are ensured.
+        :param present: The application base-table names present now.
+        :return: None.
+        """
+        existing = actual_index_names(connection)
+        for table in expected_metadata(layout, store_timestamps=self._store_timestamps).tables.values():
+            if table.name in present:
+                for index in table.indexes:
+                    if not index.unique and index.name not in existing:
+                        connection.execute(sqlalchemy.schema.CreateIndex(index, if_not_exists=True))
 
     def _after_upgrade_step(self, step: str, connection: sqlalchemy.Connection) -> None:
         """Test seam after each durable step of an additive declaration upgrade.
@@ -4025,11 +4051,17 @@ class SqlStore:
         clamp_future_timestamps: bool = False,
         known_types: tuple[type, ...] = (),
         exclusive: bool = False,
+        data_dir: str | os.PathLike[str] | None = None,
     ) -> Any:
         """Repair dispatches and reclaim permanentization residue.
 
         Only tables attributable to the persisted layout or ``known_types``
         are swept; unrelated application tables make collection refuse.
+        With ``data_dir`` (the local directory that stored ``data/...`` URLs are
+        relative to, i.e. the directory published under serve's
+        ``--data-path``), every stored ``FileRecord`` is also checked read-only:
+        its file must exist, not be a symlink, and match its ``sha256``. Problems are reported in the summary's ``files_*``
+        fields, never raised or repaired.
         """
         self._check_mutation_policy("fsck")
         self._reject_during_bulk()
@@ -4043,6 +4075,7 @@ class SqlStore:
             clamp_future_timestamps=clamp_future_timestamps,
             known_types=known_types,
             exclusive=exclusive,
+            data_dir=data_dir,
         )
 
     def stored_property_plan(self, family: type) -> Any:

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import sqlalchemy
+from httk.core import ALTERNATIVE_KIND_PATTERN
 from httk.core.storage import StrongLink
 
 from httk.store.backend.schema import FieldSpec, TableSchema, resolve_schema
@@ -137,7 +138,9 @@ def forward_run_edges(
     """
     if not run_sids:
         return {}
-    result: dict[int, list[tuple[tuple[str, str, str], StrongLink]]] = {}
+    prefixes = target_prefixes or {}
+    backings = target_backings or {}
+    rows: list[tuple[int, str, str, str, str, StrongLink]] = []
     schema = family.schema
     for field_name, marker in family.markers.items():
         spec = schema.field(field_name)
@@ -147,16 +150,58 @@ def forward_run_edges(
             sqlalchemy.select(
                 parent_column,
                 edge_table.c["entry_type"],
-                local_edge_public_id(store, edge_table, target_prefixes or {}, target_backings or {}),
+                edge_table.c["entry_id"],
+                local_edge_public_id(store, edge_table, prefixes, backings),
                 edge_table.c["label"],
             )
             .select_from(child_table.join(edge_table, fk_column == edge_table.c[SID_COLUMN]))
             .where(parent_column.in_(list(run_sids)))
             .order_by(parent_column, child_table.c[f"{field_name}_index"])
         )
-        for parent_sid, entry_type, entry_id, label in connection.execute(statement):
-            result.setdefault(int(parent_sid), []).append(((str(entry_type), str(entry_id), str(label)), marker))
+        for parent_sid, entry_type, raw, public, label in connection.execute(statement):
+            rows.append((int(parent_sid), str(entry_type), str(raw), str(public), str(label), marker))
+    # Edges still unprefixed may name a mounted alternative: resolve the page's
+    # ``<id>~<kind>`` ids with one batched id-indexed lookup per mounted backing.
+    pending: dict[str, set[str]] = {}
+    for _sid, entry_type, raw, public, _label, _marker in rows:
+        if public == raw and prefixes.get(entry_type) and _split_alternative(raw) is not None:
+            pending.setdefault(entry_type, set()).add(raw)
+    resolved: set[tuple[str, str]] = set()
+    for internal, raws in pending.items():
+        wanted = {split for raw in raws if (split := _split_alternative(raw)) is not None}
+        for table in _mounted_tables(store, backings, internal):
+            statement = sqlalchemy.select(table.c["id"], table.c[ALT_KIND_COLUMN]).where(
+                table.c["id"].in_(sorted({entry_id for entry_id, _kind in wanted})),
+                table.c[ALT_KIND_COLUMN].is_not(None),
+            )
+            resolved.update(
+                (internal, f"{entry_id}~{kind}")
+                for entry_id, kind in connection.execute(statement)
+                if (str(entry_id), str(kind)) in wanted
+            )
+    result: dict[int, list[tuple[tuple[str, str, str], StrongLink]]] = {}
+    for sid, entry_type, raw, public, label, marker in rows:
+        if (entry_type, raw) in resolved:
+            public = prefixes[entry_type] + raw
+        result.setdefault(sid, []).append(((entry_type, public, label), marker))
     return result
+
+
+def _split_alternative(raw: str) -> tuple[str, str] | None:
+    """Split an ``<id>~<kind>`` edge id at its last ``~`` (kinds never contain one)."""
+    entry_id, separator, kind = raw.rpartition("~")
+    if separator and entry_id and ALTERNATIVE_KIND_PATTERN.fullmatch(kind) is not None:
+        return entry_id, kind
+    return None
+
+
+def _mounted_tables(store: SqlStore, backings: Mapping[str, tuple[type, ...]], internal: str) -> list[Any]:
+    """Return the existing tables of the mounted backings for one internal entry type."""
+    return [
+        store._table(resolve_schema(backing).table_name)
+        for backing in backings.get(internal, ())
+        if not store._missing_tables_for_read((backing,))
+    ]
 
 
 def local_edge_public_id(
@@ -167,8 +212,9 @@ def local_edge_public_id(
 ) -> Any:
     """Prefix a loose id only when a mounted target table contains its main lineage.
 
-    Rendering and filtering share this expression. Indexed, correlated probes
-    avoid either loading every target id or issuing a query for every edge.
+    Indexed, correlated probes avoid either loading every target id or issuing a
+    query for every edge. Edges naming an alternative (``<id>~<kind>``) are
+    resolved afterwards in :func:`forward_run_edges`, batched per page.
 
     :param store: The store containing the source and mounted target tables.
     :param edge: The edge table or alias carrying ``entry_type`` and ``entry_id``.
@@ -201,6 +247,75 @@ def local_edge_public_id(
                 )
             )
     return sqlalchemy.case(*cases, else_=edge.c["entry_id"]) if cases else edge.c["entry_id"]
+
+
+def edge_public_id_in(
+    store: SqlStore,
+    edge: Any,
+    values: Sequence[Any],
+    prefixes: Mapping[str, str],
+    backings: Mapping[str, tuple[type, ...]],
+) -> Any:
+    """Return whether an edge's served public id is one of ``values``.
+
+    The filtering counterpart of the rendering in :func:`forward_run_edges`. Each
+    value is resolved in Python: a mount prefix is stripped from the value (never
+    prepended to the column), an ``<id>~<kind>`` remainder is split at its last
+    ``~``, and the edge matches on ``entry_id = <raw>`` while uncorrelated,
+    literal-keyed probes on the target ``id`` index confirm the target exists. A
+    value that is no resolvable target matches only an unprefixed loose edge.
+
+    :param store: The store containing the source and mounted target tables.
+    :param edge: The edge table or alias carrying ``entry_type`` and ``entry_id``.
+    :param values: The filter's public id values.
+    :param prefixes: Selected public prefixes keyed by internal entry type.
+    :param backings: Mounted target record classes keyed by internal entry type.
+    :return: The SQL boolean clause.
+    """
+
+    def resolves(internal: str, raw: str) -> Any:
+        split = _split_alternative(raw)
+        probes = []
+        for table in _mounted_tables(store, backings, internal):
+            main = table.alias()
+            probes.append(
+                sqlalchemy.exists(
+                    sqlalchemy.select(sqlalchemy.literal(1)).where(
+                        main.c["id"] == raw, main.c[ALT_KIND_COLUMN].is_(None)
+                    )
+                )
+            )
+            if split is not None:
+                alternative = table.alias()
+                probes.append(
+                    sqlalchemy.exists(
+                        sqlalchemy.select(sqlalchemy.literal(1)).where(
+                            alternative.c["id"] == split[0], alternative.c[ALT_KIND_COLUMN] == split[1]
+                        )
+                    )
+                )
+        return sqlalchemy.or_(*probes) if probes else None
+
+    clauses = []
+    for value in values:
+        if not isinstance(value, str):
+            clauses.append(edge.c["entry_id"] == value)
+            continue
+        loose_blockers = []
+        for internal, prefix in prefixes.items():
+            if not prefix:
+                continue
+            if value.startswith(prefix) and (found := resolves(internal, value[len(prefix) :])) is not None:
+                clauses.append(
+                    sqlalchemy.and_(edge.c["entry_type"] == internal, edge.c["entry_id"] == value[len(prefix) :], found)
+                )
+            if (blocked := resolves(internal, value)) is not None:
+                loose_blockers.append(sqlalchemy.and_(edge.c["entry_type"] == internal, blocked))
+        loose = edge.c["entry_id"] == value
+        clauses.append(
+            sqlalchemy.and_(loose, sqlalchemy.not_(sqlalchemy.or_(*loose_blockers))) if loose_blockers else loose
+        )
+    return sqlalchemy.or_(sqlalchemy.false(), *clauses)
 
 
 def latest_main_run_sids(connection: Any, run_table: sqlalchemy.Table) -> dict[int, int]:
@@ -269,7 +384,8 @@ def reverse_run_edges(
     :param store: The SQL store backing the run family.
     :param family: The StrongLink family whose reverse edges are derived.
     :param target_type: The edge's internal (unprefixed) target entry-type name to match.
-    :param target_ids: The raw stored target ids to match.
+    :param target_ids: The edge-named target ids to match exactly: a main's raw
+        stored id, or an alternative's composite ``<id>~<kind>``.
     :return: ``target id -> [(run raw id, edge label, marker)]``, ordered per
         target by ``(run raw id, field/marker order, edge row order)``.
     """

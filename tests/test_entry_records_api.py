@@ -85,6 +85,7 @@ def test_records_declaration_includes_registered_references() -> None:
     store = SqliteStore(None, records=[ResultWithStructure], entry_ids=EntryIdScheme("test", "1"))
     assert store.layout.declaration == {
         "__httk_records": ("test.result_with_structure",),
+        "files": ("core-file",),
         "structures": ("atomistic-unitcell-structure",),
     }
     store.close()
@@ -164,7 +165,7 @@ def test_records_declaration_rejects_two_families_serving_one_entry_type() -> No
 
 def test_decorated_only_records_layout_is_unchanged() -> None:
     layouts = {
-        (ResultWithStructure,): "5d85f3e3e1da594d",
+        (ResultWithStructure,): "16c3521ec335c349",
         (Result,): "6f112d9b5ed9c225",
         (Alpha, Beta): "1329a570deae655b",
     }

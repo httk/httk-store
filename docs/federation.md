@@ -128,8 +128,10 @@ The durable federation also serves relationships per row. Exposed weak links
 (`exposed_relationship=True`) render as OPTIMADE relationships, and a run's
 `StrongLink` provenance edges render as semantic relationships in both
 directions — forward keys on the run rows, derived reverse keys on the targeted
-entries. Reverse blocks are suppressed on `~alts` alternative rows and carried
-lineage-level on `~revs`. SQL-backed sources contribute these; Mongo-backed
+entries. A reverse block appears only on the entry whose id an edge names
+exactly (a main for `<id>`, an alternative on `~alts` for `<id>~<kind>`; a
+forward edge to an alternative renders its prefixed `<prefix><id>~<kind>` id),
+and is carried lineage-level on `~revs`. SQL-backed sources contribute these; Mongo-backed
 federation sources contribute none (their per-row relationships channel is
 empty). These served relationships are filterable through the
 `_httk_relationships.<key>.id HAS ...` extension — the same route on which

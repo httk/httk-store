@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import sqlalchemy
+from httk.core import FileRecord
 
 from httk.store.backend.schema import TableSchema, resolve_schema
 from httk.store.backend.sql.graph import LogicalEdgeGraph
@@ -25,6 +27,7 @@ from httk.store.backend.sql.mapping import (
     backing_dispatch_column_name,
     entry_dispatch_table_name,
 )
+from httk.store.store_common import _check_stored_files
 from httk.store.store_timestamp import FUTURE_TIMESTAMP_SLACK_NS
 
 if TYPE_CHECKING:
@@ -45,10 +48,26 @@ class FsckTableSummary:
 
 @dataclass(frozen=True)
 class FsckSummary:
-    """Immutable SQL fsck report, modeled after Mongo's public summary."""
+    """Immutable SQL fsck report, modeled after Mongo's public summary.
+
+    :param tables: Per-table repair and collection counters.
+    :param violations: Human-readable violations reported during the run.
+    :param files_checked: Stored ``FileRecord`` rows whose ``data/`` URL was
+        checked against ``data_dir`` (``0`` when no ``data_dir`` was given).
+    :param files_missing: ``(sid, url)`` of checked rows whose file is missing,
+        a symlink, or not a readable regular file.
+    :param files_mismatched: ``(sid, url)`` of checked rows whose file's
+        SHA-256 differs from the stored ``sha256``.
+    :param files_unchecked: Stored ``FileRecord`` rows whose URL is not a
+        relative ``data/`` path and so was not checked.
+    """
 
     tables: Mapping[str, FsckTableSummary]
     violations: tuple[str, ...]
+    files_checked: int = 0
+    files_missing: tuple[tuple[int, str], ...] = ()
+    files_mismatched: tuple[tuple[int, str], ...] = ()
+    files_unchecked: int = 0
 
 
 class _Counter:
@@ -68,6 +87,7 @@ def run_fsck(
     clamp_future_timestamps: bool = False,
     known_types: tuple[type, ...] = (),
     exclusive: bool = False,
+    data_dir: str | os.PathLike[str] | None = None,
 ) -> FsckSummary:
     """Repair dispatches, sweep incomplete residue, and report logical dangling references.
 
@@ -75,6 +95,11 @@ def run_fsck(
     writers.  Callers must therefore pass ``exclusive=True`` there, explicitly
     acknowledging that they have taken the database offline from all writers.
     SQLite transactional stores instead issue ``BEGIN IMMEDIATE`` themselves.
+    With ``data_dir`` (the local directory that stored ``data/...`` URLs are
+    relative to, i.e. the directory published under serve's ``--data-path``),
+    every stored ``FileRecord`` row (top-level or referenced) left after the
+    sweep is verified read-only against its file; the rows are read under the
+    fsck lock and hashed after it is released.
     """
     if store._database.engine.dialect.name == "duckdb" and not exclusive:
         raise RuntimeError("DuckDB fsck requires exclusive=True and offline ownership from all writers")
@@ -154,13 +179,42 @@ def run_fsck(
                 if table_name in present:
                     store._release_unused_identity_claims(connection, table_name)
             store._sync_identity_ownership(connection, store.layout)
+        file_rows = None if data_dir is None else _file_rows(store, connection, schemas, present)
         store._clear_identity_caches()
     if timestamp_repaired:
         with store._mutation_lock, store._read_connection() as connection:
             store._initialize_store_timestamp_mark(connection)
-    return FsckSummary(
+    summary = FsckSummary(
         MappingProxyType({name: value.freeze() for name, value in sorted(counters.items())}), tuple(violations)
     )
+    if file_rows is None or data_dir is None:
+        return summary
+    # Hash only after the fsck connection (and its write lock) is released.
+    files = _check_stored_files(file_rows, data_dir)
+    return replace(
+        summary,
+        files_checked=files.checked,
+        files_missing=files.missing,
+        files_mismatched=files.mismatched,
+        files_unchecked=files.unchecked,
+    )
+
+
+def _file_rows(
+    store: SqlStore,
+    connection: sqlalchemy.Connection,
+    schemas: Mapping[str, TableSchema],
+    present: set[str] | frozenset[str],
+) -> list[tuple[int, object, object]]:
+    """Read every ``FileRecord`` table's ``(sid, url, sha256)`` rows."""
+    rows: list[tuple[int, object, object]] = []
+    for table_name, schema in schemas.items():
+        if table_name not in present or not issubclass(schema.cls, FileRecord):
+            continue
+        table = store._table(table_name)
+        statement = sqlalchemy.select(table.c[SID_COLUMN], table.c.url, table.c.sha256).order_by(table.c[SID_COLUMN])
+        rows.extend((int(sid), url, sha256) for sid, url, sha256 in connection.execute(statement))
+    return rows
 
 
 def _check_future_timestamps(

@@ -516,7 +516,7 @@ class StoredEntryFederation:
         for candidate in visible:
             self._probe_candidate(candidate, as_of=as_of, revisions=revisions, alternatives=alternatives)
         rows = self._render_page(visible, fields, revisions=revisions, alternatives=alternatives)
-        collected = self._collect_relationships(visible, alternatives=alternatives)
+        collected = self._collect_relationships(visible)
         relationships = tuple(collected.get(id(candidate), _EMPTY_RELATIONSHIPS) for candidate in visible)
         return StoredEntryPage(rows, total_count, more, relationships)
 
@@ -921,7 +921,7 @@ class StoredEntryFederation:
         alternatives: bool = False,
     ) -> tuple[Mapping[str, Any], _RelatedMap]:
         row = self._row(candidate, fields, revisions=revisions, alternatives=alternatives)
-        collected = self._collect_relationships((candidate,), alternatives=alternatives)
+        collected = self._collect_relationships((candidate,))
         return row, collected.get(id(candidate), _EMPTY_RELATIONSHIPS)
 
     def _relationship_target(self, source: StoredEntrySource, family: type) -> StoredEntrySource | None:
@@ -1029,9 +1029,7 @@ class StoredEntryFederation:
             )
         return selected
 
-    def _collect_relationships(
-        self, candidates: Sequence[_Candidate], *, alternatives: bool = False
-    ) -> dict[int, _RelatedMap]:
+    def _collect_relationships(self, candidates: Sequence[_Candidate]) -> dict[int, _RelatedMap]:
         """Collect exposed weak-link and StrongLink relationships for a page's candidates.
 
         Candidates are grouped per ``(source, backing)`` by ``_Stream`` identity
@@ -1047,9 +1045,10 @@ class StoredEntryFederation:
         - **Reverse StrongLink edges**: the runs that point at each candidate,
           derived by scanning THIS candidate's own source store's StrongLink
           families (store-scoped, never global), lineage-level (only a run
-          lineage's latest main revision contributes). Reverse edges are
-          suppressed on an alternatives page: an alternative cell must not claim a
-          reverse relationship.
+          lineage's latest main revision contributes). An edge attaches only to
+          the entry whose id it names exactly: ``<id>`` names the main,
+          ``<id>~<kind>`` names that alternative, so a main never inherits its
+          alternatives' reverse edges nor an alternative its main's.
         - **Related reference/child fields**: the backing's own reference and
           child-of-storable fields whose target is a served family (mirroring
           the in-memory provider's ``_relationship_specs``, honoring
@@ -1065,7 +1064,6 @@ class StoredEntryFederation:
         the current state.
 
         :param candidates: The candidates whose relationships are collected.
-        :param alternatives: Whether this is an alternatives page (reverse edges suppressed).
         :return: Row relationships keyed by ``id(candidate)``; absent for a candidate carrying none.
         """
         groups: dict[int, list[_Candidate]] = {}
@@ -1096,7 +1094,7 @@ class StoredEntryFederation:
             forward_family = next((family for family in strong if family.backing is backing), None)
             if forward_family is not None:
                 self._collect_forward_edges(store, forward_family, group, collected)
-            if not alternatives and strong:
+            if strong:
                 internal_target = getattr(group[0].stream.source.source.entry_family, "type", None)
                 if isinstance(internal_target, str):
                     self._collect_reverse_edges(store, internal_target, strong, group, collected)
@@ -1191,8 +1189,9 @@ class StoredEntryFederation:
     ) -> None:
         """Attach the reverse provenance edges naming runs that point at each candidate.
 
-        Reverse matching is against the candidate's raw stored id (F: custom
-        ``id_of`` remapping is not attempted).  Only this store's StrongLink
+        Reverse matching is exact against the id an edge names: the candidate's
+        raw stored id for a main, ``<id>~<kind>`` for a named alternative (F:
+        custom ``id_of`` remapping is not attempted).  Only this store's StrongLink
         families are scanned, so a target served from a store without the run
         family gets no reverse edges.
 
@@ -1208,7 +1207,8 @@ class StoredEntryFederation:
         # must attach to all of them (not just the last in group order).
         candidates_by_raw: dict[str, list[_Candidate]] = {}
         for candidate in group:
-            candidates_by_raw.setdefault(candidate.entry_id, []).append(candidate)
+            named = candidate.entry_id if candidate.alt_kind is None else f"{candidate.entry_id}~{candidate.alt_kind}"
+            candidates_by_raw.setdefault(named, []).append(candidate)
         target_ids = list(candidates_by_raw)
         with store._read_connection() as connection:
             for family in families:

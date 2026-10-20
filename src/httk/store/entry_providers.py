@@ -340,6 +340,9 @@ class RunEntryProvider(EntryProvider):
             "_httk_workflow_declaration_uri": "workflow_declaration_uri",
             "_httk_workflow_definition_uri": "workflow_definition_uri",
             "_httk_source_id": "source_id",
+            "_httk_name": "name",
+            "_httk_started_at": "started_at",
+            "_httk_finished_at": "finished_at",
         }
 
     def records(self, entry_type: str) -> Iterable[Mapping[str, Any]]:
@@ -359,6 +362,9 @@ class RunEntryProvider(EntryProvider):
                 "workflow_declaration_uri": run.workflow_declaration_uri,
                 "workflow_definition_uri": run.workflow_definition_uri,
                 "source_id": run.source_id,
+                "name": run.name,
+                "started_at": _json_value(run.started_at),
+                "finished_at": _json_value(run.finished_at),
             }
 
     def relationships(self, entry_type: str) -> Mapping[str, tuple[RelatedEntry, ...]]:
@@ -592,16 +598,22 @@ def product_relationships(links: Iterable[ProductLink]) -> dict[str, dict[str, t
     }
 
 
-def _string_column_projection(column: str) -> StoredPropertyProjection:
-    """A response/filter/sort projection for a plain nullable-string column read.
+def _string_column_projection(column: str, *, timestamp: bool = False) -> StoredPropertyProjection:
+    """A response/filter/sort projection for a plain nullable-string or timestamp column read.
 
-    :param column: The durable string column read for response, filter, and sort.
+    A timestamp column's string literal is parsed as RFC 3339 by the backend's
+    datetime codec; it supports equality and ordering but not substring operators.
+
+    :param column: The durable column read for response, filter, and sort.
+    :param timestamp: Whether ``column`` holds timezone-aware datetimes rather than strings.
     :return: The projection reading ``column`` directly.
     """
+    kind = "timestamp" if timestamp else "string"
+    ordering = {"<", "<=", ">", ">="} if timestamp else {"<", "<=", ">", ">=", "CONTAINS", "STARTS", "ENDS"}
 
     def query(context: QueryContext, operator: str, literal: object) -> QueryExpression:
         if literal is not None and not isinstance(literal, str):
-            raise QueryLiteralError(f"{column} is a string property; its filter needs a string or null literal")
+            raise QueryLiteralError(f"{column} is a {kind} property; its filter needs a string or null literal")
         value = context.field(column)
         if operator == "IS_UNKNOWN":
             return context.is_null(value)
@@ -612,7 +624,7 @@ def _string_column_projection(column: str) -> StoredPropertyProjection:
             return context.equal(value, right)
         if operator == "!=":
             return context.not_(context.equal(value, right))
-        if operator in {"<", "<=", ">", ">=", "CONTAINS", "STARTS", "ENDS"}:
+        if operator in ordering:
             return context.compare(value, operator, right)
         raise QueryLiteralError(f"unsupported operator for {column}: {operator}")
 
@@ -631,4 +643,7 @@ Run.__httk_stored_properties__ = {  # type: ignore[attr-defined]
     "_httk_workflow_declaration_uri": _string_column_projection("workflow_declaration_uri"),
     "_httk_workflow_definition_uri": _string_column_projection("workflow_definition_uri"),
     "_httk_source_id": _string_column_projection("source_id"),
+    "_httk_name": _string_column_projection("name"),
+    "_httk_started_at": _string_column_projection("started_at", timestamp=True),
+    "_httk_finished_at": _string_column_projection("finished_at", timestamp=True),
 }

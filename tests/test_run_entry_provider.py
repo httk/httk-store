@@ -54,6 +54,9 @@ def _run() -> Run:
         artifacts=(RunEdge("artifact", "files", "file-1"),),
         outputs=(RunEdge("out", "records", "record-2"),),
         source_id="ws:job",
+        name="tight relax 1",
+        started_at=datetime.datetime(2026, 8, 1, 10, 0, tzinfo=UTC),
+        finished_at=datetime.datetime(2026, 8, 1, 11, 30, tzinfo=UTC),
         last_modified=datetime.datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -70,6 +73,9 @@ def test_run_provider_serves_rows_and_relationships() -> None:
         "last_modified",
         "_httk_workflow_declaration_uri",
         "_httk_workflow_definition_uri",
+        "_httk_name",
+        "_httk_started_at",
+        "_httk_finished_at",
     }
     assert "workflow_declaration_uri" not in definition.properties
     assert "workflow_definition_uri" not in definition.properties
@@ -80,6 +86,11 @@ def test_run_provider_serves_rows_and_relationships() -> None:
     assert rows[0]["workflow_declaration_uri"] is None
     assert rows[0]["workflow_definition_uri"] is None
     assert rows[0]["source_id"] == "ws:job"
+    assert rows[0]["name"] == "tight relax 1"
+    assert rows[0]["started_at"] == "2026-08-01T10:00:00+00:00"
+    assert rows[0]["finished_at"] == "2026-08-01T11:30:00+00:00"
+    assert (rows[1]["name"], rows[1]["started_at"], rows[1]["finished_at"]) == (None, None, None)
+    assert definition.properties["_httk_started_at"].requirements["sortable"] is True
     assert definition.properties["_httk_source_id"].nullable
     assert definition.properties["_httk_source_id"].requirements["query-support"] == "all mandatory"
     assert definition.properties["_httk_source_id"].requirements["sortable"] is True
@@ -256,6 +267,9 @@ def test_run_stored_property_plan_serves_prefixed_properties() -> None:
                 source_id="ws:a",
                 workflow_declaration_uri="https://wf.example/a",
                 workflow_definition_uri="https://code.example/a",
+                name="relax",
+                started_at=datetime.datetime(2026, 8, 1, 10, 0, tzinfo=UTC),
+                finished_at=datetime.datetime(2026, 8, 1, 11, 0, tzinfo=UTC),
             )
         )
         store.save(Run(source_id="ws:b"))
@@ -270,6 +284,10 @@ def test_run_stored_property_plan_serves_prefixed_properties() -> None:
         assert rows["ws:b"]["_httk_workflow_declaration_uri"] is None
         assert rows["ws:a"]["_httk_workflow_definition_uri"] == "https://code.example/a"
         assert rows["ws:b"]["_httk_workflow_definition_uri"] is None
+        assert rows["ws:a"]["_httk_name"] == "relax"
+        assert rows["ws:a"]["_httk_started_at"] == "2026-08-01T10:00:00+00:00"
+        assert rows["ws:a"]["_httk_finished_at"] == "2026-08-01T11:00:00+00:00"
+        assert (rows["ws:b"]["_httk_name"], rows["ws:b"]["_httk_started_at"]) == (None, None)
 
         # (b) a filter over _httk_source_id returns the right subset.
         filtered = _plan_records(plan.filter_searchers('_httk_source_id = "ws:a"'))
@@ -280,6 +298,16 @@ def test_run_stored_property_plan_serves_prefixed_properties() -> None:
             plan.filter_searchers('_httk_workflow_definition_uri = "https://code.example/a"')
         )
         assert [record.source_id for record in filtered_definition] == ["ws:a"]
+
+        # (b3) name and timestamp filters, including RFC 3339 offset normalization.
+        for query in (
+            '_httk_name = "relax"',
+            '_httk_started_at > "2026-08-01T09:59:59Z"',
+            '_httk_finished_at = "2026-08-01T13:00:00+02:00"',
+            "_httk_started_at IS KNOWN",
+        ):
+            assert [record.source_id for record in _plan_records(plan.filter_searchers(query))] == ["ws:a"], query
+        assert _plan_records(plan.filter_searchers('_httk_started_at > "2026-08-01T10:00:00Z"')) == []
 
         # (c) a sort over _httk_source_id orders correctly.
         ordered = _plan_records(plan.filter_searchers('type = "_httk_runs"', sort=(("_httk_source_id", False),)))

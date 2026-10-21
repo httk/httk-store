@@ -116,3 +116,48 @@ def test_mongo_fsck_verifies_file_records(mongo_test_database: Any, tmp_path: Pa
     sids = _populate(store, root)
     assert store.fsck().files_checked == 0
     _assert_summary(store.fsck(data_dir=root), sids, store)
+
+
+def _relocate_and_check(store: Any, root: Path, **fsck: Any) -> None:
+    """``relocate_file`` re-points a row checked by fsck, or marks it lost so fsck only counts it."""
+    sid = store.save(FileRecord(None, "moved.txt", sha256=hashlib.sha256(b"moved").hexdigest()))
+    assert store.fsck(data_dir=root, **fsck).files_lost == 1
+    _file(root, "archive/moved.txt", b"moved")
+    store.relocate_file(sid, "data/archive/moved.txt")
+    assert store.fetch(FileRecord, sid).url == "data/archive/moved.txt"
+    summary = store.fsck(data_dir=root, **fsck)
+    assert (summary.files_checked, summary.files_lost, summary.files_missing, summary.files_mismatched) == (
+        1,
+        0,
+        (),
+        (),
+    )
+    store.relocate_file(sid, None)
+    assert store.fetch(FileRecord, sid).url is None
+    summary = store.fsck(data_dir=root, **fsck)
+    assert (summary.files_checked, summary.files_lost, summary.files_missing) == (0, 1, ())
+    with pytest.raises(KeyError):
+        store.relocate_file(sid + 1000, None)
+    with pytest.raises(TypeError, match="url must be a str or None"):
+        store.relocate_file(sid, b"data/x")
+
+
+def test_sql_relocate_file_and_lost_files(sql_database: Backend, tmp_path: Path) -> None:
+    store = SqlStore(sql_database, entry_families=_FAMILIES)
+    _relocate_and_check(store, tmp_path / "data", exclusive=sql_database.engine.dialect.name == "duckdb")
+
+
+def test_sql_relocate_file_without_file_rows(sql_database: Backend) -> None:
+    store = SqlStore(sql_database, entry_families=_FAMILIES)
+    with pytest.raises(KeyError, match="no FileRecord table"):
+        store.relocate_file(1, "data/x")
+    store.save(FileRecord("data/x", "x", sha256="ab" * 32))
+    with pytest.raises(KeyError) as missing:
+        store.relocate_file(999, "data/x")
+    assert missing.value.args == (FileRecord, 999)
+
+
+def test_mongo_relocate_file_and_lost_files(mongo_test_database: Any, tmp_path: Path) -> None:
+    from httk.store.backend.mongo import MongoStore
+
+    _relocate_and_check(MongoStore(mongo_test_database, entry_families=_FAMILIES), tmp_path / "data")

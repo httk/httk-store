@@ -15,6 +15,7 @@ from httk.core.digests import sha256_file
 from httk.core.storage import IdentitySkip, KeepStored, project_storage_record
 from httk.core.storage.identity import _content_id_uncached, _trusted_content_id
 
+from httk.store.backend.codecs import codec_named
 from httk.store.backend.schema import FieldSpec, LinkSpec, resolve_schema
 from httk.store.storage_layout import EntryFamilyLayout
 
@@ -229,9 +230,14 @@ class _MetadataPlan:
     skipped_specs: tuple[FieldSpec, ...]
     skipped_nested: tuple[FieldSpec, ...]
     descend_specs: tuple[FieldSpec, ...]
+    keep_specs: tuple[FieldSpec, ...] = ()
+    """``KeepStored`` scalar/encoded fields: a stored NULL is filled from a non-None incoming value."""
 
 
 _MISSING_METADATA = object()
+# ponytail: only scalar/encoded KeepStored fields are filled in place (all FileRecord
+# needs); a nested or fixed-array KeepStored field keeps its stored value, add a role here if one appears.
+_KEEP_FILLED_ROLES = frozenset({"scalar", "encoded"})
 
 
 @functools.cache
@@ -255,7 +261,7 @@ def _metadata_has_plan(record_type: type) -> bool:
         if any(
             not spec.derived
             and _has_identity_skip(hints.get(spec.field))
-            and not _has_identity_skip(hints.get(spec.field), KeepStored)
+            and (not _has_identity_skip(hints.get(spec.field), KeepStored) or spec.role in _KEEP_FILLED_ROLES)
             for spec in resolve_schema(reachable_type).fields
         ):
             return True
@@ -269,10 +275,15 @@ def _metadata_plan(record_type: type) -> _MetadataPlan | None:
     skipped_specs: list[FieldSpec] = []
     skipped_nested: list[FieldSpec] = []
     descend_specs: list[FieldSpec] = []
+    keep_specs: list[FieldSpec] = []
     for spec in schema.fields:
-        # A KeepStored field keeps the stored value on a deduplicating re-save,
-        # so it is neither compared nor descended into.
-        if spec.derived or _has_identity_skip(hints.get(spec.field), KeepStored):
+        # A KeepStored field is never compared on a deduplicating re-save: the
+        # first non-null value wins, so only a stored NULL is filled in place.
+        if spec.derived:
+            continue
+        if _has_identity_skip(hints.get(spec.field), KeepStored):
+            if spec.role in _KEEP_FILLED_ROLES:
+                keep_specs.append(spec)
             continue
         if _has_identity_skip(hints.get(spec.field)):
             if spec.role in {"scalar", "encoded", "fixed_array"}:
@@ -281,9 +292,36 @@ def _metadata_plan(record_type: type) -> _MetadataPlan | None:
                 skipped_nested.append(spec)
         elif spec.target is not None and _metadata_has_plan(spec.target):
             descend_specs.append(spec)
-    if not skipped_specs and not skipped_nested and not descend_specs:
+    if not skipped_specs and not skipped_nested and not descend_specs and not keep_specs:
         return None
-    return _MetadataPlan(tuple(skipped_specs), tuple(skipped_nested), tuple(descend_specs))
+    return _MetadataPlan(tuple(skipped_specs), tuple(skipped_nested), tuple(descend_specs), tuple(keep_specs))
+
+
+def _keeps_stored(record_type: type) -> bool:
+    """Return whether ``record_type`` has ``KeepStored`` fields a deduplicating save leaves as stored or fills.
+
+    Such a save must not cache the incoming instance as the stored one.
+    """
+    plan = _metadata_plan(record_type)
+    return plan is not None and bool(plan.keep_specs)
+
+
+def _keep_stored_fill(spec: FieldSpec, stored: object, incoming: object) -> dict[str, Any]:
+    """Return the columns filling a stored NULL ``KeepStored`` value with ``incoming`` (first non-null wins).
+
+    :param spec: The scalar or encoded ``KeepStored`` field.
+    :param stored: The decoded stored value.
+    :param incoming: The projected incoming value.
+    :return: Column name to encoded part, empty when the stored value is kept.
+    """
+    if stored is not None or incoming is None:
+        return {}
+    if spec.role == "scalar":
+        parts: tuple[Any, ...] = (incoming,)
+    else:
+        assert spec.codec_name is not None
+        parts = tuple(codec_named(spec.codec_name).encode(incoming))
+    return {column.name: part for column, part in zip(spec.columns, parts, strict=True)}
 
 
 def _has_identity_skip(annotation: Any, marker_type: type = IdentitySkip) -> bool:
@@ -350,6 +388,7 @@ class _FileCheck:
     missing: tuple[tuple[int, str], ...]
     mismatched: tuple[tuple[int, str], ...]
     unchecked: int
+    lost: int
 
 
 def _check_stored_files(rows: Iterable[tuple[int, object, object]], data_dir: str | os.PathLike[str]) -> _FileCheck:
@@ -358,15 +397,18 @@ def _check_stored_files(rows: Iterable[tuple[int, object, object]], data_dir: st
     Only a relative ``data/<rest>`` URL is checked, as ``data_dir/<rest>``
     (``data_dir`` is the local directory that stored ``data/...`` URLs are
     relative to); any other URL, including one with a ``..`` component, is
-    counted as unchecked.  Symlinks are not followed: a path with a symlink
-    in any component below ``data_dir``, or one that cannot be read as a
-    regular file, counts as missing.
+    counted as unchecked, and a null URL (lost bytes) as lost.  Symlinks are
+    not followed: a path with a symlink in any component below ``data_dir``,
+    or one that cannot be read as a regular file, counts as missing.
     """
     root = Path(data_dir)
-    checked = unchecked = 0
+    checked = unchecked = lost = 0
     missing: list[tuple[int, str]] = []
     mismatched: list[tuple[int, str]] = []
     for sid, url, sha256 in rows:
+        if url is None:
+            lost += 1
+            continue
         parts = PurePosixPath(url).parts if isinstance(url, str) else ()
         if len(parts) < 2 or parts[0] != "data" or ".." in parts:
             unchecked += 1
@@ -385,4 +427,4 @@ def _check_stored_files(rows: Iterable[tuple[int, object, object]], data_dir: st
             continue
         if digest != sha256:
             mismatched.append((sid, str(url)))
-    return _FileCheck(checked, tuple(missing), tuple(mismatched), unchecked)
+    return _FileCheck(checked, tuple(missing), tuple(mismatched), unchecked, lost)

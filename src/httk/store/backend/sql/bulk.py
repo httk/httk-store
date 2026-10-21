@@ -137,6 +137,7 @@ from httk.store.store_common import (
     EntryIdConflictError,
     EntryMetadataConflictError,
     SaveProjection,
+    _keep_stored_fill,
     _metadata_plan,
     reject_cursor_proxy,
 )
@@ -2607,7 +2608,11 @@ class BulkIngest:
                 if entry is None:
                     continue
                 record_type, source = entry
-                store._check_metadata(self._connection, record_type, existing_sid, source, SaveProjection())
+                # The chunk's merged metadata (first non-null per KeepStored
+                # field) stands in for the first occurrence's projection.
+                projection = SaveProjection()
+                projection.values_by_source[(record_type, id(source))] = self._meta_values[key]
+                store._check_metadata(self._connection, record_type, existing_sid, source, projection)
         finally:
             stack.pop()
 
@@ -2630,6 +2635,7 @@ class BulkIngest:
         stored = self._meta_values.get(key)
         if stored is not None:
             self._compare_metadata(record_type, incoming, stored, record_type.__name__)
+            self._fill_buffered(record_type, key, incoming)
             return
         if _metadata_plan(record_type) is None:
             return
@@ -2641,6 +2647,31 @@ class BulkIngest:
             store._check_metadata(self._connection, record_type, existing_sid, source, SaveProjection())
         finally:
             stack.pop()
+
+    def _fill_buffered(self, record_type: type, key: str, incoming: Mapping[str, object]) -> None:
+        """Fill the buffered first occurrence's NULL ``KeepStored`` values from ``incoming`` (first non-null wins).
+
+        :param record_type: The content-addressed record type of the hit.
+        :param key: The content id that hit.
+        :param incoming: The projected fields of the current occurrence.
+        """
+        plan = _metadata_plan(record_type)
+        stored = self._meta_values.get(key)
+        if plan is None or stored is None:
+            # ponytail: a first occurrence already flushed in an earlier chunk is
+            # not refilled from an in-memory descend; the next save() of the bytes fills it.
+            return
+        merged = dict(stored)
+        columns: dict[str, Any] = {}
+        for spec in plan.keep_specs:
+            fill = _keep_stored_fill(spec, stored[spec.field], incoming[spec.field])
+            if fill:
+                columns.update(fill)
+                merged[spec.field] = incoming[spec.field]
+        if columns:
+            self._meta_values[key] = merged
+            table_name = resolve_schema(record_type).table_name
+            self._rows_by_sid[table_name][self._content_index[table_name][key]].update(columns)
 
     def _compare_metadata(
         self,
@@ -2726,12 +2757,10 @@ class BulkIngest:
         if compare_content and content_id(incoming, as_record=record_type) != content_id(stored, as_record=record_type):
             raise EntryMetadataConflictError(f"metadata conflict for {path}: stored {stored!r}, received {incoming!r}")
         if _metadata_plan(record_type) is not None:
-            self._compare_metadata(
-                record_type,
-                project_storage_record(record_type, incoming),
-                project_storage_record(record_type, stored),
-                path,
-            )
+            projected = project_storage_record(record_type, incoming)
+            self._compare_metadata(record_type, projected, project_storage_record(record_type, stored), path)
+            if resolve_schema(record_type).dedup == "content_id":
+                self._fill_buffered(record_type, content_id(incoming, as_record=record_type), projected)
 
 
 def _value_tuple(row: Mapping[str, Any]) -> tuple[Any, ...]:

@@ -13,7 +13,7 @@ import typing
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from httk.core import EntryTypeDefinition, FracVector
+from httk.core import EntryTypeDefinition, FileRecord, FracVector
 from httk.core.entry_ids import (
     ALTERNATIVE_KIND_PATTERN,
     check_entry_id,
@@ -67,6 +67,8 @@ from httk.store.store_common import (
     EntryReplacementError,
     IdentityCaches,
     SaveProjection,
+    _keep_stored_fill,
+    _keeps_stored,
     _LinksAccessor,
     _metadata_plan,
     reject_cursor_proxy,
@@ -1638,7 +1640,8 @@ class MongoStore:
             relative to (the directory published under serve's ``--data-path``);
             when given, every stored ``FileRecord`` is checked read-only for an
             existing, non-symlink file matching its ``sha256``, reported in the
-            summary's ``files_*`` fields.
+            summary's ``files_*`` fields; one with a null ``url`` (lost bytes)
+            is not checked and is counted in ``files_lost``.
         :return: An immutable :class:`~httk.store.backend.mongo.fsck.FsckSummary`.
         """
         from .fsck import run_fsck
@@ -1885,7 +1888,9 @@ class MongoStore:
                     saved_type,
                     saved_sid,
                     source,
-                    cache_instance=type(source) is saved_type and saved_type not in self._entry_record_types,
+                    cache_instance=type(source) is saved_type
+                    and saved_type not in self._entry_record_types
+                    and not _keeps_stored(saved_type),
                 )
                 self._failed_identities.discard((saved_type, identity))
             return sid
@@ -2966,6 +2971,31 @@ class MongoStore:
             transaction.timestamp_initialized = True
         return transaction.store_timestamp
 
+    def relocate_file(self, sid: int, url: str | None) -> None:
+        """Set the ``url`` of the stored :class:`~httk.core.FileRecord` ``sid`` in place.
+
+        Re-points a file to another copy with the same bytes, or ``None`` marks
+        it lost (served as an RFC 6920 ``ni:`` content URI). The caller is
+        responsible for the bytes matching; ``fsck(data_dir=...)`` verifies
+        them. ``url`` is identity-excluded metadata, so the document is updated
+        in place: no new revision, and the content id is unchanged.
+
+        :param sid: The sid of the stored ``FileRecord``.
+        :param url: The new location, or ``None`` to mark the bytes lost.
+        :raises TypeError: If ``url`` is neither a string nor None.
+        :raises KeyError: If no ``FileRecord`` document has this sid.
+        :raises TransactionsUnavailableError: If this store is in degraded mode.
+        """
+        if url is not None and not isinstance(url, str):
+            raise TypeError(f"url must be a str or None, got {type(url).__name__}")
+        collection = self._database.database[collection_name_for(resolve_schema(FileRecord))]
+        # A fresh save omits a None field, so marking lost unsets it.
+        update = {"$unset": {"f.url": ""}} if url is None else {"$set": {"f.url": url}}
+        with self.transaction():
+            if collection.update_one({"_id": int(sid)}, update, **self._session_kwargs()).matched_count != 1:
+                raise KeyError(FileRecord, sid)
+        self._identity._instances.pop((FileRecord, int(sid)), None)
+
     def link(self, source: Any, name: str, target: Any) -> None:
         """Assert a weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
 
@@ -3243,7 +3273,7 @@ class MongoStore:
         if cached is not None:
             return cached
         paths: dict[str, int] = {}
-        for spec in (*plan.skipped_specs, *plan.skipped_nested, *plan.descend_specs):
+        for spec in (*plan.skipped_specs, *plan.skipped_nested, *plan.descend_specs, *plan.keep_specs):
             if spec.role == "child":
                 paths[f"f.{spec.field}"] = 1
             else:
@@ -3323,6 +3353,11 @@ class MongoStore:
         skipped = {spec.field for spec in plan.skipped_specs}
         nested = {spec.field for spec in plan.skipped_nested}
         descend = {spec.field for spec in plan.descend_specs}
+        fills = [
+            fill
+            for spec in plan.keep_specs
+            if (fill := _keep_stored_fill(spec, self._metadata_value(spec, document), values[spec.field]))
+        ]
         for spec in schema.fields:
             if spec.derived:
                 continue
@@ -3362,6 +3397,20 @@ class MongoStore:
                     field_path,
                     False,
                 )
+        if fills:
+            # KeepStored is first-non-null-wins: fill the stored NULLs in place
+            # (identity-excluded metadata: no new revision, same content id).
+            # The null filter (matching missing or null) guards concurrent writers.
+            collection = self._database.database[collection_name_for(schema)]
+            for fill in fills:
+                collection.update_one(
+                    {"_id": int(sid), **{f"f.{name}": None for name in fill}},
+                    {"$set": {f"f.{name}": value for name, value in fill.items()}},
+                    **self._session_kwargs(),
+                )
+            # The stored value may now be another writer's: drop, never assume, the caches.
+            projection.metadata_rows.pop((record_type, int(sid)), None)
+            self._identity._instances.pop((record_type, int(sid)), None)
 
     def _check_metadata_nested(
         self,

@@ -106,8 +106,17 @@ data — reproducing `save()` and raising
 `httk.store.store_common.EntryMetadataConflictError` on a conflict. Pass
 `verify_metadata=False` to skip the comparison when the stream is
 known-consistent. A field marked `KeepStored` (for example the `url` and `name`
-of `FileRecord`) is never compared, here or in `save()`: the row keeps its
-first stored value and a differing incoming value is ignored.
+of `FileRecord`) is never compared, here or in `save()`: the first non-null
+value wins. A stored value is kept and a differing incoming value is ignored,
+but a stored NULL is filled in place from a non-null incoming value. The fill
+updates identity-excluded metadata only, so it creates no new revision and the
+content id is unchanged. This is how a lost file (`url=None`) gets its location
+back when the same bytes are saved again from a real path. On the serial
+`finalize="parity"` path the fill applies within a batch (the first non-null
+occurrence wins) and against an already-stored row. The `finalize="deferred"`
+and `workers>1` paths keep the first occurrence's values as stored, NULLs
+included, and `verify_metadata=False` skips the fill along with the comparison;
+a later `save()` of the same bytes fills such a row.
 
 **`index_strategy`** (`"auto"`, `"keep"`, or `"rebuild"`, default `"auto"`)
 governs only how an *existing* table's separable indexes are handled during an

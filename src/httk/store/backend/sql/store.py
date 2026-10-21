@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, Self, cast
 import sqlalchemy
 from httk.core import (
     EntryTypeDefinition,
+    FileRecord,
     FracVector,
 )
 from httk.core.entry_ids import (
@@ -145,6 +146,8 @@ from httk.store.store_common import (
     EntryReplacementError,
     IdentityCaches,
     SaveProjection,
+    _keep_stored_fill,
+    _keeps_stored,
     _metadata_plan,
     _MetadataPlan,
     reject_cursor_proxy,
@@ -3116,7 +3119,9 @@ class SqlStore:
                     record_type,
                     sid,
                     source,
-                    cache_instance=type(source) is record_type and record_type not in self._entry_record_types,
+                    cache_instance=type(source) is record_type
+                    and record_type not in self._entry_record_types
+                    and not _keeps_stored(record_type),
                 )
                 return sid
 
@@ -3269,7 +3274,9 @@ class SqlStore:
                     record_type,
                     sid,
                     source,
-                    cache_instance=type(source) is record_type and record_type not in self._entry_record_types,
+                    cache_instance=type(source) is record_type
+                    and record_type not in self._entry_record_types
+                    and not _keeps_stored(record_type),
                 )
                 return sid
             if replacement is None:
@@ -4061,7 +4068,8 @@ class SqlStore:
         relative to, i.e. the directory published under serve's
         ``--data-path``), every stored ``FileRecord`` is also checked read-only:
         its file must exist, not be a symlink, and match its ``sha256``. Problems are reported in the summary's ``files_*``
-        fields, never raised or repaired.
+        fields, never raised or repaired; a record with a null ``url`` (lost
+        bytes) is not checked and is counted in ``files_lost``.
         """
         self._check_mutation_policy("fsck")
         self._reject_during_bulk()
@@ -4077,6 +4085,40 @@ class SqlStore:
             exclusive=exclusive,
             data_dir=data_dir,
         )
+
+    def relocate_file(self, sid: int, url: str | None) -> None:
+        """Set the ``url`` of the stored :class:`~httk.core.FileRecord` ``sid`` in place.
+
+        Re-points a file to another copy with the same bytes, or ``None`` marks
+        it lost (served as an RFC 6920 ``ni:`` content URI). The caller is
+        responsible for the bytes matching; ``fsck(data_dir=...)`` verifies
+        them. ``url`` is identity-excluded metadata, so the row is updated in
+        place: no new revision, and the content id is unchanged.
+
+        :param sid: The sid of the stored ``FileRecord``.
+        :param url: The new location, or ``None`` to mark the bytes lost.
+        :raises TypeError: If ``url`` is neither a string nor None.
+        :raises KeyError: If no ``FileRecord`` row has this sid.
+        :raises RuntimeError: If a bulk-ingest context is open or the backend refuses incremental mutations.
+        """
+        if url is not None and not isinstance(url, str):
+            raise TypeError(f"url must be a str or None, got {type(url).__name__}")
+        self._check_mutation_policy("relocate_file")
+        self._reject_during_bulk()
+        table_name = resolve_schema(FileRecord).table_name
+        table = self._metadata.tables.get(table_name)
+        with self._write_connection() as connection:
+            if table is None or table_name not in actual_table_names(connection):
+                raise KeyError(f"store has no FileRecord table {table_name!r}; no FileRecord sid {sid}")
+            if (
+                connection.execute(sqlalchemy.select(table.c[SID_COLUMN]).where(table.c[SID_COLUMN] == sid)).first()
+                is None
+            ):
+                raise KeyError(FileRecord, sid)
+            connection.execute(sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values(url=url))
+            if self._write_profile == "degraded":
+                self._after_degraded_write(f"relocate-file:{table_name}")
+        self._identity._instances.pop((FileRecord, int(sid)), None)
 
     def stored_property_plan(self, family: type) -> Any:
         """Return the wire-form SQL stored-property plan for one configured entry family.
@@ -4773,6 +4815,11 @@ class SqlStore:
         skipped_specs = {spec.field for spec in plan.skipped_specs}
         skipped_nested = {spec.field for spec in plan.skipped_nested}
         descend_specs = {spec.field for spec in plan.descend_specs}
+        fills = [
+            fill
+            for spec in plan.keep_specs
+            if (fill := _keep_stored_fill(spec, decode_field(self, schema, spec, sid, row), values[spec.field]))
+        ]
         for spec in schema.fields:
             if spec.derived:
                 continue
@@ -4794,6 +4841,23 @@ class SqlStore:
                 self._check_metadata_nested(
                     connection, schema, row, sid, spec, values[spec.field], projection, field_path, False
                 )
+        if fills:
+            # KeepStored is first-non-null-wins: fill the stored NULLs in place.
+            # Identity-excluded metadata only, so no new revision and the
+            # content id is unchanged. The IS NULL guard sits in the statement,
+            # so a concurrent writer's committed value is never overwritten.
+            table = self._table(schema.table_name)
+            for fill in fills:
+                connection.execute(
+                    sqlalchemy.update(table)
+                    .where(table.c[SID_COLUMN] == sid, *(table.c[name].is_(None) for name in fill))
+                    .values(fill)
+                )
+            if self._write_profile == "degraded":
+                self._after_degraded_write(f"keep-stored-fill:{table.name}")
+            # The stored value may now be another writer's: drop, never assume, the caches.
+            projection.metadata_rows.pop((record_type, int(sid)), None)
+            self._identity._instances.pop((record_type, int(sid)), None)
 
     def _metadata_parent_row(
         self,
@@ -4809,7 +4873,7 @@ class SqlStore:
             return cached
         schema = resolve_schema(record_type)
         table = self._table(schema.table_name)
-        specs = (*plan.skipped_specs, *plan.skipped_nested, *plan.descend_specs)
+        specs = (*plan.skipped_specs, *plan.skipped_nested, *plan.descend_specs, *plan.keep_specs)
         columns: list[sqlalchemy.Column[Any]] = []
         seen: set[str] = set()
         for spec in specs:

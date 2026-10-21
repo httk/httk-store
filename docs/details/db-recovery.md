@@ -75,12 +75,44 @@ the file must exist and its streamed SHA-256 must equal the row's `sha256`.
 Symlinks are not followed; a path with a symlink in any component below
 `data_dir` is reported as missing. `files_checked` counts these rows.
 `files_unchecked` counts the others: absolute URLs (`https://…`, `file://…`,
-`/abs/...`) and paths that contain `..`. The rows are read under the fsck lock
+`/abs/...`) and paths that contain `..`. A row with a NULL `url` is a lost file
+(see below): it is not checked and is counted in `files_lost`, not reported as
+missing. The rows are read under the fsck lock
 and the files are hashed after it is released, so hashing does not block
 writers. The check reads files only. It never changes a row, and a problem it
 finds is reported in these fields rather than raised. Rows removed by the same
 run's garbage collection are not checked. `MongoStore.fsck` accepts the same
 keyword and reports the same fields.
+
+## Lost files and `relocate_file`
+
+A `FileRecord` whose `url` is `None` records that the bytes are lost: the record
+still names the content by its `sha256`, but there is no location to read it
+from. A workflow that mutates or deletes a large input during its run records
+the input this way. Served `files` entries render such a `url` as the RFC 6920
+content URI `ni:///sha-256;<base64url digest>`, so the entry never claims a
+location it does not have.
+
+A lost file does not stay lost by accident. `FileRecord` deduplicates by
+content, and its `url` is `KeepStored`, which means the first non-null value
+wins: a later save of the same bytes from a real location fills the stored
+NULL in place, while a stored non-null `url` is never overwritten by a later
+save, whether that save's `url` is `None` or different. Filling is an in-place
+metadata update, so it creates no new revision and the content id is unchanged.
+
+To set a location explicitly, for example after a workspace is deleted or the
+bytes are moved, use `relocate_file`:
+
+```python
+store.relocate_file(sid, "data/archive/OUTCAR")  # another copy of the same bytes
+store.relocate_file(sid, None)                   # mark the bytes lost
+```
+
+It updates the `url` of the `FileRecord` row with that sid in place, in one
+transaction, and raises `KeyError` when no such row exists. The caller is
+responsible for the new location holding the same bytes; `fsck(data_dir=...)`
+verifies them. fsck itself stays report-only and never relocates a file.
+`MongoStore.relocate_file` behaves the same.
 
 ## ClickHouse bulk-fenced writes
 

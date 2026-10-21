@@ -40,3 +40,21 @@ def test_stored_files_serve_description_checksums_and_metadata() -> None:
         # explicit not-implemented filter, not a silent empty result.
         with pytest.raises(FilterTranslationError, match="not implemented"):
             federation.query('description CONTAINS "Static"')
+
+
+def test_lost_file_serves_ni_content_uri() -> None:
+    """A stored ``url=None`` (lost bytes) serves through core's projection as an RFC 6920 ``ni:`` URI."""
+    with Backend.sqlite() as database:
+        store = SqlStore(database, entry_records={FileEntry: FileRecord}, entry_ids=EntryIdScheme("httk.test", "1"))
+        sid = store.save(FileRecord(None, "lost", sha256=SHA256))
+        federation = StoredEntryFederation((StoredEntrySource(store, FileEntry, "files"),))
+        expected = "ni:///sha-256;UPs-Bzi48FIE1evSUid5_j_NFgxoaDwFatFJTiLD-CQ"
+
+        (row,) = federation.query().rows
+        assert (row["url"], row["checksums"]) == (expected, {"sha256": SHA256})
+        fetched = federation.fetch(row["id"], fields=("url",))
+        assert fetched is not None and fetched[0]["url"] == expected
+
+        # Relocated, the stored url is served as is.
+        store.relocate_file(sid, "data/run/OUTCAR")
+        assert federation.query().rows[0]["url"] == "data/run/OUTCAR"

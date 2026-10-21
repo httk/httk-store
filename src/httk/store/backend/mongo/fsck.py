@@ -64,6 +64,7 @@ class FsckSummary:
         SHA-256 differs from the stored ``sha256``.
     :param files_unchecked: Stored ``FileRecord`` documents whose URL is not a
         relative ``data/`` path and so was not checked.
+    :param files_lost: Stored ``FileRecord`` documents with a null URL (bytes lost), never checked.
     """
 
     generation: int
@@ -73,6 +74,7 @@ class FsckSummary:
     files_missing: tuple[tuple[int, str], ...] = ()
     files_mismatched: tuple[tuple[int, str], ...] = ()
     files_unchecked: int = 0
+    files_lost: int = 0
 
 
 class _Counters:
@@ -592,4 +594,5 @@ def run_fsck(
         files_missing=files.missing,
         files_mismatched=files.mismatched,
         files_unchecked=files.unchecked,
+        files_lost=files.lost,
     )

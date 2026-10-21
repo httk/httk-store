@@ -165,7 +165,8 @@ def test_records_declaration_rejects_two_families_serving_one_entry_type() -> No
 
 def test_decorated_only_records_layout_is_unchanged() -> None:
     layouts = {
-        (ResultWithStructure,): "16c3521ec335c349",
+        # FileRecord.url became nullable (lost files), via the structure source_file.
+        (ResultWithStructure,): "cce5a0da90747ef3",
         (Result,): "6f112d9b5ed9c225",
         (Alpha, Beta): "1329a570deae655b",
     }

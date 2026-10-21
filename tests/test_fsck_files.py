@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 import pytest
 from httk.core import FileRecord
 from httk.core.storage import StorageInfo
+from sqlalchemy import event
 
 from httk.store import EntryFamilyDeclaration, EntryRecordDeclaration
 from httk.store.backend.sql import Backend, SqlStore
@@ -161,3 +162,44 @@ def test_mongo_relocate_file_and_lost_files(mongo_test_database: Any, tmp_path: 
     from httk.store.backend.mongo import MongoStore
 
     _relocate_and_check(MongoStore(mongo_test_database, entry_families=_FAMILIES), tmp_path / "data")
+
+
+def _compare_and_swap(store: Any) -> None:
+    """``relocate_file(..., expected=...)`` re-points only while the stored url is still ``expected``."""
+    sid = store.save(FileRecord("data/a.txt", "a.txt", sha256="ef" * 32))
+    assert store.relocate_file(sid, "data/b.txt", expected="data/a.txt") is True
+    assert store.fetch(FileRecord, sid).url == "data/b.txt"
+    assert store.relocate_file(sid, "data/c.txt", expected="data/a.txt") is False
+    assert store.fetch(FileRecord, sid).url == "data/b.txt"
+    assert store.relocate_file(sid, None, expected=None) is False
+    assert store.relocate_file(sid, None) is True
+    assert store.relocate_file(sid, "data/d.txt", expected=None) is True
+    assert store.fetch(FileRecord, sid).url == "data/d.txt"
+    with pytest.raises(KeyError):
+        store.relocate_file(sid + 1000, "data/x", expected="data/d.txt")
+    with pytest.raises(TypeError, match="url must be a str or None"):
+        store.relocate_file(sid, b"data/x", expected="data/d.txt")
+
+
+def test_sql_relocate_file_compare_and_swap(sql_database: Backend) -> None:
+    store = SqlStore(sql_database, entry_families=_FAMILIES)
+    statements: list[str] = []
+
+    def capture(_conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+        if statement.lstrip().upper().startswith("UPDATE"):
+            statements.append(" ".join(statement.split()))
+
+    event.listen(sql_database.engine, "before_cursor_execute", capture)
+    try:
+        _compare_and_swap(store)
+    finally:
+        event.remove(sql_database.engine, "before_cursor_execute", capture)
+    guarded = [statement for statement in statements if "url" in statement.split("WHERE", 1)[-1]]
+    assert any("url IS NULL" in statement for statement in guarded)
+    assert any("url = " in statement.split("WHERE", 1)[1] for statement in guarded)
+
+
+def test_mongo_relocate_file_compare_and_swap(mongo_test_database: Any) -> None:
+    from httk.store.backend.mongo import MongoStore
+
+    _compare_and_swap(MongoStore(mongo_test_database, entry_families=_FAMILIES))

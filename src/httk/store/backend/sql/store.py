@@ -47,9 +47,11 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, Self, cast
 
 import sqlalchemy
 from httk.core import (
+    MISSING,
     EntryTypeDefinition,
     FileRecord,
     FracVector,
+    MissingType,
 )
 from httk.core.entry_ids import (
     ALTERNATIVE_KIND_PATTERN,
@@ -4086,7 +4088,7 @@ class SqlStore:
             data_dir=data_dir,
         )
 
-    def relocate_file(self, sid: int, url: str | None) -> None:
+    def relocate_file(self, sid: int, url: str | None, *, expected: str | None | MissingType = MISSING) -> bool:
         """Set the ``url`` of the stored :class:`~httk.core.FileRecord` ``sid`` in place.
 
         Re-points a file to another copy with the same bytes, or ``None`` marks
@@ -4095,8 +4097,15 @@ class SqlStore:
         them. ``url`` is identity-excluded metadata, so the row is updated in
         place: no new revision, and the content id is unchanged.
 
+        Passing ``expected`` makes this a compare-and-swap: the row is
+        re-pointed only while its stored ``url`` is still ``expected``
+        (``None`` matches a lost row). A ``False`` result means another writer
+        changed the location first, and the row is left as it is.
+
         :param sid: The sid of the stored ``FileRecord``.
         :param url: The new location, or ``None`` to mark the bytes lost.
+        :param expected: The ``url`` the row must still hold for the update to apply; unconditional when omitted.
+        :return: ``True`` if the row was updated, ``False`` if its ``url`` differed from ``expected``.
         :raises TypeError: If ``url`` is neither a string nor None.
         :raises KeyError: If no ``FileRecord`` row has this sid.
         :raises RuntimeError: If a bulk-ingest context is open or the backend refuses incremental mutations.
@@ -4115,10 +4124,19 @@ class SqlStore:
                 is None
             ):
                 raise KeyError(FileRecord, sid)
-            connection.execute(sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values(url=url))
+            statement = sqlalchemy.update(table).where(table.c[SID_COLUMN] == sid).values(url=url)
+            if isinstance(expected, MissingType):
+                connection.execute(statement)
+                updated = True
+            else:
+                # RETURNING, not rowcount: DuckDB does not report an exact rowcount.
+                guard = table.c.url.is_(None) if expected is None else table.c.url == expected
+                returned = connection.execute(statement.where(guard).returning(table.c[SID_COLUMN]))
+                updated = returned.first() is not None
             if self._write_profile == "degraded":
                 self._after_degraded_write(f"relocate-file:{table_name}")
         self._identity._instances.pop((FileRecord, int(sid)), None)
+        return updated
 
     def stored_property_plan(self, family: type) -> Any:
         """Return the wire-form SQL stored-property plan for one configured entry family.

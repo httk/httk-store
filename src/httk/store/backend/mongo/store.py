@@ -13,7 +13,7 @@ import typing
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from httk.core import EntryTypeDefinition, FileRecord, FracVector
+from httk.core import MISSING, EntryTypeDefinition, FileRecord, FracVector, MissingType
 from httk.core.entry_ids import (
     ALTERNATIVE_KIND_PATTERN,
     check_entry_id,
@@ -2971,7 +2971,7 @@ class MongoStore:
             transaction.timestamp_initialized = True
         return transaction.store_timestamp
 
-    def relocate_file(self, sid: int, url: str | None) -> None:
+    def relocate_file(self, sid: int, url: str | None, *, expected: str | None | MissingType = MISSING) -> bool:
         """Set the ``url`` of the stored :class:`~httk.core.FileRecord` ``sid`` in place.
 
         Re-points a file to another copy with the same bytes, or ``None`` marks
@@ -2980,8 +2980,15 @@ class MongoStore:
         them. ``url`` is identity-excluded metadata, so the document is updated
         in place: no new revision, and the content id is unchanged.
 
+        Passing ``expected`` makes this a compare-and-swap: the document is
+        re-pointed only while its stored ``url`` is still ``expected``
+        (``None`` matches a lost document). A ``False`` result means another writer
+        changed the location first, and the document is left as it is.
+
         :param sid: The sid of the stored ``FileRecord``.
         :param url: The new location, or ``None`` to mark the bytes lost.
+        :param expected: The ``url`` the document must still hold for the update to apply; unconditional when omitted.
+        :return: ``True`` if the document was updated, ``False`` if its ``url`` differed from ``expected``.
         :raises TypeError: If ``url`` is neither a string nor None.
         :raises KeyError: If no ``FileRecord`` document has this sid.
         :raises TransactionsUnavailableError: If this store is in degraded mode.
@@ -2991,10 +2998,18 @@ class MongoStore:
         collection = self._database.database[collection_name_for(resolve_schema(FileRecord))]
         # A fresh save omits a None field, so marking lost unsets it.
         update = {"$unset": {"f.url": ""}} if url is None else {"$set": {"f.url": url}}
+        query: dict[str, Any] = {"_id": int(sid)}
+        if not isinstance(expected, MissingType):
+            query["f.url"] = expected  # None also matches the unset field of a lost file.
         with self.transaction():
-            if collection.update_one({"_id": int(sid)}, update, **self._session_kwargs()).matched_count != 1:
+            updated = collection.update_one(query, update, **self._session_kwargs()).matched_count == 1
+            if not updated and (
+                isinstance(expected, MissingType)
+                or collection.find_one({"_id": int(sid)}, {"_id": 1}, **self._session_kwargs()) is None
+            ):
                 raise KeyError(FileRecord, sid)
         self._identity._instances.pop((FileRecord, int(sid)), None)
+        return updated
 
     def link(self, source: Any, name: str, target: Any) -> None:
         """Assert a weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.

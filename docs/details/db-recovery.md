@@ -112,6 +112,10 @@ It updates the `url` of the `FileRecord` row with that sid in place, in one
 transaction, and raises `KeyError` when no such row exists. The caller is
 responsible for the new location holding the same bytes; `fsck(data_dir=...)`
 verifies them. fsck itself stays report-only and never relocates a file.
+With `expected=`, `relocate_file(sid, url, expected=old)` is a compare-and-swap:
+it re-points the row only while its stored `url` is still `old` (`None` matches
+a lost row) and returns `False`, leaving the row unchanged, when another writer
+changed the location first.
 `MongoStore.relocate_file` behaves the same.
 
 ## ClickHouse bulk-fenced writes

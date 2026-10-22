@@ -6,7 +6,7 @@ from typing import Any, Final
 
 from pymongo import ReturnDocument
 
-from httk.store.backend.schema import FieldSpec, LinkSpec, TableSchema
+from httk.store.backend.schema import _MAX_IDENTIFIER_LENGTH, FieldSpec, LinkSpec, TableSchema, _bounded_identifier
 from httk.store.storage_layout import EntryFamilyLayout
 
 __all__ = [
@@ -29,7 +29,6 @@ __all__ = [
 METADATA_COLLECTION: Final = "_httk_store_metadata"
 COUNTERS_COLLECTION: Final = "_httk_counters"
 _RESERVED_PREFIX: Final = "_httk_"
-_MAX_IDENTIFIER_LENGTH: Final = 63
 
 
 @dataclass(frozen=True)
@@ -123,11 +122,7 @@ def entry_dispatch_table_name(family_name: str) -> str:
 
 
 def _index_name(prefix: str, collection_name: str, columns: tuple[str, ...]) -> str:
-    name = f"{prefix}_{collection_name}_{'_'.join(columns)}"
-    if len(name) > _MAX_IDENTIFIER_LENGTH:
-        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
-        name = f"{name[: _MAX_IDENTIFIER_LENGTH - 9]}_{digest}"
-    return name
+    return _bounded_identifier(f"{prefix}_{collection_name}_{'_'.join(columns)}")
 
 
 def collection_name_for(schema: TableSchema) -> str:

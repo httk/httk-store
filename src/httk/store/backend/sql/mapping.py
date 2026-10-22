@@ -35,11 +35,13 @@ import sqlalchemy
 
 from httk.store.backend.codecs import ScalarKind
 from httk.store.backend.schema import (
+    _MAX_IDENTIFIER_LENGTH,
     ChildTableSpec,
     ColumnSpec,
     FieldSpec,
     LinkSpec,
     TableSchema,
+    _bounded_identifier,
     resolve_schema,
 )
 
@@ -99,8 +101,6 @@ TARGET_LID_COLUMN: Final = "target_lid"
 
 RETRACTED_COLUMN: Final = "retracted"
 """Whether a weak-link revision retracts the pair (``1``) or asserts it (``0``)."""
-
-_MAX_IDENTIFIER_LENGTH: Final = 63
 
 ENTRY_ID_OWNERS_TABLE_NAME: Final = "_httk_entry_id_owners"
 IMMUTABLE_ID_OWNERS_TABLE_NAME: Final = "_httk_immutable_id_owners"
@@ -283,7 +283,9 @@ def link_table_for(link: LinkSpec, metadata: sqlalchemy.MetaData, *, store_times
         sqlalchemy.Column(
             SID_COLUMN,
             sqlalchemy.Integer,
-            sqlalchemy.Sequence(f"{name}_sid_seq"),
+            # Bounded: PostgreSQL truncates an over-long sequence name, and for a
+            # 63-character link table the truncation is the table's own name.
+            sqlalchemy.Sequence(_bounded_identifier(f"{name}_sid_seq")),
             primary_key=True,
             autoincrement=True,
         ),
@@ -309,11 +311,7 @@ def link_table_for(link: LinkSpec, metadata: sqlalchemy.MetaData, *, store_times
 
 def _index_name(prefix: str, table_name: str, columns: Sequence[str]) -> str:
     """A deterministic, table-scoped index name, hash-truncated if absurdly long."""
-    name = f"{prefix}_{table_name}_{'_'.join(columns)}"
-    if len(name) > _MAX_IDENTIFIER_LENGTH:
-        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
-        name = f"{name[: _MAX_IDENTIFIER_LENGTH - 9]}_{digest}"
-    return name
+    return _bounded_identifier(f"{prefix}_{table_name}_{'_'.join(columns)}")
 
 
 def _column(spec: ColumnSpec) -> sqlalchemy.Column[Any]:

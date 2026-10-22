@@ -398,9 +398,11 @@ def read_store_metadata(connection: sqlalchemy.Connection) -> Mapping[str, str] 
 class _TruncatedNames:
     """Reject distinct identifiers that PostgreSQL would truncate to the same 63 bytes.
 
-    Generated names are never shortened (that would move existing physical
-    layouts); a layout whose long names collide only after PostgreSQL's
-    silent truncation is refused on every dialect instead.
+    Generated table and column names are not shortened (that would move
+    existing physical layouts), except weak-link tables and their sequences,
+    which are hash-shortened to 63 characters at resolution; a layout whose
+    other long names collide only after PostgreSQL's silent truncation is
+    refused on every dialect instead.
     """
 
     def __init__(self, what: str) -> None:

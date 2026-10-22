@@ -61,6 +61,7 @@ The store layer additionally manages a ``sid`` integer primary key and a
 
 import collections.abc
 import dataclasses
+import hashlib
 import re
 import types
 import typing
@@ -95,6 +96,26 @@ __all__ = [
     "register_schema_override",
     "resolve_schema",
 ]
+
+_MAX_IDENTIFIER_LENGTH: Final = 63
+"""The portable identifier length limit (PostgreSQL ``NAMEDATALEN - 1``; DuckDB via SQLAlchemy)."""
+
+
+def _bounded_identifier(name: str) -> str:
+    """Return ``name`` unchanged when it fits the portable identifier limit, else a deterministic shortening.
+
+    An over-long name is truncated and suffixed with the first 8 hex digits of
+    the SHA-256 of the full name, so distinct long names sharing a prefix stay
+    distinct.
+
+    :param name: The composed identifier.
+    :return: An identifier of at most ``_MAX_IDENTIFIER_LENGTH`` characters.
+    """
+    if len(name) <= _MAX_IDENTIFIER_LENGTH:
+        return name
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return f"{name[: _MAX_IDENTIFIER_LENGTH - 9]}_{digest}"
+
 
 type FieldRole = Literal["scalar", "encoded", "fixed_array", "child", "reference"]
 """How a stored field maps onto the relational model."""
@@ -254,7 +275,11 @@ class LinkSpec:
     """The human-readable relationship description, if any."""
 
     table_name: str
-    """The dedicated link table name, ``_httk_link_<source table>__<target table>__<name>``."""
+    """The dedicated link table name, ``_httk_link_<source table>__<target table>__<name>``.
+
+    Hash-shortened to the portable 63-character identifier limit when longer;
+    never parse it back into its parts.
+    """
 
 
 @dataclasses.dataclass(frozen=True)
@@ -496,7 +521,7 @@ def _resolve_links(
                 exposed_relationship=link.exposed_relationship,
                 role=link.role,
                 description=link.description,
-                table_name=f"_httk_link_{table_name}__{target_table}__{name}",
+                table_name=_bounded_identifier(f"_httk_link_{table_name}__{target_table}__{name}"),
             )
         )
     return tuple(resolved)

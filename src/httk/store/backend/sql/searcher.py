@@ -76,7 +76,17 @@ import sqlalchemy
 from httk.core.storage import resolve_storage_record
 
 from httk.store.backend.codecs import ValueCodec, codec_named, decode_fracvector_exact
-from httk.store.backend.schema import FieldSpec, LinkSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    LinkSpec,
+    SchemaError,
+    TableSchema,
+    _bounded_identifier,
+    _exact_column,
+    _parent_sid_column,
+    _present_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import (
     ALT_ID_COLUMN,
     ALT_KIND_COLUMN,
@@ -776,7 +786,7 @@ class SqlStrongLinkSet:
         edge_table = store._table(resolve_schema(spec.target).table_name)
         child = child_table.alias()
         edge = edge_table.alias()
-        parent_column = child.c[f"{self._owner_schema.table_name}_sid"]
+        parent_column = child.c[_parent_sid_column(self._owner_schema.table_name)]
         fk_column = child.c[spec.child.element_columns[0].name]
         if not self._reverse:
             variable._joins.append((child, _bool_clause(parent_column == variable._alias.c[SID_COLUMN]), None))
@@ -1092,7 +1102,7 @@ class SqlLinkSet:
         codec = codec_named(spec.codec_name)
         return SqlColumn(
             searcher,
-            target_alias.c[spec.field + codec.query_suffix],
+            target_alias.c[_bounded_identifier(spec.field, codec.query_suffix)],
             from_child=True,
             link_path=True,
             spec=spec,
@@ -1189,7 +1199,7 @@ class SqlVariable:
             )
         for spec in self._schema.fields:
             if spec.role == "child" and spec.optional and name == f"{spec.field}_present":
-                return SqlColumn(self._searcher, self._alias.c[name])
+                return SqlColumn(self._searcher, self._alias.c[_present_column(spec.field)])
         try:
             spec = self._schema.field(name)
         except SchemaError:
@@ -1201,7 +1211,7 @@ class SqlVariable:
             codec = codec_named(spec.codec_name)
             return SqlColumn(
                 self._searcher,
-                self._alias.c[spec.field + codec.query_suffix],
+                self._alias.c[_bounded_identifier(spec.field, codec.query_suffix)],
                 variable=self,
                 spec=spec,
                 codec=codec,
@@ -1223,15 +1233,15 @@ class SqlVariable:
         assert spec.child is not None
         table = self._searcher._store._table(spec.child.table_name)
         alias = table.alias()
-        onclause = _bool_clause(alias.c[f"{self._schema.table_name}_sid"] == self._alias.c[SID_COLUMN])
+        onclause = _bool_clause(alias.c[_parent_sid_column(self._schema.table_name)] == self._alias.c[SID_COLUMN])
         self._joins.append((alias, onclause, None))
         self._searcher._grouped = True
         codec: ValueCodec | None = None
         if spec.target is not None:
-            column_name = f"{spec.field}_sid"
+            column_name = _bounded_identifier(spec.field, "_sid")
         elif spec.codec_name is not None:
             codec = codec_named(spec.codec_name)
-            column_name = spec.field + codec.query_suffix
+            column_name = _bounded_identifier(spec.field, codec.query_suffix)
         else:
             column_name = spec.child.element_columns[0].name
         return SqlColumn(
@@ -1449,7 +1459,9 @@ class SqlSearcher:
             if variable._spec is not None:
                 spec = variable._spec
                 if spec.role == "fixed_array":
-                    exact_element = variable._variable._alias.c[f"{spec.field}_exact"] if variable._variable else None
+                    exact_element = (
+                        variable._variable._alias.c[_exact_column(spec.field)] if variable._variable else None
+                    )
                     decoder = decode_fracvector_exact
                 elif spec.role == "encoded":
                     exact_element = (

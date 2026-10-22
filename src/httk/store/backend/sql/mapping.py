@@ -42,6 +42,10 @@ from httk.store.backend.schema import (
     LinkSpec,
     TableSchema,
     _bounded_identifier,
+    _index_column,
+    _parent_sid_column,
+    _present_column,
+    _sid_sequence_name,
     resolve_schema,
 )
 
@@ -138,12 +142,12 @@ def _stable_identifier(prefix: str, value: str) -> str:
 
 def entry_dispatch_table_name(family_name: str) -> str:
     """The deterministic reserved table name for one registered entry family."""
-    return _stable_identifier("_httk_entry_dispatch", family_name)
+    return _bounded_identifier(_stable_identifier("_httk_entry_dispatch", family_name))
 
 
 def backing_dispatch_column_name(backing_name: str) -> str:
     """The deterministic nullable foreign-key column for one backing in a dispatch table."""
-    return f"{_stable_identifier('backing', backing_name)}_sid"
+    return _bounded_identifier(_stable_identifier("backing", backing_name), "_sid")
 
 
 def dispatch_table_for(
@@ -285,7 +289,7 @@ def link_table_for(link: LinkSpec, metadata: sqlalchemy.MetaData, *, store_times
             sqlalchemy.Integer,
             # Bounded: PostgreSQL truncates an over-long sequence name, and for a
             # 63-character link table the truncation is the table's own name.
-            sqlalchemy.Sequence(_bounded_identifier(f"{name}_sid_seq")),
+            sqlalchemy.Sequence(_sid_sequence_name(name)),
             primary_key=True,
             autoincrement=True,
         ),
@@ -362,7 +366,7 @@ def _build_parent_table(
         sqlalchemy.Column(
             SID_COLUMN,
             sqlalchemy.Integer,
-            sqlalchemy.Sequence(f"{name}_sid_seq"),
+            sqlalchemy.Sequence(_sid_sequence_name(name)),
             primary_key=True,
             autoincrement=True,
         )
@@ -400,7 +404,7 @@ def _build_parent_table(
     for spec in schema.fields:
         if spec.role == "child":
             if spec.optional:
-                items.append(sqlalchemy.Column(f"{spec.field}_present", sqlalchemy.Boolean, nullable=False))
+                items.append(sqlalchemy.Column(_present_column(spec.field), sqlalchemy.Boolean, nullable=False))
             continue
         for column_spec in spec.columns:
             items.append(_column(column_spec))
@@ -418,7 +422,7 @@ def _build_child_table(
     existing = metadata.tables.get(child.table_name)
     if existing is not None:
         return existing
-    parent_sid = f"{schema.table_name}_sid"
+    parent_sid = _parent_sid_column(schema.table_name)
     items: list[Any] = [
         sqlalchemy.Column(
             parent_sid,
@@ -426,7 +430,7 @@ def _build_child_table(
             nullable=False,
         ),
         sqlalchemy.Index(_index_name("ix", child.table_name, (parent_sid,)), parent_sid),
-        sqlalchemy.Column(f"{spec.field}_index", sqlalchemy.Integer, nullable=False),
+        sqlalchemy.Column(_index_column(spec.field), sqlalchemy.Integer, nullable=False),
     ]
     for column_spec in child.element_columns:
         items.append(_column(column_spec))

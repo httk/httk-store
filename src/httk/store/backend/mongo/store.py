@@ -29,7 +29,13 @@ from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
 from httk.store.backend.codecs import codec_named, decode_fracvector_exact
-from httk.store.backend.schema import LinkSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    LinkSpec,
+    SchemaError,
+    TableSchema,
+    _exact_column,
+    resolve_schema,
+)
 from httk.store.storage_layout import (
     ADDITIVE_DECLARATION_UPGRADE_HINT,
     ADDITIVE_UPGRADE_HINT,
@@ -3326,7 +3332,7 @@ class MongoStore:
             if spec.shape is not None:
                 return FracVector(
                     [
-                        decode_fracvector_exact(item[f"{spec.field}_exact"], 1, spec.shape.cols).to_fractions()[0]
+                        decode_fracvector_exact(item[_exact_column(spec.field)], 1, spec.shape.cols).to_fractions()[0]
                         for item in entries
                     ]
                 )
@@ -3349,7 +3355,7 @@ class MongoStore:
             parts = tuple(embedded.get(column.name) for column in spec.columns)
             return None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
         if spec.role == "fixed_array":
-            exact = embedded.get(f"{spec.field}_exact")
+            exact = embedded.get(_exact_column(spec.field))
             return None if exact is None else decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols)
         return embedded.get(spec.columns[0].name)
 

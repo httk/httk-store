@@ -25,7 +25,13 @@ import sqlalchemy
 from httk.core import ALTERNATIVE_KIND_PATTERN
 from httk.core.storage import StrongLink
 
-from httk.store.backend.schema import FieldSpec, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    TableSchema,
+    _index_column,
+    _parent_sid_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import ALT_KIND_COLUMN, LOGICAL_ID_COLUMN, SID_COLUMN
 from httk.store.backend.sql.store import SqlStore, _served_definition
 from httk.store.entry_providers import strong_link_markers
@@ -111,7 +117,7 @@ def _edge_columns(store: SqlStore, parent_table: str, spec: FieldSpec) -> tuple[
     """Return ``(child parent-sid column, edge table, child edge-fk column)`` for a strong field."""
     assert spec.child is not None and spec.target is not None
     child_table = store._table(spec.child.table_name)
-    parent_column = child_table.c[f"{parent_table}_sid"]
+    parent_column = child_table.c[_parent_sid_column(parent_table)]
     fk_column = child_table.c[spec.child.element_columns[0].name]
     edge_table = store._table(resolve_schema(spec.target).table_name)
     return parent_column, edge_table, fk_column
@@ -156,7 +162,7 @@ def forward_run_edges(
             )
             .select_from(child_table.join(edge_table, fk_column == edge_table.c[SID_COLUMN]))
             .where(parent_column.in_(list(run_sids)))
-            .order_by(parent_column, child_table.c[f"{field_name}_index"])
+            .order_by(parent_column, child_table.c[_index_column(field_name)])
         )
         for parent_sid, entry_type, raw, public, label in connection.execute(statement):
             rows.append((int(parent_sid), str(entry_type), str(raw), str(public), str(label), marker))
@@ -415,7 +421,7 @@ def reverse_run_edges(
         spec = family.schema.field(field_name)
         parent_column, edge_table, fk_column = _edge_columns(store, family.schema.table_name, spec)
         child_table = store._table(spec.child.table_name)  # type: ignore[union-attr]
-        index_column = child_table.c[f"{field_name}_index"]
+        index_column = child_table.c[_index_column(field_name)]
         statement = (
             sqlalchemy.select(edge_table.c["entry_id"], edge_table.c["label"], parent_column, index_column)
             .select_from(edge_table.join(child_table, fk_column == edge_table.c[SID_COLUMN]))

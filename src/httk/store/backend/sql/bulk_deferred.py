@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import sqlalchemy
 
-from httk.store.backend.schema import resolve_schema
+from httk.store.backend.schema import (
+    _bounded_identifier,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import (
     ALT_ID_COLUMN,
     ALT_KIND_COLUMN,
@@ -122,7 +125,7 @@ class DeferredFinalizer:
         return '"' + name.replace('"', '""') + '"'
 
     def _temp_name(self, kind: str, table: str) -> str:
-        return f"_httk_deferred_{kind}_{table}"
+        return _bounded_identifier(f"_httk_deferred_{kind}_{table}")
 
     def _create_view(self, name: str, query: str) -> None:
         if self.connection.dialect.name == "clickhousedb":
@@ -149,7 +152,7 @@ class DeferredFinalizer:
         if not self.store.backend_facts.supports_adhoc_indexes:
             return
         suffix = "_".join(columns)
-        index = f"{name}_{suffix}_idx"
+        index = _bounded_identifier(f"{name}_{suffix}", "_idx")
         unique_sql = "UNIQUE " if unique else ""
         self.connection.execute(
             sqlalchemy.text(

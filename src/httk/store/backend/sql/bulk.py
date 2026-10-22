@@ -107,7 +107,13 @@ from httk.core.storage import (
     resolve_storage_record,
 )
 
-from httk.store.backend.schema import FieldSpec, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    TableSchema,
+    _bounded_identifier,
+    _parent_sid_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.graph import LogicalEdgeGraph
 from httk.store.backend.sql.layout import METADATA_TABLE_NAME, actual_schema_objects, backend_facts_for_dialect
 from httk.store.backend.sql.mapping import (
@@ -2409,7 +2415,7 @@ class BulkIngest:
     def _create_stage(self, table: sqlalchemy.Table, rows: list[dict[str, Any]]) -> sqlalchemy.Table:
         """Create an index-less ``bulkstage_<table>`` clone and load ``rows`` into it."""
         assert self._connection is not None
-        stage_name = f"bulkstage_{table.name}"
+        stage_name = _bounded_identifier(f"bulkstage_{table.name}")
         stage = sqlalchemy.Table(
             stage_name,
             sqlalchemy.MetaData(),
@@ -2435,7 +2441,7 @@ class BulkIngest:
         rows = self._rows.get(name)
         if rows is not None:
             rows[:] = [row for row in rows if row[SID_COLUMN] not in hit_sids]
-        parent_column = f"{name}_sid"
+        parent_column = _parent_sid_column(name)
         for spec in schema.fields:
             if spec.role != "child":
                 continue
@@ -2484,7 +2490,7 @@ class BulkIngest:
         for parent_name, schema in self._parent_schema.items():
             for spec in schema.fields:
                 if spec.role == "child" and spec.child is not None:
-                    child_of[spec.child.table_name] = (parent_name, f"{parent_name}_sid")
+                    child_of[spec.child.table_name] = (parent_name, _parent_sid_column(parent_name))
 
         parent_by_key: dict[tuple[str, int], dict[str, Any]] = {}
         for name, rows in self._rows.items():

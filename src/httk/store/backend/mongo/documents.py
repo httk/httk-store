@@ -15,7 +15,12 @@ from httk.store.backend.codecs import (
     encode_fracvector_exact,
     encode_fracvector_floats,
 )
-from httk.store.backend.schema import FieldSpec, TableSchema
+from httk.store.backend.schema import (
+    FieldSpec,
+    TableSchema,
+    _bounded_identifier,
+    _exact_column,
+)
 
 from .mapping import document_fields_for
 
@@ -116,7 +121,7 @@ def encode_record(
                                 (key for key in plan.element_keys if not key.endswith("_exact")), parts, strict=True
                             )
                         }
-                        | {f"{spec.field}_exact": encode_fracvector_exact(row)}
+                        | {_exact_column(spec.field): encode_fracvector_exact(row)}
                     )
             else:
                 codec = codec_named(spec.codec_name) if spec.codec_name is not None else None
@@ -155,9 +160,12 @@ def encode_record(
             assert spec.shape is not None
             tensor = _as_fixed_tensor(schema, spec, spec.shape, value)
             result.update(
-                {f"{spec.field}_{index}": part for index, part in enumerate(encode_fracvector_floats(tensor))}
+                {
+                    _bounded_identifier(spec.field, f"_{index}"): part
+                    for index, part in enumerate(encode_fracvector_floats(tensor))
+                }
             )
-            result[f"{spec.field}_exact"] = encode_fracvector_exact(tensor)
+            result[_exact_column(spec.field)] = encode_fracvector_exact(tensor)
         else:
             assert spec.target is not None
             result[plan.keys[0]] = _resolve_reference(
@@ -172,7 +180,7 @@ def _decode_child(spec: FieldSpec, value: Any, resolve_reference: Callable[[type
     assert spec.child is not None
     if spec.shape is not None:
         rows = [
-            decode_fracvector_exact(element[f"{spec.field}_exact"], 1, spec.shape.cols).to_fractions()[0]
+            decode_fracvector_exact(element[_exact_column(spec.field)], 1, spec.shape.cols).to_fractions()[0]
             for element in value
         ]
         return FracVector(rows)
@@ -226,7 +234,7 @@ def decode_record(
             )
         elif spec.role == "fixed_array":
             assert spec.shape is not None
-            exact = embedded.get(f"{spec.field}_exact")
+            exact = embedded.get(_exact_column(spec.field))
             values[spec.field] = (
                 None if exact is None else decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols)
             )

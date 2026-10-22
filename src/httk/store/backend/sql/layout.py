@@ -7,9 +7,16 @@ from typing import Final, Literal
 
 import sqlalchemy
 
-from httk.store.backend.schema import TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    TableSchema,
+    _index_column,
+    _parent_sid_column,
+    _present_column,
+    _sid_sequence_name,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import (
-    _MAX_IDENTIFIER_LENGTH,
+    backing_dispatch_column_name,
     dispatch_table_for,
     entry_dispatch_table_name,
     identity_owner_tables,
@@ -395,54 +402,34 @@ def read_store_metadata(connection: sqlalchemy.Connection) -> Mapping[str, str] 
     return MappingProxyType(result)
 
 
-class _TruncatedNames:
-    """Reject distinct identifiers that PostgreSQL would truncate to the same 63 bytes.
+class _UniqueNames:
+    """Reject two distinct sources whose physical names are the same identifier.
 
-    Generated table and column names are not shortened (that would move
-    existing physical layouts), except weak-link tables and their sequences,
-    which are hash-shortened to 63 characters at resolution; a layout whose
-    other long names collide only after PostgreSQL's silent truncation is
-    refused on every dialect instead.
+    Every derived name is hash-shortened to 63 characters at resolution, so no
+    dialect rejects or truncates it; what remains possible is an exact
+    collision: a hash collision, or a declared name equal to another's
+    shortened form.
     """
 
     def __init__(self, what: str) -> None:
         self._what = what
-        self._seen: dict[bytes, str] = {}
+        self._seen: dict[str, str] = {}
 
-    def add(self, name: str) -> None:
-        other = self._seen.setdefault(name.encode("utf-8")[:_MAX_IDENTIFIER_LENGTH], name)
-        if other != name:
-            raise ValueError(
-                f"{self._what} {other!r} and {name!r} collide after PostgreSQL's "
-                f"{_MAX_IDENTIFIER_LENGTH}-byte identifier truncation"
-            )
+    def add(self, name: str, source: str) -> None:
+        other = self._seen.setdefault(name, source)
+        if other != source:
+            raise ValueError(f"{self._what}: {other} and {source} both map to the identifier {name!r}")
 
 
 def _validate_physical_names(layout: StorageLayout) -> None:
     owners: dict[str, type] = {}
-    tables = _TruncatedNames("table names")
+    tables = _UniqueNames("table names")
 
     def check(schema: TableSchema) -> None:
         record = schema.cls
+        label = f"{record.__module__}.{record.__qualname__}"
         names = [schema.table_name]
         names.extend(spec.child.table_name for spec in schema.fields if spec.child is not None)
-        parent_columns = _TruncatedNames(f"columns of table {schema.table_name!r}:")
-        for spec in schema.fields:
-            if spec.child is not None:
-                child_columns = _TruncatedNames(f"columns of table {spec.child.table_name!r}:")
-                for column in (
-                    f"{schema.table_name}_sid",
-                    f"{spec.field}_index",
-                    *(c.name for c in spec.child.element_columns),
-                ):
-                    child_columns.add(column)
-                if spec.optional:
-                    parent_columns.add(f"{spec.field}_present")
-            else:
-                for column_spec in spec.columns:
-                    parent_columns.add(column_spec.name)
-        for name in (*names, *(link.table_name for link in schema.links)):
-            tables.add(name)
         for name in names:
             if name.startswith(_RESERVED_PREFIX):
                 raise ValueError(f"record {record.__name__} claims reserved SqlStore table name {name!r}")
@@ -452,6 +439,26 @@ def _validate_physical_names(layout: StorageLayout) -> None:
                     f"records {previous.__name__} and {record.__name__} collide on physical table name {name!r}"
                 )
             owners[name] = record
+        tables.add(schema.table_name, f"record {label}")
+        # PostgreSQL tables, sequences and indexes share one namespace.
+        tables.add(_sid_sequence_name(schema.table_name), f"the sid sequence of record {label}")
+        parent_columns = _UniqueNames(f"columns of table {schema.table_name!r}")
+        for spec in schema.fields:
+            if spec.child is not None:
+                tables.add(spec.child.table_name, f"child table of {label}.{spec.field}")
+                child_columns = _UniqueNames(f"columns of table {spec.child.table_name!r}")
+                child_columns.add(_parent_sid_column(schema.table_name), "the parent sid column")
+                child_columns.add(_index_column(spec.field), "the index column")
+                for position, column in enumerate(spec.child.element_columns):
+                    child_columns.add(column.name, f"{label}.{spec.field} element column {position}")
+                if spec.optional:
+                    parent_columns.add(_present_column(spec.field), f"the presence column of {label}.{spec.field}")
+            else:
+                for position, column_spec in enumerate(spec.columns):
+                    parent_columns.add(column_spec.name, f"{label}.{spec.field} column {position}")
+        for link in schema.links:
+            tables.add(link.table_name, f"weak link {label}.{link.name}")
+            tables.add(_sid_sequence_name(link.table_name), f"the sid sequence of weak link {label}.{link.name}")
 
     _walk_closure(layout, check)
     for family in layout.families:
@@ -462,4 +469,9 @@ def _validate_physical_names(layout: StorageLayout) -> None:
                     f"entry family {family.name!r} dispatch table collides with record table {dispatch_name!r}"
                 )
             owners[dispatch_name] = family.family
-            tables.add(dispatch_name)
+            tables.add(dispatch_name, f"the dispatch table of entry family {family.name!r}")
+            dispatch_columns = _UniqueNames(f"columns of table {dispatch_name!r}")
+            for record_name in family.record_names:
+                dispatch_columns.add(
+                    backing_dispatch_column_name(record_name), f"the dispatch column of {record_name!r}"
+                )

@@ -44,7 +44,17 @@ from sqlalchemy.sql.selectable import Exists, ScalarSelect
 from sqlalchemy.sql.visitors import replacement_traverse
 
 from httk.store.backend.codecs import ValueCodec, codec_named
-from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    SchemaError,
+    TableSchema,
+    _bounded_identifier,
+    _exact_column,
+    _index_column,
+    _parent_sid_column,
+    _present_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import (
     ALT_KIND_COLUMN,
     LOGICAL_ID_COLUMN,
@@ -234,7 +244,8 @@ class _SqlScope:
             return self.context._child_scalar_value(self, self.scalar_child)
         for spec in self.schema.fields:
             if spec.role == "child" and spec.optional and name == f"{spec.field}_present":
-                return self.context._scoped_scalar(self, _SqlValue(self.alias.c[name], scope=self))
+                column = self.alias.c[_present_column(spec.field)]
+                return self.context._scoped_scalar(self, _SqlValue(column, scope=self))
         try:
             spec = self.schema.field(name)
         except SchemaError as error:
@@ -247,11 +258,11 @@ class _SqlScope:
         if spec.role == "encoded":
             assert spec.codec_name is not None
             codec = codec_named(spec.codec_name)
-            exact = self.alias.c.get(f"{spec.field}_exact") if spec.codec_name in _EXACT_CODEC_NAMES else None
+            exact = self.alias.c.get(_exact_column(spec.field)) if spec.codec_name in _EXACT_CODEC_NAMES else None
             return self.context._scoped_scalar(
                 self,
                 _SqlValue(
-                    self.alias.c[spec.field + codec.query_suffix],
+                    self.alias.c[_bounded_identifier(spec.field, codec.query_suffix)],
                     exact_element=exact,
                     codec=codec,
                     scope=self,
@@ -436,7 +447,7 @@ class _SqlQueryContext:
         fresh = [self._related_scope(parent, spec) for _parent, spec in origins]
         # The element link alias (holding the index) follows the parent's aliases in both child forms.
         positions = [
-            item.froms[len(parent.froms)].c[f"{spec.field}_index"]
+            item.froms[len(parent.froms)].c[_index_column(spec.field)]
             for item, (_parent, spec) in zip(fresh, origins, strict=True)
         ]
         froms: list[sqlalchemy.FromClause] = []
@@ -582,11 +593,11 @@ class _SqlQueryContext:
                 f"{parent.schema.cls.__name__}.{spec.field} is {spec.role!r}, not a reference or child scope"
             )
         alias = self._searcher._store._table(spec.child.table_name).alias()
-        condition = _bool_clause(alias.c[f"{parent.schema.table_name}_sid"] == parent.alias.c[SID_COLUMN])
+        condition = _bool_clause(alias.c[_parent_sid_column(parent.schema.table_name)] == parent.alias.c[SID_COLUMN])
         if spec.target is not None:
             schema = resolve_schema(spec.target)
             target = self._searcher._store._table(schema.table_name).alias()
-            target_condition = _bool_clause(alias.c[f"{spec.field}_sid"] == target.c[SID_COLUMN])
+            target_condition = _bool_clause(alias.c[_bounded_identifier(spec.field, "_sid")] == target.c[SID_COLUMN])
             # Keep aliases separately selectable so a nested scope can
             # correlate the parent aliases out of its inner SELECT. Every
             # local alias remains linked by an explicit predicate below.
@@ -623,9 +634,9 @@ class _SqlQueryContext:
                 correlation_depth=scope.correlation_depth,
             )
         codec = codec_named(spec.codec_name)
-        exact = scope.alias.c.get(f"{spec.field}_exact") if spec.codec_name in _EXACT_CODEC_NAMES else None
+        exact = scope.alias.c.get(_exact_column(spec.field)) if spec.codec_name in _EXACT_CODEC_NAMES else None
         return _SqlValue(
-            scope.alias.c[spec.field + codec.query_suffix],
+            scope.alias.c[_bounded_identifier(spec.field, codec.query_suffix)],
             exact_element=exact,
             codec=codec,
             scope=scope,
@@ -1536,7 +1547,7 @@ def _edge_source(store: SqlStore, family: StrongLinkFamily, field_name: str) -> 
         store._table(family.schema.table_name),
         store._table(spec.child.table_name),
         store._table(resolve_schema(spec.target).table_name),
-        f"{family.schema.table_name}_sid",
+        _parent_sid_column(family.schema.table_name),
         spec.child.element_columns[0].name,
     )
 

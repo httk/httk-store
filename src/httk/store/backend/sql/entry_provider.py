@@ -63,7 +63,14 @@ from httk.core import (
 )
 
 from httk.store.backend.codecs import codec_named
-from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    SchemaError,
+    TableSchema,
+    _index_column,
+    _parent_sid_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import (
     LOGICAL_ID_COLUMN,
     RETRACTED_COLUMN,
@@ -450,10 +457,10 @@ class StoreEntryProvider(EntryProvider):
             for spec, related in child_specs:
                 assert spec.child is not None and spec.target is not None
                 child_table = store._table(spec.child.table_name)
-                parent_column = child_table.c[f"{schema.table_name}_sid"]
+                parent_column = child_table.c[_parent_sid_column(schema.table_name)]
                 element_column = child_table.c[spec.child.element_columns[0].name]
                 statement = sqlalchemy.select(parent_column, element_column).order_by(
-                    parent_column, child_table.c[f"{spec.field}_index"]
+                    parent_column, child_table.c[_index_column(spec.field)]
                 )
                 marker = spec.related
                 for parent_sid, element_sid in connection.execute(statement):

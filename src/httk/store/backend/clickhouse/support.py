@@ -25,6 +25,7 @@ from sqlalchemy.sql.elements import BinaryExpression, ColumnElement
 from sqlalchemy.sql.functions import Function
 from sqlalchemy.sql.selectable import Select
 
+from httk.store.backend.schema import _bounded_identifier
 from httk.store.query import UnsupportedQueryError
 
 _MIN_SERVER_VERSION = (26, 7)
@@ -331,7 +332,7 @@ def load_parquet_stages(store: Any, manifests: list[Any]) -> dict[str, str]:
         for table, paths in manifest.shards.items():
             if isinstance(paths, list):
                 files.setdefault(table, []).extend(str(path) for path in paths)
-    stage_names = {table: f"_httk_stage_{table}" for table in files}
+    stage_names = {table: _bounded_identifier(f"_httk_stage_{table}") for table in files}
     engine = store._database.engine
     with engine.begin() as connection:
         for table, stage_name in stage_names.items():
@@ -411,7 +412,7 @@ def swap_finalizer_map(finalizer: Any, table: str, candidate: str) -> None:
     continues to address the current map.
     """
     old = finalizer.maps[table]
-    retired = f"{old}_retired"
+    retired = _bounded_identifier(old, "_retired")
     connection = finalizer.connection
     old_count = int(connection.execute(sqlalchemy.text(f"SELECT count(*) FROM {_q(old)}")).scalar_one())
     new_count = int(connection.execute(sqlalchemy.text(f"SELECT count(*) FROM {_q(candidate)}")).scalar_one())

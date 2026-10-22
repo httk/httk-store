@@ -74,7 +74,18 @@ from httk.store.backend.codecs import (
     encode_fracvector_exact,
     encode_fracvector_floats,
 )
-from httk.store.backend.schema import FieldSpec, LinkSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    LinkSpec,
+    SchemaError,
+    TableSchema,
+    _bounded_identifier,
+    _exact_column,
+    _index_column,
+    _parent_sid_column,
+    _present_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.engine import Backend, connection_uses_autocommit
 from httk.store.backend.sql.fsck import dispatch_derivation
 from httk.store.backend.sql.graph import LogicalEdgeGraph
@@ -4897,7 +4908,7 @@ class SqlStore:
         for spec in specs:
             if spec.role == "child":
                 if spec.optional:
-                    name = f"{spec.field}_present"
+                    name = _present_column(spec.field)
                     if name not in seen:
                         columns.append(table.c[name])
                         seen.add(name)
@@ -4930,13 +4941,13 @@ class SqlStore:
         cached = projection.metadata_children.get(key, _MISSING_METADATA)
         if cached is not _MISSING_METADATA:
             return cached
-        if spec.optional and not parent_row[f"{spec.field}_present"]:
+        if spec.optional and not parent_row[_present_column(spec.field)]:
             projection.metadata_children[key] = None
             return None
         assert spec.child is not None
         table = self._table(spec.child.table_name)
-        parent_column = f"{schema.table_name}_sid"
-        index_column = f"{spec.field}_index"
+        parent_column = _parent_sid_column(schema.table_name)
+        index_column = _index_column(spec.field)
         columns = tuple(table.c[column.name] for column in spec.child.element_columns)
         rows = connection.execute(
             sqlalchemy.select(*columns).where(table.c[parent_column] == sid).order_by(table.c[index_column])
@@ -4970,7 +4981,7 @@ class SqlStore:
             return int(row[spec.child.element_columns[0].name])
         if spec.shape is not None:
             assert spec.shape is not None
-            return decode_fracvector_exact(row[f"{spec.field}_exact"], 1, spec.shape.cols).to_fractions()[0]
+            return decode_fracvector_exact(row[_exact_column(spec.field)], 1, spec.shape.cols).to_fractions()[0]
         if spec.codec_name is not None:
             parts = tuple(row[column.name] for column in spec.child.element_columns)
             if spec.child.element_columns[0].nullable and all(part is None for part in parts):
@@ -5102,7 +5113,9 @@ class SqlStore:
                 if spec.role == "child":
                     assert spec.child is not None
                     table = self._table(spec.child.table_name)
-                    connection.execute(sqlalchemy.delete(table).where(table.c[f"{schema.table_name}_sid"] == sid))
+                    connection.execute(
+                        sqlalchemy.delete(table).where(table.c[_parent_sid_column(schema.table_name)] == sid)
+                    )
             table = self._table(schema.table_name)
             connection.execute(sqlalchemy.delete(table).where(table.c[SID_COLUMN] == sid))
             self._release_unused_identity_claims(connection, table.name)
@@ -5221,7 +5234,7 @@ def _encode_parent_row(
     for spec in schema.fields:
         if spec.role == "child":
             if spec.optional:
-                values[f"{spec.field}_present"] = (
+                values[_present_column(spec.field)] = (
                     SqlStore._projected_value(schema.cls, source, projected, spec) is not None
                 )
             continue
@@ -5240,8 +5253,8 @@ def _encode_parent_row(
             assert spec.shape is not None
             tensor = _as_fixed_tensor(schema, spec, spec.shape, value)
             for i, part in enumerate(encode_fracvector_floats(tensor)):
-                values[f"{spec.field}_{i}"] = part
-            values[f"{spec.field}_exact"] = encode_fracvector_exact(tensor)
+                values[_bounded_identifier(spec.field, f"_{i}")] = part
+            values[_exact_column(spec.field)] = encode_fracvector_exact(tensor)
         else:  # reference
             assert spec.target is not None
             values[spec.columns[0].name] = resolve_sid(spec.target, value, _field_path(path, spec.field))
@@ -5272,15 +5285,15 @@ def _encode_child_rows(
     :return: The encoded child-table rows in element order.
     """
     assert spec.child is not None
-    parent_column = f"{schema.table_name}_sid"
-    index_column = f"{spec.field}_index"
+    parent_column = _parent_sid_column(schema.table_name)
+    index_column = _index_column(spec.field)
     rows: list[dict[str, Any]] = []
     if spec.shape is not None:
         for position, row_tensor in enumerate(_tensor_rows(schema, spec, spec.shape, value)):
             row: dict[str, Any] = {parent_column: sid, index_column: position}
             for i, part in enumerate(encode_fracvector_floats(row_tensor)):
-                row[f"{spec.field}_{i}"] = part
-            row[f"{spec.field}_exact"] = encode_fracvector_exact(row_tensor)
+                row[_bounded_identifier(spec.field, f"_{i}")] = part
+            row[_exact_column(spec.field)] = encode_fracvector_exact(row_tensor)
             rows.append(row)
     else:
         codec = codec_named(spec.codec_name) if spec.codec_name is not None else None

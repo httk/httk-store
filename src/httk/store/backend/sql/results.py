@@ -10,7 +10,11 @@ from typing import Any, Final, Literal, cast
 import sqlalchemy
 from httk.core import FracScalar, FracVector
 
-from httk.store.backend.schema import FieldSpec, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    _bounded_identifier,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import SID_COLUMN
 from httk.store.backend.sql.rows import RowHydrator
 from httk.store.backend.sql.searcher import SqlSearcher, _Output
@@ -409,7 +413,7 @@ class SqlResultSet:
         for codec_index, (suffix, _kind) in enumerate(output.codec.columns):
             if codec_index == query_index:
                 continue
-            parts[codec_index] = extra_by_name[output.spec.field + suffix]
+            parts[codec_index] = extra_by_name[_bounded_identifier(output.spec.field, suffix)]
         return None if all(part is None for part in parts) else output.codec.decode(tuple(parts))
 
     def _float_at(self, position: int, index: int) -> Any:

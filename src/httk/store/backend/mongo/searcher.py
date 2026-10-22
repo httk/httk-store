@@ -19,6 +19,7 @@ from httk.store.backend.schema import (
     LinkSpec,
     SchemaError,
     TableSchema,
+    _bounded_identifier,
     resolve_schema,
 )
 from httk.store.query import Slicer, UnsupportedQueryError
@@ -366,7 +367,9 @@ def _child_value_key(field: "MongoField") -> str:
     assert field._child_keys
     if field._codec is None:
         return field._child_keys[0]
-    return next(key for key in field._child_keys if key == field._spec.field + field._codec.query_suffix)
+    return next(
+        key for key in field._child_keys if key == _bounded_identifier(field._spec.field, field._codec.query_suffix)
+    )
 
 
 def _render_child_predicate(field: "MongoField", predicate: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -998,7 +1001,9 @@ class MongoLinkField:
             assert spec.codec_name is not None
             codec = codec_named(spec.codec_name)
             self._codec = codec
-            query_column = next(column for column in spec.columns if column.name == spec.field + codec.query_suffix)
+            query_column = next(
+                column for column in spec.columns if column.name == _bounded_identifier(spec.field, codec.query_suffix)
+            )
             self._value_key = f"_httk_target.f.{query_column.name}"
 
     def _encode(self, value: Any) -> Any:
@@ -1139,7 +1144,9 @@ class MongoVariable:
         if spec.role == "encoded":
             assert spec.codec_name is not None
             codec = codec_named(spec.codec_name)
-            query_column = next(column for column in spec.columns if column.name == spec.field + codec.query_suffix)
+            query_column = next(
+                column for column in spec.columns if column.name == _bounded_identifier(spec.field, codec.query_suffix)
+            )
             return MongoField(self, f"f.{query_column.name}", spec, codec)
         if spec.role == "reference":
             reference = self._references.get(spec.field)
@@ -1741,5 +1748,5 @@ def _scalar_value(document: dict[str, Any], field: MongoField) -> Any:
             None if value is None else (value if not field._presentation_prefix else field._presentation_prefix + value)
         )
     assert field._codec is not None
-    parts = [embedded.get(spec.field + suffix) for suffix, _kind in field._codec.columns]
+    parts = [embedded.get(_bounded_identifier(spec.field, suffix)) for suffix, _kind in field._codec.columns]
     return None if all(part is None for part in parts) else field._codec.decode(tuple(parts))

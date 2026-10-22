@@ -62,7 +62,11 @@ import sqlalchemy
 from httk.core.entry_ids import check_entry_id, check_immutable_id
 from httk.core.storage import StorageProjectionCycleError, resolve_storage_record
 
-from httk.store.backend.schema import TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    TableSchema,
+    _bounded_identifier,
+    resolve_schema,
+)
 from httk.store.backend.sql.layout import actual_table_names
 from httk.store.backend.sql.mapping import (
     ALT_ID_COLUMN,
@@ -436,7 +440,7 @@ class _DuckdbStageWriter:
             with engine.begin() as connection:
                 for table_name, (_writer, _file, columns) in self._csv.items():
                     source = self._store._table(table_name)
-                    raw = f"_httk_stage_raw_{table_name}"
+                    raw = _bounded_identifier(f"_httk_stage_raw_{table_name}")
                     raw_columns = ", ".join(
                         f'"v{index}" VARCHAR, "n{index}" BOOLEAN' for index, _name in enumerate(columns)
                     )

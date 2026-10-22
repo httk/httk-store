@@ -11,7 +11,11 @@ import dataclasses
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
-from httk.store.backend.schema import TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    TableSchema,
+    _parent_sid_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import backing_dispatch_column_name, entry_dispatch_table_name
 
 __all__ = ["EdgeKind", "LogicalEdge", "LogicalEdgeGraph"]
@@ -72,7 +76,7 @@ class LogicalEdgeGraph:
                 if spec.child is None:
                     continue
                 child = spec.child.table_name
-                parent_column = f"{parent}_sid"
+                parent_column = _parent_sid_column(parent)
                 tables.add(child)
                 edges.add(LogicalEdge("ownership", parent, child, target_column=parent_column))
                 if spec.target is not None:

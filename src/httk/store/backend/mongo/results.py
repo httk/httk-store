@@ -5,7 +5,10 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
-from httk.store.backend.schema import resolve_schema
+from httk.store.backend.schema import (
+    _bounded_identifier,
+    resolve_schema,
+)
 from httk.store.query import (
     ContinuationToken,
     MultipleResultsError,
@@ -58,7 +61,7 @@ def _anchor_python_type(field: MongoField) -> type | None:
     :return: The column's Python type, or ``None`` when it cannot be determined.
     """
     spec = field._spec
-    name = spec.field + field._codec.query_suffix if field._codec is not None else spec.field
+    name = _bounded_identifier(spec.field, field._codec.query_suffix) if field._codec is not None else spec.field
     for column in spec.columns:
         if column.name == name:
             return _KIND_PYTHON_TYPES.get(column.kind)

@@ -57,6 +57,11 @@ The store layer additionally manages a ``sid`` integer primary key and a
 ``<name>_index`` columns on child tables); those never appear in
 :attr:`TableSchema.fields`, and declaring a field named ``sid`` or
 ``content_id`` is an error.
+
+Every derived physical name (table, child table, column, sequence) longer
+than 63 characters is hash-shortened, keeping any bookkeeping suffix such as
+``_sid``; names of 63 characters or less are used verbatim. A stored field
+name itself longer than 63 characters is rejected.
 """
 
 import collections.abc
@@ -101,20 +106,58 @@ _MAX_IDENTIFIER_LENGTH: Final = 63
 """The portable identifier length limit (PostgreSQL ``NAMEDATALEN - 1``; DuckDB via SQLAlchemy)."""
 
 
-def _bounded_identifier(name: str) -> str:
-    """Return ``name`` unchanged when it fits the portable identifier limit, else a deterministic shortening.
+def _bounded_identifier(name: str, suffix: str = "") -> str:
+    """Return ``name + suffix`` unchanged when it fits in 63 UTF-8 bytes, else a deterministic shortening.
 
-    An over-long name is truncated and suffixed with the first 8 hex digits of
-    the SHA-256 of the full name, so distinct long names sharing a prefix stay
-    distinct.
+    An over-long name is truncated and given an ``_`` plus the first 8 hex
+    digits of the SHA-256 of the full name, before ``suffix``, so distinct long
+    names sharing a prefix stay distinct and the suffix stays recognizable.
+    Every derived physical identifier passes through here (directly or via the
+    helpers below); never compose one with an f-string at a use site.
 
-    :param name: The composed identifier.
-    :return: An identifier of at most ``_MAX_IDENTIFIER_LENGTH`` characters.
+    :param name: The identifier body.
+    :param suffix: A bookkeeping suffix kept verbatim at the end (e.g. ``"_sid"``).
+    :return: An identifier of at most ``_MAX_IDENTIFIER_LENGTH`` UTF-8 bytes.
     """
-    if len(name) <= _MAX_IDENTIFIER_LENGTH:
-        return name
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
-    return f"{name[: _MAX_IDENTIFIER_LENGTH - 9]}_{digest}"
+    full = f"{name}{suffix}"
+    encoded = full.encode("utf-8")
+    if len(encoded) <= _MAX_IDENTIFIER_LENGTH:
+        return full
+    digest = hashlib.sha256(encoded).hexdigest()[:8]
+    budget = _MAX_IDENTIFIER_LENGTH - 9 - len(suffix.encode("utf-8"))
+    # Cut on a UTF-8 character boundary: a split trailing character is dropped.
+    body = encoded[:budget].decode("utf-8", "ignore")
+    return f"{body}_{digest}{suffix}"
+
+
+def _child_table_name(table_name: str, field: str) -> str:
+    """Return the child table name of ``field`` on ``table_name``."""
+    return _bounded_identifier(f"{table_name}_{field}")
+
+
+def _parent_sid_column(table_name: str) -> str:
+    """Return a child table's foreign-key column to its parent table ``table_name``."""
+    return _bounded_identifier(table_name, "_sid")
+
+
+def _index_column(field: str) -> str:
+    """Return a child table's element-position column for ``field``."""
+    return _bounded_identifier(field, "_index")
+
+
+def _present_column(field: str) -> str:
+    """Return the parent's presence column of the optional child ``field``."""
+    return _bounded_identifier(field, "_present")
+
+
+def _exact_column(field: str) -> str:
+    """Return the exact-text column of ``field``."""
+    return _bounded_identifier(field, "_exact")
+
+
+def _sid_sequence_name(table_name: str) -> str:
+    """Return the ``sid`` sequence name of ``table_name``."""
+    return _bounded_identifier(table_name, "_sid_seq")
 
 
 type FieldRole = Literal["scalar", "encoded", "fixed_array", "child", "reference"]
@@ -434,7 +477,7 @@ def _build_schema(cls: type, override: StorageInfo | None) -> TableSchema:
     info = override if override is not None else getattr(cls, STORAGE_INFO_ATTRIBUTE, None)
     if info is None:
         info = StorageInfo()
-    table_name = info.storage_name if info.storage_name is not None else snake_case(cls.__name__)
+    table_name = _bounded_identifier(info.storage_name if info.storage_name is not None else snake_case(cls.__name__))
 
     hints = typing.get_type_hints(cls, include_extras=True)
     specs: list[FieldSpec] = []
@@ -459,7 +502,7 @@ def _build_schema(cls: type, override: StorageInfo | None) -> TableSchema:
     declared_names = {field.name for field in dataclasses.fields(cls)}
     declared_names.update(name for name, _prop in _stored_properties(cls))
     for spec in specs:
-        if spec.role == "child" and spec.optional and f"{spec.field}_present" in declared_names:
+        if spec.role == "child" and spec.optional and _present_column(spec.field) in declared_names:
             raise SchemaError(
                 f"{cls.__name__}.{spec.field}_present collides with the store-managed presence column "
                 f"for optional child field {spec.field!r}"
@@ -491,8 +534,8 @@ def _storage_name_of(cls: type) -> str:
     if info is None:
         info = getattr(cls, STORAGE_INFO_ATTRIBUTE, None)
     if info is not None and info.storage_name is not None:
-        return info.storage_name
-    return snake_case(cls.__name__)
+        return _bounded_identifier(info.storage_name)
+    return _bounded_identifier(snake_case(cls.__name__))
 
 
 def _resolve_links(
@@ -665,6 +708,11 @@ def _resolve_unwrapped_field(
     unique: bool,
     derived: bool,
 ) -> FieldSpec:
+    if len(name.encode("utf-8")) > _MAX_IDENTIFIER_LENGTH:
+        raise SchemaError(
+            f"{cls.__name__}.{name}: a stored field name longer than {_MAX_IDENTIFIER_LENGTH} UTF-8 bytes is not "
+            f"a portable column name; shorten it"
+        )
     if shape is not None:
         return _resolve_shape_field(cls, table_name, name, base, shape, optional, indexed, unique, derived)
 
@@ -679,7 +727,7 @@ def _resolve_unwrapped_field(
     if codec is not None:
         columns = tuple(
             ColumnSpec(
-                f"{name}{suffix}",
+                _bounded_identifier(name, suffix),
                 column_kind,
                 nullable=optional,
                 indexed=indexed and suffix == codec.query_suffix,
@@ -708,7 +756,7 @@ def _resolve_unwrapped_field(
 
     if isinstance(base, type) and dataclasses.is_dataclass(base):
         _validate_target(cls, base)
-        column = ColumnSpec(f"{name}_sid", "int", nullable=optional, indexed=indexed, unique=unique)
+        column = ColumnSpec(_bounded_identifier(name, "_sid"), "int", nullable=optional, indexed=indexed, unique=unique)
         return FieldSpec(
             field=name,
             python_type=base,
@@ -749,8 +797,9 @@ def _resolve_shape_field(
     if shape.rows >= 1:
         size = shape.rows * shape.cols
         columns = tuple(
-            ColumnSpec(f"{name}_{i}", "float", nullable=optional, indexed=indexed, unique=unique) for i in range(size)
-        ) + (ColumnSpec(f"{name}_exact", "str", nullable=optional, indexed=indexed, unique=unique),)
+            ColumnSpec(_bounded_identifier(name, f"_{i}"), "float", nullable=optional, indexed=indexed, unique=unique)
+            for i in range(size)
+        ) + (ColumnSpec(_exact_column(name), "str", nullable=optional, indexed=indexed, unique=unique),)
         return FieldSpec(
             field=name,
             python_type=base,
@@ -760,10 +809,10 @@ def _resolve_shape_field(
             derived=derived,
             optional=optional,
         )
-    element_columns = tuple(ColumnSpec(f"{name}_{i}", "float") for i in range(shape.cols)) + (
-        ColumnSpec(f"{name}_exact", "str"),
+    element_columns = tuple(ColumnSpec(_bounded_identifier(name, f"_{i}"), "float") for i in range(shape.cols)) + (
+        ColumnSpec(_exact_column(name), "str"),
     )
-    child = ChildTableSpec(table_name=f"{table_name}_{name}", element_columns=element_columns)
+    child = ChildTableSpec(table_name=_child_table_name(table_name, name), element_columns=element_columns)
     return FieldSpec(
         field=name, python_type=base, role="child", shape=shape, child=child, derived=derived, optional=optional
     )
@@ -804,7 +853,8 @@ def _resolve_sequence_field(
         if codec is not None:
             codec_name = codec.name
             element_columns = tuple(
-                ColumnSpec(f"{name}{suffix}", column_kind, nullable=nullable) for suffix, column_kind in codec.columns
+                ColumnSpec(_bounded_identifier(name, suffix), column_kind, nullable=nullable)
+                for suffix, column_kind in codec.columns
             )
         elif isinstance(element_type, type) and dataclasses.is_dataclass(element_type):
             if nullable:
@@ -814,13 +864,15 @@ def _resolve_sequence_field(
                 )
             _validate_target(cls, element_type)
             target = element_type
-            element_columns = (ColumnSpec(f"{name}_sid", "int"),)
+            element_columns = (ColumnSpec(_bounded_identifier(name, "_sid"), "int"),)
         else:
             raise SchemaError(
                 f"{cls.__name__}.{name}: element type {element_type!r} is not storable; expected a "
                 f"scalar, a codec type, or a storable frozen dataclass"
             )
-    child = ChildTableSpec(table_name=f"{table_name}_{name}", element_columns=element_columns, target=target)
+    child = ChildTableSpec(
+        table_name=_child_table_name(table_name, name), element_columns=element_columns, target=target
+    )
     return FieldSpec(
         field=name,
         python_type=base,
@@ -858,7 +910,7 @@ def _resolve_composite_indexes(cls: type, info: StorageInfo, specs: list[FieldSp
                 columns.append(spec.columns[0].name)
             elif spec.role == "encoded":
                 assert spec.codec_name is not None
-                columns.append(f"{spec.field}{codec_named(spec.codec_name).query_suffix}")
+                columns.append(_bounded_identifier(spec.field, codec_named(spec.codec_name).query_suffix))
             else:
                 raise SchemaError(
                     f"{cls.__name__}: composite index field {field_name!r} has role {spec.role!r}; only "

@@ -13,7 +13,16 @@ import sqlalchemy
 from httk.core import FracVector
 
 from httk.store.backend.codecs import codec_named, decode_fracvector_exact
-from httk.store.backend.schema import FieldSpec, SchemaError, TableSchema, resolve_schema
+from httk.store.backend.schema import (
+    FieldSpec,
+    SchemaError,
+    TableSchema,
+    _exact_column,
+    _index_column,
+    _parent_sid_column,
+    _present_column,
+    resolve_schema,
+)
 from httk.store.backend.sql.mapping import LOGICAL_ID_COLUMN, SID_COLUMN
 from httk.store.store_common import _LinksAccessor
 
@@ -98,8 +107,8 @@ class _Chunk:
             return found, self.child_columns[spec.field]
         assert spec.child is not None
         table = self.hydrator._store._table(spec.child.table_name)
-        parent_column = f"{self.hydrator._schema.table_name}_sid"
-        index_column = f"{spec.field}_index"
+        parent_column = _parent_sid_column(self.hydrator._schema.table_name)
+        index_column = _index_column(spec.field)
         result: Sequence[Any]
         with self.hydrator._store._read_connection() as connection:
             result = connection.execute(
@@ -152,7 +161,7 @@ class _Chunk:
             parts = tuple(row[self.columns[column.name]] for column in spec.columns)
             return None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
         if spec.role == "fixed_array":
-            exact = row[self.columns[f"{spec.field}_exact"]]
+            exact = row[self.columns[_exact_column(spec.field)]]
             if exact is None:
                 return None
             assert spec.shape is not None
@@ -195,14 +204,14 @@ class _Chunk:
         return targets
 
     def _child_value(self, sid: int, spec: FieldSpec, *, eager: bool) -> Any:
-        if spec.optional and not self.parent_rows[sid][self.columns[f"{spec.field}_present"]]:
+        if spec.optional and not self.parent_rows[sid][self.columns[_present_column(spec.field)]]:
             return None
         grouped, columns = self._child_rows(spec)
         entries = grouped.get(sid, [])
         assert spec.child is not None
         if spec.shape is not None:
             rows = [
-                decode_fracvector_exact(entry[columns[f"{spec.field}_exact"]], 1, spec.shape.cols).to_fractions()[0]
+                decode_fracvector_exact(entry[columns[_exact_column(spec.field)]], 1, spec.shape.cols).to_fractions()[0]
                 for entry in entries
             ]
             return FracVector(rows)
@@ -363,7 +372,7 @@ def decode_field(store: "SqlStore", schema: TableSchema, spec: FieldSpec, sid: i
         parts = tuple(row[column.name] for column in spec.columns)
         return None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
     if spec.role == "fixed_array":
-        exact = row[f"{spec.field}_exact"]
+        exact = row[_exact_column(spec.field)]
         if exact is None:
             return None
         assert spec.shape is not None
@@ -484,12 +493,12 @@ def _row_stored_floats(self: Any, field: str) -> list[list[float]] | None:
     if spec is None or spec.role != "child" or spec.child is None:
         return None
     names = [column.name for column in spec.child.element_columns]
-    if not names or names[-1] != f"{field}_exact":
+    if not names or names[-1] != _exact_column(field):
         return None
     float_names = names[:-1]
     if chunk.parent_token is not None or chunk.child_tokens:
         chunk._check_live(sid, field)
-    if spec.optional and not chunk.parent_rows[sid][chunk.columns[f"{field}_present"]]:
+    if spec.optional and not chunk.parent_rows[sid][chunk.columns[_present_column(field)]]:
         return None
     grouped, columns = chunk._child_rows(spec)
     indices = [columns[name] for name in float_names]

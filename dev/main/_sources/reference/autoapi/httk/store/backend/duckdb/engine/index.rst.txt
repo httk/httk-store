@@ -1,0 +1,43 @@
+httk.store.backend.duckdb.engine
+================================
+
+.. py:module:: httk.store.backend.duckdb.engine
+
+.. autoapi-nested-parse::
+
+   DuckDB database construction for :class:`~httk.store.backend.sql.engine.Backend`.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.duckdb.engine.database
+
+
+Module Contents
+---------------
+
+.. py:function:: database(cls, path = None, *, memory_limit = None, read_only = False)
+
+   Build a DuckDB-backed backend stored in ``path``, or in memory when ``path`` is None.
+
+   :param cls: The backend class to instantiate.
+   :param path: The database file path, or ``None`` for an in-memory database.
+   :param memory_limit: An optional DuckDB ``memory_limit`` setting such as
+       ``"1GB"``. DuckDB's own default allows every instance up to about 80% of
+       system RAM, which multiplies dangerously across parallel test or ingest
+       processes; when this parameter is ``None`` the ``HTTK_DUCKDB_MEMORY_LIMIT``
+       environment variable (if set) supplies the cap instead, so process trees
+       can be memory-guarded wholesale.
+   :param read_only: Open the file in DuckDB ``READ_ONLY`` access mode. A read-only
+       database takes no write lock, so several processes (and this one) may open the
+       same file concurrently for reading; write operations on the resulting backend
+       will fail. Ignored for the in-memory database.
+   :return: The configured backend wrapper.
+   :raises ImportError: If the ``duckdb_engine`` SQLAlchemy dialect is not installed;
+       install the ``httk-store[duckdb]`` extra to use it.
+
+

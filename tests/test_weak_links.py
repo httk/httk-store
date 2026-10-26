@@ -1,8 +1,8 @@
-"""Weak-link (lineage-level link table) coverage for the SQL store backend.
+"""Weak-link (lineage-level link table) coverage for the store backends.
 
-Runs over the parametrized ``store_factory`` fixture's SQL arms (sqlite/duckdb,
-and postgresql when configured); the mongo arm is skipped until P3 adds Mongo
-parity, mirroring how the SQL-only bulk suite excludes it.
+Runs over every arm of the parametrized ``store_factory`` fixture; the mongo
+arm opens its store with transactions required, as Mongo weak links need them.
+Cases that inspect SQL internals or SQL-only query support skip the mongo arm.
 """
 
 import threading
@@ -35,11 +35,16 @@ class Result:
     label: str
 
 
+def _store(store_factory, **kwargs):
+    """Build a store on any arm; Mongo weak links require transactions."""
+    return store_factory(transactions="require", **kwargs)
+
+
 def _sql_store(store_factory, **kwargs):
-    """Build a store, skipping the mongo arm (the weak-link store API is SQL-only until P3)."""
-    store = store_factory(**kwargs)
+    """Build a store, skipping the mongo arm for cases that need SQL internals or SQL-only queries."""
+    store = _store(store_factory, **kwargs)
     if not isinstance(store, SqlStore):
-        pytest.skip("weak-link store API is SQL-only until P3 (Mongo parity)")
+        pytest.skip("inspects SQL internals or SQL-only query support")
     return store
 
 
@@ -101,7 +106,7 @@ def test_unlink_then_relink_toggles_within_one_lineage(store_factory):
 
 
 def test_unlink_absent_pair_is_a_noop(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1 = Project("P1")
     store.save(p1)
     result = Result("R1")
@@ -114,7 +119,7 @@ def test_unlink_absent_pair_is_a_noop(store_factory):
 
 
 def test_linked_returns_latest_target_revision(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1 = Project("P1", "v1")
     store.save(p1)
     result = Result("R1")
@@ -130,7 +135,7 @@ def test_linked_returns_latest_target_revision(store_factory):
 
 
 def test_content_dedup_save_accumulates_links_without_new_rows(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -149,7 +154,7 @@ def test_content_dedup_save_accumulates_links_without_new_rows(store_factory):
 
 
 def test_linked_orders_by_first_link_and_is_stable_across_retract_relink(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2, p3 = Project("P1"), Project("P2"), Project("P3")
     for project in (p1, p2, p3):
         store.save(project)
@@ -192,7 +197,7 @@ def test_linked_is_lazy_by_default_and_eager_on_request(store_factory):
 
 
 def test_save_links_accepts_single_and_iterable_targets(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -205,7 +210,7 @@ def test_save_links_accepts_single_and_iterable_targets(store_factory):
 
 
 def test_replace_links_adds_to_replacement_lineage(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -246,7 +251,7 @@ def _row_count(store, table_name):
 
 
 def test_unknown_link_name_raises_schema_error(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1 = Project("P1")
     store.save(p1)
     result = Result("R1")
@@ -258,7 +263,7 @@ def test_unknown_link_name_raises_schema_error(store_factory):
 
 
 def test_wrong_target_type_raises_type_error(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     result = Result("R1")
     store.save(result)
     other = Other("x")
@@ -268,7 +273,7 @@ def test_wrong_target_type_raises_type_error(store_factory):
 
 
 def test_link_of_unsaved_object_raises(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1 = Project("P1")
     store.save(p1)
     with pytest.raises(ValueError, match="has not been stored"):
@@ -298,7 +303,7 @@ def test_degraded_profile_refuses_link():
 
 
 def test_bulk_context_fences_link(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     if not hasattr(store, "bulk_ingest"):
         pytest.skip("backend does not provide bulk_ingest")
     p1 = Project("P1")
@@ -347,7 +352,7 @@ def test_two_thread_same_pair_link_race_on_sqlite():
 
 
 def test_plain_instance_has_no_links_attribute_but_store_linked_works(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1 = Project("P1")
     store.save(p1)
     store.save(Result("R1"))
@@ -363,7 +368,7 @@ def test_plain_instance_has_no_links_attribute_but_store_linked_works(store_fact
 
 
 def test_links_survive_a_store_reopen(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -572,7 +577,7 @@ def _query_labels(searcher, variable):
 
 
 def test_field_chaining_reflects_latest_target_revision(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P", "v1")
     store.save(p)
     r = Result("R")
@@ -592,7 +597,7 @@ def test_field_chaining_reflects_latest_target_revision(store_factory):
 
 
 def test_field_chaining_ignores_retracted_links(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P")
     store.save(p)
     r = Result("R")
@@ -632,7 +637,7 @@ def test_identity_equals_stored_object_and_target_variable(store_factory):
 
 
 def test_has_any_and_has_only_including_vacuous_no_links(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -660,7 +665,7 @@ def test_has_any_and_has_only_including_vacuous_no_links(store_factory):
 
 
 def test_has_all_pattern_over_fresh_aliases(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -681,7 +686,7 @@ def test_has_all_pattern_over_fresh_aliases(store_factory):
 
 
 def test_negations_are_set_wise_and_match_the_zero_links_row(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -706,7 +711,7 @@ def test_negations_are_set_wise_and_match_the_zero_links_row(store_factory):
 
 
 def test_string_rhs_raises_type_error(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     r = Result("R")
     store.save(r)
     searcher = store.searcher()
@@ -716,7 +721,7 @@ def test_string_rhs_raises_type_error(store_factory):
 
 
 def test_source_with_two_live_links_appears_exactly_once(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -737,7 +742,7 @@ def test_source_with_two_live_links_appears_exactly_once(store_factory):
 
 
 def test_multi_revision_links_and_targets_resolve_to_latest(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P", "v1")
     store.save(p)
     r = Result("R")
@@ -759,7 +764,7 @@ def test_multi_revision_links_and_targets_resolve_to_latest(store_factory):
 
 
 def test_searcher_as_of_time_travels_links_and_targets(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store._clock = lambda: 1_000_000
     p = Project("P", "v1")
     store.save(p)
@@ -789,7 +794,7 @@ def test_searcher_as_of_time_travels_links_and_targets(store_factory):
 
 
 def test_searcher_as_of_sees_link_live_before_a_later_retraction(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store._clock = lambda: 1_000_000
     p = Project("P")
     store.save(p)
@@ -811,7 +816,7 @@ def test_searcher_as_of_sees_link_live_before_a_later_retraction(store_factory):
 
 
 def test_only_latest_is_orthogonal_to_weak_link_traversal(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P1")
     store.save(p)
     r = Result("R")
@@ -844,7 +849,7 @@ def test_only_latest_is_orthogonal_to_weak_link_traversal(store_factory):
 def test_deep_chaining_into_target_non_scalar_is_rejected(store_factory):
     from httk.store.query import UnsupportedQueryError
 
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store.save(Owned("O"))  # creates Owned's parent + link tables
     searcher = store.searcher()
     v = searcher.variable(Owned)
@@ -858,7 +863,7 @@ def test_link_path_projection_is_rejected(store_factory):
     """Chained-field projection stays rejected; the bare link set is a valid set-valued output (see below)."""
     from httk.store.query import UnsupportedQueryError
 
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P")
     store.save(p)
     r = Result("R")
@@ -876,7 +881,7 @@ def test_link_path_projection_is_rejected(store_factory):
 
 
 def test_links_accessor_on_a_freshly_fetched_row(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -906,7 +911,7 @@ def test_links_accessor_on_a_freshly_fetched_row(store_factory):
 
 
 def test_weak_link_has_only_empty_matches_only_zero_link_sources(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1 = Project("P1")
     store.save(p1)
     linked = Result("linked")
@@ -925,7 +930,7 @@ def test_child_field_has_only_empty_matches_only_empty_collections(store_factory
     # Guards the shared SqlColumn.has_only empty-values fix: child fields and
     # weak links both route through it, so a child-field empty has_only() is the
     # neutral witness that the LEFT-JOIN NULL row is not miscounted as an outsider.
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store.save(Team("lead-a", ("x", "y")))
     store.save(Team("lead-b", ()))
 
@@ -938,7 +943,7 @@ def test_child_field_has_only_empty_matches_only_empty_collections(store_factory
 def test_sort_by_weak_link_path_is_rejected(store_factory):
     from httk.store.query import UnsupportedQueryError
 
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P")
     store.save(p)
     r = Result("R")
@@ -947,7 +952,7 @@ def test_sort_by_weak_link_path_is_rejected(store_factory):
 
     searcher = store.searcher()
     v = searcher.variable(Result)
-    with pytest.raises(UnsupportedQueryError, match="sort by a weak-link path"):
+    with pytest.raises(UnsupportedQueryError, match="weak-link path"):
         searcher.add_sort(v.links.projects.name)
 
 
@@ -988,7 +993,7 @@ def test_count_is_unaffected_by_an_output_only_link_set(store_factory):
 
 
 def test_link_set_output_without_outputting_source_variable(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P")
     store.save(p)
     r = Result("R")
@@ -1002,7 +1007,7 @@ def test_link_set_output_without_outputting_source_variable(store_factory):
 
 
 def test_link_set_output_is_empty_tuple_for_an_unlinked_source(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store.save(Result("R"))
 
     searcher = store.searcher()
@@ -1012,7 +1017,7 @@ def test_link_set_output_is_empty_tuple_for_an_unlinked_source(store_factory):
 
 
 def test_link_set_output_yields_distinct_targets_per_row_in_first_link_order(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2, p3 = Project("P1"), Project("P2"), Project("P3")
     for p in (p1, p2, p3):
         store.save(p)
@@ -1033,7 +1038,7 @@ def test_link_set_output_yields_distinct_targets_per_row_in_first_link_order(sto
 
 
 def test_link_set_output_combined_with_a_predicate_on_the_same_link_name(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p1, p2 = Project("P1"), Project("P2")
     store.save(p1)
     store.save(p2)
@@ -1052,7 +1057,7 @@ def test_link_set_output_combined_with_a_predicate_on_the_same_link_name(store_f
 def test_link_set_output_chained_field_projection_still_rejected(store_factory):
     from httk.store.query import UnsupportedQueryError
 
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P")
     store.save(p)
     r = Result("R")
@@ -1066,7 +1071,7 @@ def test_link_set_output_chained_field_projection_still_rejected(store_factory):
 
 
 def test_link_set_output_honors_as_of(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store._clock = lambda: 1_000_000
     p1 = Project("P1")
     store.save(p1)
@@ -1109,7 +1114,7 @@ def test_link_set_output_works_with_cursor(store_factory):
 def test_link_set_output_works_with_page(store_factory):
     from httk.store import PageOrder
 
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     p = Project("P")
     store.save(p)
     r = Result("R")
@@ -1127,7 +1132,7 @@ def test_link_set_output_works_with_page(store_factory):
 def test_page_order_by_link_set_output_is_rejected(store_factory):
     from httk.store import PageOrder, UnsupportedQueryError
 
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store.save(Result("R"))
 
     searcher = store.searcher()
@@ -1138,7 +1143,7 @@ def test_page_order_by_link_set_output_is_rejected(store_factory):
 
 
 def test_column_over_a_link_set_output_is_rejected(store_factory):
-    store = _sql_store(store_factory)
+    store = _store(store_factory)
     store.save(Result("R"))
 
     searcher = store.searcher()

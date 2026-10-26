@@ -100,7 +100,7 @@ class Holder:
 
 def _skip_non_sql(store: object) -> None:
     if not isinstance(store, SqlStore):
-        pytest.skip("logical_id is a SQL-layer feature; the Mongo store is handled by a sibling packet")
+        pytest.skip("inspects SQL rows or the SQL stored-property plan")
 
 
 def _rows(store: SqlStore, table_name: str) -> list[tuple[int, int]]:
@@ -202,7 +202,6 @@ def test_idempotent_re_replace_returns_existing_sid_without_a_new_row(store_fact
 
 def test_cross_lineage_dedup_collision_raises_content_id(store_factory):
     store = store_factory()
-    _skip_non_sql(store)
     predecessor = Widget(1)
     store.save(predecessor)
     store.save(Widget(99))  # an independent lineage
@@ -235,7 +234,6 @@ def test_dedup_none_replacement_always_inserts_a_new_row(store_factory):
 
 def test_replace_and_history_reject_a_never_stored_object(store_factory):
     store = store_factory()
-    _skip_non_sql(store)
     store.save(Widget(1))
     with pytest.raises(ValueError, match="has not been stored or fetched"):
         store.replace(Widget(777), Widget(778))
@@ -245,7 +243,6 @@ def test_replace_and_history_reject_a_never_stored_object(store_factory):
 
 def test_replace_rejects_a_cross_table_object(store_factory):
     store = store_factory()
-    _skip_non_sql(store)
     widget = Widget(1)
     store.save(widget)
     with pytest.raises(ValueError, match="cannot replace a record"):
@@ -279,7 +276,6 @@ def test_logical_id_degraded_write_profile():
 
 def test_logical_id_searcher_output_filter_and_sort(store_factory):
     store = store_factory()
-    _skip_non_sql(store)
     first = Widget(1)
     a = store.save(first)
     b = store.replace(first, Widget(2))
@@ -309,7 +305,6 @@ def test_logical_id_searcher_output_filter_and_sort(store_factory):
 
 def test_optimade_filter_searcher_selects_lineage_by_logical_id(store_factory):
     store = store_factory()
-    _skip_non_sql(store)
     first = Widget(1)
     a = store.save(first)
     store.replace(first, Widget(2))

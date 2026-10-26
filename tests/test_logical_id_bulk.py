@@ -56,7 +56,7 @@ class Holder:
 
 def _skip_non_sql(store: object) -> None:
     if not isinstance(store, SqlStore):
-        pytest.skip("logical_id is a SQL-layer feature; the Mongo store is handled by a sibling packet")
+        pytest.skip("MongoStore has no bulk_ingest")
 
 
 def _rows(store: SqlStore, table: str) -> list[tuple[int, int]]:

@@ -1,15 +1,13 @@
-"""Latest-only (``only_latest``) query rewriting for the SQL searcher stack.
+"""Latest-only (``only_latest``) query rewriting across the store backends.
 
-Mirrors :mod:`test_as_of`: the ``store_factory`` fixture exercises sqlite and
-duckdb, ``store._clock`` controls the store timestamp, and ``_values`` reads a
-single variable output. The Mongo store is a sibling packet's concern, so the
-SQL-only cases skip it.
+Mirrors :mod:`test_as_of`: the ``store_factory`` fixture exercises every
+backend arm, ``store._clock`` controls the store timestamp, and ``_values``
+reads a single variable output.
 """
 
 from dataclasses import dataclass, field
 from typing import Annotated, ClassVar
 
-import pytest
 from httk.core.register import register_entry_family, register_entry_record
 from httk.core.storage import IdentitySkip, Indexed, StorageInfo, Unique
 
@@ -54,18 +52,12 @@ class LatestPair:
     value: int
 
 
-def _skip_non_sql(store: object) -> None:
-    if not isinstance(store, SqlStore):
-        pytest.skip("only_latest is a SQL-layer feature; the Mongo store is a sibling packet's concern")
-
-
 def _values(searcher, variable) -> list[int]:
     return sorted(row[0].value for row in searcher.results(record=variable))
 
 
 def test_only_latest_returns_only_the_latest_of_a_lineage(store_factory) -> None:
     store = store_factory()
-    _skip_non_sql(store)
     first = LatestWidget(1)
     store.save(first)
     store.replace(first, LatestWidget(2))
@@ -80,7 +72,6 @@ def test_only_latest_returns_only_the_latest_of_a_lineage(store_factory) -> None
 
 def test_only_latest_chained_replacement_keeps_only_the_last(store_factory) -> None:
     store = store_factory()
-    _skip_non_sql(store)
     first = LatestWidget(1)
     store.save(first)
     b = store.replace(first, LatestWidget(2))
@@ -92,7 +83,6 @@ def test_only_latest_chained_replacement_keeps_only_the_last(store_factory) -> N
 
 def test_only_latest_with_as_of_returns_the_latest_as_of_t(store_factory) -> None:
     store = store_factory()
-    _skip_non_sql(store)
     first = LatestWidget(1)
     store._clock = lambda: 1_000_000
     store.save(first)
@@ -148,7 +138,6 @@ def test_only_latest_self_join_filters_each_variable_independently() -> None:
 
 def test_only_latest_does_not_filter_reference_variables(store_factory) -> None:
     store = store_factory()
-    _skip_non_sql(store)
     old_note = LatestNote("first")
     store.save(old_note)
     store.save(LatestHolder("h", old_note))
@@ -170,7 +159,6 @@ def test_only_latest_does_not_filter_reference_variables(store_factory) -> None:
 
 def test_variable_logical_id_in_filter_and_output(store_factory) -> None:
     store = store_factory()
-    _skip_non_sql(store)
     first = LatestWidget(1)
     lineage = store.save(first)  # a fresh row's logical_id is its own sid
     store.replace(first, LatestWidget(2))

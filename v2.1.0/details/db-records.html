@@ -1,0 +1,676 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Entry families and schema layout" href="db-schema.html"><link rel="prev" title="Backend storage in detail" href="db.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Declaring, storing, and fetching records - httk-store 2.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">httk-store 2.1.0 documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  
+  <span class="sidebar-brand-text">httk-store 2.1.0 documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../data.html">Data management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../db.html">Backend storage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../mongo.html">MongoDB storage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../federation.html">Federated stores</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../migrating_from_v1.html">Migrating from httk v1</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../testing.html">Test tiers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../clickhouse-testing.html">ClickHouse testing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../postgres-testing.html">PostgreSQL testing</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/index.html">httk.store</a><input aria-label="Toggle navigation of httk.store" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/index.html">httk.store.backend</a><input aria-label="Toggle navigation of httk.store.backend" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/clickhouse/index.html">httk.store.backend.clickhouse</a><input aria-label="Toggle navigation of httk.store.backend.clickhouse" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/clickhouse/engine/index.html">httk.store.backend.clickhouse.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/clickhouse/support/index.html">httk.store.backend.clickhouse.support</a></li>
+</ul>
+</li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/backend/codecs/index.html">httk.store.backend.codecs</a></li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/duckdb/index.html">httk.store.backend.duckdb</a><input aria-label="Toggle navigation of httk.store.backend.duckdb" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/duckdb/engine/index.html">httk.store.backend.duckdb.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/duckdb/hooks/index.html">httk.store.backend.duckdb.hooks</a></li>
+</ul>
+</li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/index.html">httk.store.backend.mongo</a><input aria-label="Toggle navigation of httk.store.backend.mongo" class="toctree-checkbox" id="toctree-checkbox-6" name="toctree-checkbox-6" role="switch" type="checkbox"/><label for="toctree-checkbox-6"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/database/index.html">httk.store.backend.mongo.database</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/documents/index.html">httk.store.backend.mongo.documents</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/entry_provider/index.html">httk.store.backend.mongo.entry_provider</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/evaluator/index.html">httk.store.backend.mongo.evaluator</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/fsck/index.html">httk.store.backend.mongo.fsck</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/leases/index.html">httk.store.backend.mongo.leases</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/mapping/index.html">httk.store.backend.mongo.mapping</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/optimade/index.html">httk.store.backend.mongo.optimade</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/results/index.html">httk.store.backend.mongo.results</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/searcher/index.html">httk.store.backend.mongo.searcher</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/store/index.html">httk.store.backend.mongo.store</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/stored_properties/index.html">httk.store.backend.mongo.stored_properties</a></li>
+</ul>
+</li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/index.html">httk.store.backend.postgresql</a><input aria-label="Toggle navigation of httk.store.backend.postgresql" class="toctree-checkbox" id="toctree-checkbox-7" name="toctree-checkbox-7" role="switch" type="checkbox"/><label for="toctree-checkbox-7"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/compiler/index.html">httk.store.backend.postgresql.compiler</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/engine/index.html">httk.store.backend.postgresql.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/hooks/index.html">httk.store.backend.postgresql.hooks</a></li>
+</ul>
+</li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/backend/schema/index.html">httk.store.backend.schema</a></li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/index.html">httk.store.backend.sql</a><input aria-label="Toggle navigation of httk.store.backend.sql" class="toctree-checkbox" id="toctree-checkbox-8" name="toctree-checkbox-8" role="switch" type="checkbox"/><label for="toctree-checkbox-8"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/bulk/index.html">httk.store.backend.sql.bulk</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/bulk_deferred/index.html">httk.store.backend.sql.bulk_deferred</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/bulk_parallel/index.html">httk.store.backend.sql.bulk_parallel</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/engine/index.html">httk.store.backend.sql.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/entry_provider/index.html">httk.store.backend.sql.entry_provider</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/fsck/index.html">httk.store.backend.sql.fsck</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/graph/index.html">httk.store.backend.sql.graph</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/layout/index.html">httk.store.backend.sql.layout</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/mapping/index.html">httk.store.backend.sql.mapping</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/optimade/index.html">httk.store.backend.sql.optimade</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/paging/index.html">httk.store.backend.sql.paging</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/provenance_edges/index.html">httk.store.backend.sql.provenance_edges</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/results/index.html">httk.store.backend.sql.results</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/rows/index.html">httk.store.backend.sql.rows</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/searcher/index.html">httk.store.backend.sql.searcher</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/store/index.html">httk.store.backend.sql.store</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/stored_federation/index.html">httk.store.backend.sql.stored_federation</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/stored_properties/index.html">httk.store.backend.sql.stored_properties</a></li>
+</ul>
+</li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sqlite/index.html">httk.store.backend.sqlite</a><input aria-label="Toggle navigation of httk.store.backend.sqlite" class="toctree-checkbox" id="toctree-checkbox-9" name="toctree-checkbox-9" role="switch" type="checkbox"/><label for="toctree-checkbox-9"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sqlite/engine/index.html">httk.store.backend.sqlite.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sqlite/hooks/index.html">httk.store.backend.sqlite.hooks</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/entry_providers/index.html">httk.store.entry_providers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/export/index.html">httk.store.export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/federated_store/index.html">httk.store.federated_store</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/id_ledger/index.html">httk.store.id_ledger</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/query/index.html">httk.store.query</a><input aria-label="Toggle navigation of httk.store.query" class="toctree-checkbox" id="toctree-checkbox-10" name="toctree-checkbox-10" role="switch" type="checkbox"/><label for="toctree-checkbox-10"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/optimade_filters/index.html">httk.store.query.optimade_filters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/paging_tokens/index.html">httk.store.query.paging_tokens</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/portable/index.html">httk.store.query.portable</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/protocols/index.html">httk.store.query.protocols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/slicer/index.html">httk.store.query.slicer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/served_specs/index.html">httk.store.served_specs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/storage_layout/index.html">httk.store.storage_layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/store_common/index.html">httk.store.store_common</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/store_timestamp/index.html">httk.store.store_timestamp</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/validation/index.html">httk.store.validation</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../examples/index.html">Examples</a><input aria-label="Toggle navigation of Examples" class="toctree-checkbox" id="toctree-checkbox-11" name="toctree-checkbox-11" role="switch" type="checkbox"/><label for="toctree-checkbox-11"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../examples/example.html">Serving records and validating them against their OPTIMADE definitions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../examples/optimade_filters.html">Querying stored dataclasses with OPTIMADE filter strings</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../examples/searching.html">Querying a store with the search DSL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../examples/serve_as_optimade.html">Serving a database as an OPTIMADE API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../examples/slicing.html">Pandas-style slicer indexing over a store</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../examples/storable_records.html">Storing frozen dataclasses in a database, exactly</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul class="current">
+<li class="toctree-l1 current has-children"><a class="reference internal" href="db.html">Backend storage in detail</a><input aria-label="Toggle navigation of Backend storage in detail" checked="" class="toctree-checkbox" id="toctree-checkbox-12" name="toctree-checkbox-12" role="switch" type="checkbox"/><label for="toctree-checkbox-12"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2 current current-page"><a class="current reference internal" href="#">Declaring, storing, and fetching records</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-schema.html">Entry families and schema layout</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-revisions.html">Record replacement and lineages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-relationships.html">Weak links and provenance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-timestamps.html">Store timestamps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-recovery.html">Permanentization, degraded writes, and fsck</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-bulk-ingestion.html">Bulk ingestion</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-querying.html">Searching and exact values</a></li>
+<li class="toctree-l2"><a class="reference internal" href="db-serving.html">Serving through OPTIMADE</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="mongo.html">MongoDB storage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="migrating_from_v1.html">Migrating from httk v1 in detail</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../reference/autoapi/index.html">API Reference</a><input aria-label="Toggle navigation of API Reference" class="toctree-checkbox" id="toctree-checkbox-13" name="toctree-checkbox-13" role="switch" type="checkbox"/><label for="toctree-checkbox-13"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/index.html">httk.store</a><input aria-label="Toggle navigation of httk.store" class="toctree-checkbox" id="toctree-checkbox-14" name="toctree-checkbox-14" role="switch" type="checkbox"/><label for="toctree-checkbox-14"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/index.html">httk.store.backend</a><input aria-label="Toggle navigation of httk.store.backend" class="toctree-checkbox" id="toctree-checkbox-15" name="toctree-checkbox-15" role="switch" type="checkbox"/><label for="toctree-checkbox-15"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/clickhouse/index.html">httk.store.backend.clickhouse</a><input aria-label="Toggle navigation of httk.store.backend.clickhouse" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/clickhouse/engine/index.html">httk.store.backend.clickhouse.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/clickhouse/support/index.html">httk.store.backend.clickhouse.support</a></li>
+</ul>
+</li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/backend/codecs/index.html">httk.store.backend.codecs</a></li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/duckdb/index.html">httk.store.backend.duckdb</a><input aria-label="Toggle navigation of httk.store.backend.duckdb" class="toctree-checkbox" id="toctree-checkbox-17" name="toctree-checkbox-17" role="switch" type="checkbox"/><label for="toctree-checkbox-17"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/duckdb/engine/index.html">httk.store.backend.duckdb.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/duckdb/hooks/index.html">httk.store.backend.duckdb.hooks</a></li>
+</ul>
+</li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/index.html">httk.store.backend.mongo</a><input aria-label="Toggle navigation of httk.store.backend.mongo" class="toctree-checkbox" id="toctree-checkbox-18" name="toctree-checkbox-18" role="switch" type="checkbox"/><label for="toctree-checkbox-18"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/database/index.html">httk.store.backend.mongo.database</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/documents/index.html">httk.store.backend.mongo.documents</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/entry_provider/index.html">httk.store.backend.mongo.entry_provider</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/evaluator/index.html">httk.store.backend.mongo.evaluator</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/fsck/index.html">httk.store.backend.mongo.fsck</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/leases/index.html">httk.store.backend.mongo.leases</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/mapping/index.html">httk.store.backend.mongo.mapping</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/optimade/index.html">httk.store.backend.mongo.optimade</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/results/index.html">httk.store.backend.mongo.results</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/searcher/index.html">httk.store.backend.mongo.searcher</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/store/index.html">httk.store.backend.mongo.store</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/mongo/stored_properties/index.html">httk.store.backend.mongo.stored_properties</a></li>
+</ul>
+</li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/index.html">httk.store.backend.postgresql</a><input aria-label="Toggle navigation of httk.store.backend.postgresql" class="toctree-checkbox" id="toctree-checkbox-19" name="toctree-checkbox-19" role="switch" type="checkbox"/><label for="toctree-checkbox-19"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/compiler/index.html">httk.store.backend.postgresql.compiler</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/engine/index.html">httk.store.backend.postgresql.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/postgresql/hooks/index.html">httk.store.backend.postgresql.hooks</a></li>
+</ul>
+</li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/backend/schema/index.html">httk.store.backend.schema</a></li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/index.html">httk.store.backend.sql</a><input aria-label="Toggle navigation of httk.store.backend.sql" class="toctree-checkbox" id="toctree-checkbox-20" name="toctree-checkbox-20" role="switch" type="checkbox"/><label for="toctree-checkbox-20"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/bulk/index.html">httk.store.backend.sql.bulk</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/bulk_deferred/index.html">httk.store.backend.sql.bulk_deferred</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/bulk_parallel/index.html">httk.store.backend.sql.bulk_parallel</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/engine/index.html">httk.store.backend.sql.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/entry_provider/index.html">httk.store.backend.sql.entry_provider</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/fsck/index.html">httk.store.backend.sql.fsck</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/graph/index.html">httk.store.backend.sql.graph</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/layout/index.html">httk.store.backend.sql.layout</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/mapping/index.html">httk.store.backend.sql.mapping</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/optimade/index.html">httk.store.backend.sql.optimade</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/paging/index.html">httk.store.backend.sql.paging</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/provenance_edges/index.html">httk.store.backend.sql.provenance_edges</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/results/index.html">httk.store.backend.sql.results</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/rows/index.html">httk.store.backend.sql.rows</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/searcher/index.html">httk.store.backend.sql.searcher</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/store/index.html">httk.store.backend.sql.store</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/stored_federation/index.html">httk.store.backend.sql.stored_federation</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sql/stored_properties/index.html">httk.store.backend.sql.stored_properties</a></li>
+</ul>
+</li>
+<li class="toctree-l4 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sqlite/index.html">httk.store.backend.sqlite</a><input aria-label="Toggle navigation of httk.store.backend.sqlite" class="toctree-checkbox" id="toctree-checkbox-21" name="toctree-checkbox-21" role="switch" type="checkbox"/><label for="toctree-checkbox-21"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sqlite/engine/index.html">httk.store.backend.sqlite.engine</a></li>
+<li class="toctree-l5"><a class="reference internal" href="../reference/autoapi/httk/store/backend/sqlite/hooks/index.html">httk.store.backend.sqlite.hooks</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/entry_providers/index.html">httk.store.entry_providers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/export/index.html">httk.store.export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/federated_store/index.html">httk.store.federated_store</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/id_ledger/index.html">httk.store.id_ledger</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../reference/autoapi/httk/store/query/index.html">httk.store.query</a><input aria-label="Toggle navigation of httk.store.query" class="toctree-checkbox" id="toctree-checkbox-22" name="toctree-checkbox-22" role="switch" type="checkbox"/><label for="toctree-checkbox-22"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/optimade_filters/index.html">httk.store.query.optimade_filters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/paging_tokens/index.html">httk.store.query.paging_tokens</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/portable/index.html">httk.store.query.portable</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/protocols/index.html">httk.store.query.protocols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/store/query/slicer/index.html">httk.store.query.slicer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/served_specs/index.html">httk.store.served_specs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/storage_layout/index.html">httk.store.storage_layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/store_common/index.html">httk.store.store_common</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/store_timestamp/index.html">httk.store.store_timestamp</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/store/validation/index.html">httk.store.validation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/autoapi/httk/registry/cli/store/index.html">httk.registry.cli.store</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/autoapi/httk/registry/entries/store/index.html">httk.registry.entries.store</a></li>
+</ul>
+</li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/details/db-records.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="declaring-storing-and-fetching-records">
+<h1>Declaring, storing, and fetching records<a class="headerlink" href="#declaring-storing-and-fetching-records" title="Link to this heading">¶</a></h1>
+<section id="declaring-a-storable-class">
+<h2>Declaring a storable class<a class="headerlink" href="#declaring-a-storable-class" title="Link to this heading">¶</a></h2>
+<p>Storability is non-intrusive: any frozen dataclass whose fields resolve is
+storable — there is no base class. The stdlib-only marker vocabulary lives in
+<em>httk-core</em> (<code class="docutils literal notranslate"><span class="pre">Indexed</span></code>, <code class="docutils literal notranslate"><span class="pre">Unique</span></code>, <code class="docutils literal notranslate"><span class="pre">Skip</span></code>, <code class="docutils literal notranslate"><span class="pre">Shape</span></code>, <code class="docutils literal notranslate"><span class="pre">StorageInfo</span></code>, <code class="docutils literal notranslate"><span class="pre">WeakLink</span></code>,
+<code class="docutils literal notranslate"><span class="pre">StrongLink</span></code>, <code class="docutils literal notranslate"><span class="pre">stored_property</span></code>), so domain modules can declare storable classes without
+depending on httk-store:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fractions</span><span class="w"> </span><span class="kn">import</span> <span class="n">Fraction</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Annotated</span><span class="p">,</span> <span class="n">ClassVar</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.core</span><span class="w"> </span><span class="kn">import</span> <span class="n">FracVector</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.core.storage</span><span class="w"> </span><span class="kn">import</span> <span class="n">Indexed</span><span class="p">,</span> <span class="n">Shape</span><span class="p">,</span> <span class="n">StorageInfo</span><span class="p">,</span> <span class="n">stored_property</span>
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Author</span><span class="p">:</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">year</span><span class="p">:</span> <span class="nb">int</span>
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">StructureRecord</span><span class="p">:</span>
+    <span class="n">__httk_storage__</span><span class="p">:</span> <span class="n">ClassVar</span><span class="p">[</span><span class="n">StorageInfo</span><span class="p">]</span> <span class="o">=</span> <span class="n">StorageInfo</span><span class="p">(</span><span class="n">indexes</span><span class="o">=</span><span class="p">((</span><span class="s2">"spacegroup"</span><span class="p">,</span> <span class="s2">"formula"</span><span class="p">),))</span>
+
+    <span class="n">formula</span><span class="p">:</span> <span class="n">Annotated</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Indexed</span><span class="p">()]</span>
+    <span class="n">spacegroup</span><span class="p">:</span> <span class="nb">int</span>
+    <span class="n">energy</span><span class="p">:</span> <span class="n">Fraction</span>  <span class="c1"># stored exactly</span>
+    <span class="n">cell_basis</span><span class="p">:</span> <span class="n">Annotated</span><span class="p">[</span><span class="n">FracVector</span><span class="p">,</span> <span class="n">Shape</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">)]</span>  <span class="c1"># fixed-shape tensor, stored inline</span>
+    <span class="n">reduced_coords</span><span class="p">:</span> <span class="n">Annotated</span><span class="p">[</span><span class="n">FracVector</span><span class="p">,</span> <span class="n">Shape</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">3</span><span class="p">)]</span>  <span class="c1"># variable rows, child table</span>
+    <span class="n">symbols</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span>  <span class="c1"># child table</span>
+    <span class="n">reference</span><span class="p">:</span> <span class="n">Author</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># foreign key, saved recursively</span>
+
+    <span class="nd">@stored_property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">natoms</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>  <span class="c1"># stored &amp; queryable; recomputed on load</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">symbols</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Scalars (<code class="docutils literal notranslate"><span class="pre">int</span></code>/<code class="docutils literal notranslate"><span class="pre">str</span></code>/<code class="docutils literal notranslate"><span class="pre">bool</span></code>/<code class="docutils literal notranslate"><span class="pre">bytes</span></code>) become columns, while <code class="docutils literal notranslate"><span class="pre">float</span></code> gets a query
+<code class="docutils literal notranslate"><span class="pre">DOUBLE</span></code> plus an exact hexadecimal text companion so signed zero and every
+other finite binary64 value round-trip unchanged. <code class="docutils literal notranslate"><span class="pre">X</span> <span class="pre">|</span> <span class="pre">None</span></code> makes fields
+nullable, rationals and datetimes are encoded by value codecs, lists and tuples
+become child tables, and nested storable dataclasses become foreign keys (saved
+recursively first). Classes you cannot modify can be described externally with
+<code class="docutils literal notranslate"><span class="pre">register_schema_override</span></code>. A class-level <code class="docutils literal notranslate"><span class="pre">StorageInfo(links=...)</span></code> declaration
+adds store-managed, lineage-following associations that live outside record
+fields (see <a class="reference internal" href="db-relationships.html#weak-links"><span class="std std-ref">Weak links</span></a>).</p>
+<p>For the distinction between exact storage and approximate SQL comparisons, see
+<a class="reference internal" href="db-querying.html#exact-rationals-approximate-comparisons"><span class="std std-ref">Exact rationals, approximate comparisons</span></a>.</p>
+</section>
+<section id="storing-and-fetching">
+<h2>Storing and fetching<a class="headerlink" href="#storing-and-fetching" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">Backend</span></code> names where data lives; <code class="docutils literal notranslate"><span class="pre">SqlStore</span></code> saves and reconstructs
+instances. Saving deduplicates per the class’s <code class="docutils literal notranslate"><span class="pre">StorageInfo.dedup</span></code> policy
+(by content identity by default), and <code class="docutils literal notranslate"><span class="pre">transaction()</span></code> scopes several
+operations into one database transaction:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.store.backend.sql</span><span class="w"> </span><span class="kn">import</span> <span class="n">Backend</span><span class="p">,</span> <span class="n">SqlStore</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">Backend</span><span class="o">.</span><span class="n">sqlite</span><span class="p">(</span><span class="s2">"example.sqlite"</span><span class="p">)</span>  <span class="c1"># or Backend.sqlite() in memory,</span>
+<span class="n">store</span> <span class="o">=</span> <span class="n">SqlStore</span><span class="p">(</span><span class="n">db</span><span class="p">,</span> <span class="n">entry_records</span><span class="o">=</span><span class="p">{})</span>  <span class="c1"># first-time custom-record store</span>
+<span class="c1"># Reopen an initialized database with: SqlStore(db)</span>
+
+<span class="k">with</span> <span class="n">store</span><span class="o">.</span><span class="n">transaction</span><span class="p">():</span>
+    <span class="n">sid</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">record</span><span class="p">)</span>  <span class="c1"># returns the integer sid; dedups; recurses</span>
+
+<span class="n">same_record</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">fetch</span><span class="p">(</span><span class="n">StructureRecord</span><span class="p">,</span> <span class="n">sid</span><span class="p">)</span>  <span class="c1"># a lazy row, decoded on access</span>
+<span class="n">eager</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">fetch</span><span class="p">(</span><span class="n">StructureRecord</span><span class="p">,</span> <span class="n">sid</span><span class="p">,</span> <span class="n">eager</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>  <span class="c1"># fully materialized now</span>
+</pre></div>
+</div>
+<p>A source object with an exact <code class="docutils literal notranslate"><span class="pre">__httk_storage_record__</span></code> can be saved directly;
+<code class="docutils literal notranslate"><span class="pre">save(source,</span> <span class="pre">as_record=OtherRecord)</span></code> selects another declared projection.
+Nested record fields are projected recursively. A projected source must expose
+any derived <code class="docutils literal notranslate"><span class="pre">stored_property</span></code> declared by its target record because storage
+does not construct an intermediate record merely to evaluate that property.
+Record validation runs at this storage boundary through <code class="docutils literal notranslate"><span class="pre">__httk_validate__</span></code>.
+Optional child fields use presence columns, so <code class="docutils literal notranslate"><span class="pre">None</span></code> remains distinct from an
+empty child value.</p>
+<p>Repeated default fetches of one live <code class="docutils literal notranslate"><span class="pre">(class,</span> <span class="pre">sid)</span></code> return the same object (see
+<a class="reference internal" href="#lazy-records">Lazy records</a> for the full identity contract). Join-objects
+pointing at a stored instance are found with
+<code class="docutils literal notranslate"><span class="pre">store.referring(TagClass,</span> <span class="pre">field=&quot;structure&quot;,</span> <span class="pre">to=record)</span></code>, which returns lazy
+rows by default and accepts <code class="docutils literal notranslate"><span class="pre">eager=True</span></code>.</p>
+<section id="lazy-records">
+<h3>Lazy records<a class="headerlink" href="#lazy-records" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">fetch()</span></code>, <code class="docutils literal notranslate"><span class="pre">fetch_many()</span></code>, <code class="docutils literal notranslate"><span class="pre">fetch_by_content_id()</span></code>, <code class="docutils literal notranslate"><span class="pre">fetch_entry()</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">referring()</span></code> return <strong>lazy rows</strong> by default: the parent row is read now, but
+every child, reference, and derived field decodes only when first accessed, and
+recursively — a lazy record’s children are lazy rows too. Pass <code class="docutils literal notranslate"><span class="pre">eager=True</span></code> to
+any of them to fully materialize the base dataclass up front. A lazy row is a
+subclass of the storable class (<code class="docutils literal notranslate"><span class="pre">isinstance(row,</span> <span class="pre">StructureRecord)</span></code> holds, and
+<code class="docutils literal notranslate"><span class="pre">type(row)</span></code> is the row subclass), exposes its database <code class="docutils literal notranslate"><span class="pre">sid</span></code>, and reuses the
+memoized value on repeated access to one field.</p>
+<p><strong>Identity.</strong> Repeated default fetches of one live <code class="docutils literal notranslate"><span class="pre">(class,</span> <span class="pre">sid)</span></code> return the
+same object; a live materialized instance takes precedence over creating a
+proxy, so an <code class="docutils literal notranslate"><span class="pre">eager=True</span></code> fetch after a lazy one hands back a fresh instance and
+replaces the cached slot (materialized-wins). Mixing eager and lazy access can
+therefore yield two distinct but equal objects for one sid while a caller still
+holds the older one. Eager materialization reuses live <em>materialized</em> nested
+objects but not lazily fetched ones (the exact-type guard skips a proxy).
+Internal cache maintenance — a failed write, dedup compensation after a save —
+may re-materialize a later fetch. Strict <code class="docutils literal notranslate"><span class="pre">is</span></code> identity across arbitrary call
+sequences is <strong>not</strong> promised, and never truly was: these cache clears already
+qualified the older “very same object” wording.</p>
+<p><strong>Lifetime.</strong> A lazy row’s deferred reads open a <em>fresh</em> connection outside the
+originating transaction, so a record that must outlive its transaction,
+connection, or engine should be fetched with <code class="docutils literal notranslate"><span class="pre">eager=True</span></code>. Accessing a lazy row
+whose originating transaction rolled back raises <code class="docutils literal notranslate"><span class="pre">ExpiredLazyRecordError</span></code>
+(naming the class and sid) — including on a field that was read before the
+rollback, and including a child sequence whose deferred read executed inside the
+rolled-back transaction. Committed-transaction rows and rows fetched outside any
+transaction are unaffected. Engine disposal does <strong>not</strong> invalidate proxies: the
+pool silently reconnects for file-backed databases, so the lifetime rule is
+correctness discipline, not an enforced guard.</p>
+<p><strong>Memory and cost.</strong> A single live lazy row pins not just its own chunk (up to
+500 parent rows plus any child blocks already read) but the transitive closure
+of chunks and hydrators reached through its shared hydration context —
+reference targets are pinned wholesale when first read, so one held record can
+retain a broad slice of the graph until the cyclic garbage collector reclaims
+it (proxies sit in reference cycles with their pinned chunk, so <code class="docutils literal notranslate"><span class="pre">gc.collect()</span></code>
+is what frees them). Reading a field is a descriptor call plus the liveness
+guard, so a repeated read of an already-decoded field costs a few hundred
+nanoseconds rather than a plain-attribute access — bind a field to a local in
+hot loops.</p>
+<p><strong>Append-only framing.</strong> The public store API is append-only, so rows a caller
+fetched are not deleted or mutated in normal use. Under the lazy default, two
+abnormal-deletion cases are honest caveats rather than guarded errors: abnormal
+external deletion of a <em>referenced</em> row surfaces at attribute access as
+<code class="docutils literal notranslate"><span class="pre">StaleResultError</span></code> naming the referenced class and sid, while abnormally deleted
+<em>child</em> rows are indistinguishable from a legitimately empty sequence (child
+rows carry no tombstones) and cannot raise. <code class="docutils literal notranslate"><span class="pre">KeyError</span></code> remains the at-call-time
+contract for an absent parent sid, in both modes. A reference <em>field</em> memoizes
+its target proxy without recording a per-field rollback token (unlike a child
+sequence, which does): correctness still holds because the target’s own chunk
+carries the token and raises <code class="docutils literal notranslate"><span class="pre">ExpiredLazyRecordError</span></code> when the target’s fields
+are touched.</p>
+<p><strong>Other behaviors.</strong> A lazy row exposes stored/codec values without re-running
+<code class="docutils literal notranslate"><span class="pre">__post_init__</span></code> (record authors keep <code class="docutils literal notranslate"><span class="pre">__post_init__</span></code> idempotent with respect to
+stored representations); <code class="docutils literal notranslate"><span class="pre">eager=True</span></code> runs it. <code class="docutils literal notranslate"><span class="pre">dataclasses.replace(row,</span> <span class="pre">...)</span></code>
+returns a plain instance of the row class and does run <code class="docutils literal notranslate"><span class="pre">__post_init__</span></code>. Lazy
+rows reject <code class="docutils literal notranslate"><span class="pre">copy.copy</span></code>, <code class="docutils literal notranslate"><span class="pre">copy.deepcopy</span></code>, and pickling (materialize with
+<code class="docutils literal notranslate"><span class="pre">eager=True</span></code> first). Reference cycles are tolerated lazily — each hop is a fresh
+proxy — whereas <code class="docutils literal notranslate"><span class="pre">eager=True</span></code> on a cyclic graph raises <code class="docutils literal notranslate"><span class="pre">SchemaError</span></code>. Storable
+records must not declare <code class="docutils literal notranslate"><span class="pre">&#64;dataclass(order=True)</span></code> — ordering comparisons
+between a lazy row and a materialized instance raise <code class="docutils literal notranslate"><span class="pre">TypeError</span></code> (the generated
+<code class="docutils literal notranslate"><span class="pre">__lt__</span></code> requires the exact class) — and none do in the workspace today.</p>
+</section>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="db-schema.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Entry families and schema layout</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="db.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Backend storage in detail</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-store AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Declaring, storing, and fetching records</a><ul>
+<li><a class="reference internal" href="#declaring-a-storable-class">Declaring a storable class</a></li>
+<li><a class="reference internal" href="#storing-and-fetching">Storing and fetching</a><ul>
+<li><a class="reference internal" href="#lazy-records">Lazy records</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=1d3a154c"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/selector.js?v=e591e119"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"release","version":"v2.1.0","versionPathDepth":1};</script>
+    </body>
+</html>

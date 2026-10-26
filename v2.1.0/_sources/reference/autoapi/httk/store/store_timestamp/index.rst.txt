@@ -1,0 +1,79 @@
+httk.store.store_timestamp
+==========================
+
+.. py:module:: httk.store.store_timestamp
+
+.. autoapi-nested-parse::
+
+   Backend-neutral store-managed timestamp helpers.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.store.store_timestamp.FUTURE_TIMESTAMP_SLACK_NS
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.store_timestamp.StoreClockRegressionError
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.store_timestamp.capture_store_timestamp
+   httk.store.store_timestamp.advance_store_timestamp_mark
+   httk.store.store_timestamp.encode_store_timestamp_state
+   httk.store.store_timestamp.parse_store_timestamp_state
+   httk.store.store_timestamp.ns_operand_to_store_units
+
+
+Module Contents
+---------------
+
+.. py:data:: FUTURE_TIMESTAMP_SLACK_NS
+   :value: 2000000000
+
+
+.. py:exception:: StoreClockRegressionError(mark_ns, clock_ns)
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   A writable store clock is behind its process-local timestamp mark.
+
+
+.. py:function:: capture_store_timestamp(clock, resolution, mark, *, allow_clock_regression = False, clock_regression_grace = True)
+
+   Capture one guarded store-unit timestamp from a nanosecond clock.
+
+
+.. py:function:: advance_store_timestamp_mark(mark, captured, *, allow_clock_regression)
+
+   Advance a process-local timestamp high-water mark after a successful save.
+
+
+.. py:function:: encode_store_timestamp_state(enabled, resolution)
+
+   Encode the persisted timestamp configuration marker.
+
+
+.. py:function:: parse_store_timestamp_state(value)
+
+   Parse a persisted timestamp marker, returning ``None`` for unknown values.
+
+
+.. py:function:: ns_operand_to_store_units(value, resolution)
+
+   Convert a nanosecond, aware datetime, or RFC3339 string to store units.
+
+

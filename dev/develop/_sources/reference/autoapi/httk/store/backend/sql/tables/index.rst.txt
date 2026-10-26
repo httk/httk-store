@@ -1,0 +1,378 @@
+httk.store.backend.sql.tables
+=============================
+
+.. py:module:: httk.store.backend.sql.tables
+
+.. autoapi-nested-parse::
+
+   Query existing SQL tables in place through the neutral store protocol.
+
+   :class:`TableStore` implements :class:`~httk.store.query.Store` over tables that
+   *httk-store* did not create: each target names one existing parent table,
+   reflected when the store is constructed, optionally with list fields stored
+   as child rows (:class:`ListTable`) or as delimited text (:class:`DelimitedColumn`).
+   The store is read-only and follows the truth table of
+   :mod:`httk.store.query.conformance`:
+
+   - Search expressions are plain SQLAlchemy boolean clauses, so ``&``, ``|`` and
+     ``~`` follow SQL three-valued logic. Comparisons and literal string matching
+     against NULL are unknown; ``== None``/``!= None`` and :meth:`TableField.is_in`
+     are definite.
+   - Set operations read a NULL or absent list as the empty set and are definite.
+     :class:`ListTable` set operations assume a non-NULL key such as a primary
+     key: ``has``/``has_any`` and their negations never match a NULL-key row.
+     NULL child values are ignored.
+   - Result rows are read-only mappings of the parent row's column values, as
+     returned by the driver through SQLAlchemy's column types, plus every
+     declared list as a tuple ordered by value.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.tables.ListTable
+   httk.store.backend.sql.tables.DelimitedColumn
+   httk.store.backend.sql.tables.TableSource
+   httk.store.backend.sql.tables.TableStore
+   httk.store.backend.sql.tables.TableVariable
+   httk.store.backend.sql.tables.TableField
+   httk.store.backend.sql.tables.TableResultSet
+   httk.store.backend.sql.tables.TableSearcher
+
+
+Module Contents
+---------------
+
+.. py:class:: ListTable
+
+   Declare a list field stored as child rows of another table.
+
+   :param table: The child table name.
+   :param parent_column: The child column holding the parent row's key.
+   :param value_column: The child column holding one list value.
+   :param schema: The child table's schema, or ``None`` for the default schema.
+
+
+   .. py:attribute:: table
+      :type:  str
+
+
+   .. py:attribute:: parent_column
+      :type:  str
+
+
+   .. py:attribute:: value_column
+      :type:  str
+
+
+   .. py:attribute:: schema
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: DelimitedColumn
+
+   Declare a list field stored as delimited text in a parent column.
+
+   Empty items are ignored, so ``''`` and NULL both read as the empty list in
+   queries; a NULL column hydrates as ``None`` and ``''`` as ``()``.
+
+   :param column: The parent column holding the delimited text.
+   :param separator: The non-empty item separator.
+   :raises ValueError: If ``separator`` is empty.
+
+
+   .. py:attribute:: column
+      :type:  str
+
+
+   .. py:attribute:: separator
+      :type:  str
+      :value: ','
+
+
+
+.. py:class:: TableSource
+
+   Describe one existing parent table served as a :class:`TableStore` target.
+
+   :param name: The parent table name.
+   :param schema: The parent table's schema, or ``None`` for the default schema.
+   :param key: The column list tables join on; defaults to the single-column primary key.
+   :param lists: Declared list fields by field name.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: schema
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: key
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: lists
+      :type:  collections.abc.Mapping[str, ListTable | DelimitedColumn]
+
+
+.. py:class:: TableStore(engine, tables)
+
+   Query existing SQL tables in place, read-only, through the neutral store protocol.
+
+   Every table is reflected when the store is constructed.
+
+   :param engine: A SQLAlchemy engine owned by the caller, or a SQLAlchemy URL
+       from which the store creates, and on :meth:`close` disposes, its own engine.
+   :param tables: The served tables by target name.
+   :raises ValueError: If a table, key or list column does not exist, a list
+       name collides with a column, or lists are declared without a usable key.
+
+
+   .. py:method:: searcher(*, as_of = None)
+
+      Create an empty searcher.
+
+      :param as_of: Must be ``None``; historic queries are not supported.
+      :return: An empty searcher over this store's tables.
+      :raises ValueError: If ``as_of`` is given.
+
+
+
+   .. py:method:: close()
+
+      Dispose the engine if this store created it from a URL.
+
+
+
+.. py:class:: TableVariable
+
+   Bind a search to one :class:`TableStore` target; attributes yield its fields.
+
+   Obtained from :meth:`TableSearcher.variable`.
+
+
+   .. py:method:: always_true()
+
+      Return an expression that matches every row.
+
+      :return: The constant true clause.
+
+
+
+   .. py:method:: always_false()
+
+      Return an expression that matches no row.
+
+      :return: The constant false clause.
+
+
+
+.. py:class:: TableField
+
+   A queryable scalar column or declared list of a :class:`TableVariable`.
+
+   Scalar columns support comparisons, literal string matching and
+   :meth:`is_in`; lists support :meth:`has`, :meth:`has_any` and
+   :meth:`has_only`. Using an operation of the other kind raises
+   :class:`TypeError`.
+
+   String literals are coerced to the column: an ISO-8601 string compared to a
+   date/time column is parsed (an aware one converted to naive UTC for a naive
+   column), and decimal integer text compared to an integer column is read as
+   an integer. Other text compares against the column's text form and is
+   dropped from :meth:`is_in`. String matching on a non-string column matches its text form.
+
+   Obtained by attribute access on a :class:`TableVariable`.
+
+
+   .. py:method:: contains(text)
+
+      Match values containing ``text`` as a literal substring.
+
+      :param text: The literal text.
+      :return: The match clause.
+
+
+
+   .. py:method:: startswith(prefix)
+
+      Match values beginning with the literal ``prefix``.
+
+      :param prefix: The literal prefix.
+      :return: The match clause.
+
+
+
+   .. py:method:: endswith(suffix)
+
+      Match values ending with the literal ``suffix``.
+
+      :param suffix: The literal suffix.
+      :return: The match clause.
+
+
+
+   .. py:method:: is_in(*values)
+
+      Match values equal to one of ``values``, definitely: NULL matches only a ``None`` member.
+
+      :param \*values: The members.
+      :return: The membership clause.
+
+
+
+   .. py:method:: has(value)
+
+      Match lists containing ``value``.
+
+      :param value: The member.
+      :return: The set clause.
+
+
+
+   .. py:method:: has_any(*values)
+
+      Match lists containing any of ``values``.
+
+      :param \*values: The members.
+      :return: The set clause.
+
+
+
+   .. py:method:: has_only(*values)
+
+      Match lists with no member outside ``values``.
+
+      :param \*values: The allowed members.
+      :return: The set clause.
+
+
+
+.. py:class:: TableResultSet(rows, names)
+
+   A materialized page of :class:`TableSearcher` results.
+
+   :param rows: The result rows.
+   :param names: The declared output names.
+
+
+   .. py:attribute:: names
+
+
+   .. py:method:: first()
+
+      Return the first row, or ``None`` when no row matched.
+
+      :return: The first row, if any.
+
+
+
+   .. py:method:: one()
+
+      Return the only row.
+
+      :return: The sole row.
+      :raises ~httk.store.query.NoResultError: If no row matched.
+      :raises ~httk.store.query.MultipleResultsError: If more than one row matched.
+
+
+
+   .. py:method:: scalars(name = None)
+
+      Yield one output from each row.
+
+      :param name: The output name, required when several outputs are declared.
+      :return: An iterator over the output values.
+      :raises ValueError: If ``name`` is omitted while several outputs are declared.
+      :raises KeyError: If ``name`` is not a declared output.
+
+
+
+.. py:class:: TableSearcher
+
+   Build and run one read-only query over a :class:`TableStore` target.
+
+   Obtained from :meth:`TableStore.searcher`.
+
+
+   .. py:attribute:: offset
+      :type:  int
+
+      The number of leading result rows skipped; :meth:`add_offset` adds to it.
+
+
+   .. py:method:: variable(target)
+
+      Bind the search variable to ``target``.
+
+      :param target: A target name of the store.
+      :return: The search variable.
+      :raises ValueError: If ``target`` is not a target of the store.
+      :raises ~httk.store.query.UnsupportedQueryError: If the searcher is already bound to another target.
+
+
+
+   .. py:method:: add(expression)
+
+      Add a filter expression.
+
+      :param expression: An expression built from this searcher's variable.
+
+
+
+   .. py:method:: add_sort(field, descending)
+
+      Sort by a scalar column, NULLs last in both directions.
+
+      :param field: A scalar field of this searcher's variable.
+      :param descending: Whether to sort descending.
+      :raises ~httk.store.query.UnsupportedQueryError: If ``field`` is a list.
+
+
+
+   .. py:method:: set_limit(limit)
+
+      Set the maximum number of result rows.
+
+      :param limit: The limit; negative means unbounded.
+
+
+
+   .. py:method:: add_offset(offset)
+
+      Skip ``offset`` more result rows.
+
+      :param offset: The rows to skip, added to :attr:`offset`.
+
+
+
+   .. py:method:: count()
+
+      Return the exact number of matching rows, ignoring limit and offset.
+
+      :return: The match count.
+
+
+
+   .. py:method:: results(**outputs)
+
+      Run the query and return the materialized page.
+
+      :param \*\*outputs: Named outputs: the search variable (the matched row
+          mapping) or one of its fields (that field's value).
+      :return: The result page.
+      :raises ValueError: If no output is given, or an output belongs to another target.
+
+
+

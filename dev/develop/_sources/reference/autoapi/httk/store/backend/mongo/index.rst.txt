@@ -1,0 +1,35 @@
+httk.store.backend.mongo
+========================
+
+.. py:module:: httk.store.backend.mongo
+
+.. autoapi-nested-parse::
+
+   MongoDB storage support for *httk-store*.
+
+   The package itself is importable without PyMongo.  The backend modules are
+   loaded lazily so applications that do not use MongoDB do not need the optional
+   ``httk-store[mongodb]`` dependency installed.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/store/backend/mongo/database/index
+   /reference/autoapi/httk/store/backend/mongo/documents/index
+   /reference/autoapi/httk/store/backend/mongo/entry_provider/index
+   /reference/autoapi/httk/store/backend/mongo/evaluator/index
+   /reference/autoapi/httk/store/backend/mongo/fsck/index
+   /reference/autoapi/httk/store/backend/mongo/leases/index
+   /reference/autoapi/httk/store/backend/mongo/mapping/index
+   /reference/autoapi/httk/store/backend/mongo/optimade/index
+   /reference/autoapi/httk/store/backend/mongo/results/index
+   /reference/autoapi/httk/store/backend/mongo/searcher/index
+   /reference/autoapi/httk/store/backend/mongo/store/index
+   /reference/autoapi/httk/store/backend/mongo/stored_properties/index
+
+

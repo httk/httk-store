@@ -14,7 +14,7 @@ import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy
 import sqlalchemy.util
@@ -475,7 +475,15 @@ def validate_bulk_tables(connection: sqlalchemy.Connection, tables: list[sqlalch
             {"table": name},
         ).all()
         expected = [
-            (column.name, str(_ch_type(column).compile(dialect=connection.dialect)), "", "") for column in table.columns
+            (
+                column.name,
+                str(column.type.compile(dialect=connection.dialect)),
+                "DEFAULT" if column.server_default is not None else "",
+                str(cast(sqlalchemy.DefaultClause, column.server_default).arg)
+                if column.server_default is not None
+                else "",
+            )
+            for column in decorate_table(table).columns  # the same clone the DDL was emitted from
         ]
         normalized = [
             (str(column), str(type_name), str(kind or ""), str(expression or ""))

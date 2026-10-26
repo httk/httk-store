@@ -74,8 +74,9 @@ default = ["httk-store[db]"]
 db = ["sqlalchemy>=2.0,<3"]
 # Pandas avoids repeated failed import probes during DuckDB scalar binding.
 # duckdb_engine (through 0.17.0) reflects columns with SQLAlchemy's PostgreSQL
-# catalog query, which from SQLAlchemy 2.1 joins pg_collation, absent in DuckDB.
-duckdb = ["httk-store[db]", "sqlalchemy>=2.0,<2.1", "duckdb_engine>=0.13", "duckdb>=1.0", "numpy", "pandas"]
+# catalog query, which from SQLAlchemy 2.1 joins pg_collation, absent in DuckDB,
+# and casts to REGCLASS, which DuckDB 2.0 removed.
+duckdb = ["httk-store[db]", "sqlalchemy>=2.0,<2.1", "duckdb_engine>=0.13", "duckdb>=1.0,<2", "numpy", "pandas"]
 # clickhouse-connect 1.6.0 was probed for G0/P5; keep the compatible major range.
 clickhouse = ["httk-store[db]", "clickhouse-connect>=1.6,<2"]
 postgresql = ["httk-store[db]", "psycopg[binary]>=3.1"]

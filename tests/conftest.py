@@ -163,7 +163,7 @@ class _StoreFactory:
         self._postgres_isolated = []
         self._stores = {}
 
-    def __call__(self, *, entry_records=None, entry_ids=None):
+    def __call__(self, *, entry_records=None, entry_ids=None, transactions="never"):
         if self._backend == "sqlite":
             database = Backend.sqlite()
             declaration = entry_records if entry_records is not None else {}
@@ -185,17 +185,17 @@ class _StoreFactory:
 
             name = f"httk_behavior_{uuid.uuid4().hex}"
             assert self._mongo_client is not None
-            database = MongoDatabase(self._mongo_client, name, transactions="never")
+            database = MongoDatabase(self._mongo_client, name, transactions=transactions)
             declaration = entry_records if entry_records is not None else {}
             store = MongoStore(database, entry_records=declaration, entry_ids=entry_ids)
         self._databases.append(database)
-        self._stores[id(store)] = (store, database, declaration)
+        self._stores[id(store)] = (store, database, declaration, transactions)
         return store
 
     def reopen(self, store):
         """Return a fresh real store over the database used by ``store``."""
         try:
-            original, database, declaration = self._stores[id(store)]
+            original, database, declaration, transactions = self._stores[id(store)]
         except KeyError as error:
             raise ValueError("store was not created by this store_factory") from error
         if original is not store:
@@ -204,7 +204,7 @@ class _StoreFactory:
             from httk.store.backend.mongo import MongoDatabase, MongoStore
 
             assert self._mongo_client is not None
-            mongo_database = MongoDatabase(self._mongo_client, database.database.name, transactions="never")
+            mongo_database = MongoDatabase(self._mongo_client, database.database.name, transactions=transactions)
             self._databases.append(mongo_database)
             return MongoStore(
                 mongo_database, entry_records=declaration, entry_ids=getattr(original, "_entry_ids", None)

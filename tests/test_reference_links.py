@@ -66,6 +66,7 @@ def _ids(page: object) -> list[str]:
 
 def test_references_link_serves_and_filters(store_factory) -> None:
     store = store_factory(
+        transactions="require",
         entry_records={
             # DerivedDataRecord's link table is exactly 63 characters (PostgreSQL sequence case).
             DataRecordEntry: (TotalEnergyRecord, AverageTotalEnergyRecord, DerivedDataRecord),

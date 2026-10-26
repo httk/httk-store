@@ -85,7 +85,7 @@ def test_long_physical_names_store_query_link_fsck_reopen(store_factory) -> None
     assert all(len(name) <= 63 for name in names), names
     assert sum(len(name) == 63 for name in names) > 5  # many columns really were shortened
 
-    store = store_factory()
+    store = store_factory(transactions="require")
     target = LongNameTarget("t")
     store.save(target)
     records = [

@@ -120,7 +120,7 @@ def test_structure_export_contains_extended_family_definition(tmp_path: Path) ->
         definitions = {item["id"]: json.loads(archive.read(item["path"])) for item in manifest["definitions"]}
     entry = definitions[StructureEntry.definition_id]
     property_names = set(entry["properties"])
-    assert len(property_names) == 40
+    assert len(property_names) == 42  # includes _httk_natoms and _httk_nformula_units
     assert {"_httk_basis_precision", "_httk_charge", "_httk_site_moments"} <= property_names
     assert (
         atomistic.StructureEntry.entry_type_definition().as_optimade()["properties"].keys()

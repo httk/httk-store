@@ -185,11 +185,12 @@ def test_nested_dotted_path_not_implemented(store):
     assert excinfo.value.category == "not-implemented"
 
 
-def test_dotted_filter_without_related_classes_matches_nothing(store):
+def test_dotted_filter_without_related_classes_is_unrecognized(store):
     # Without related_classes, 'refs' is not a relationship target, so
-    # 'refs.<...>' is an unknown (unprefixed) property: it matches nothing.
-    searcher = optimade_filter_searcher(store, Material, 'refs._httk_custom_doi CONTAINS "10."')
-    assert results(searcher) == []
+    # 'refs.<...>' is an unknown unprefixed property: OPTIMADE requires an error.
+    with pytest.raises(FilterTranslationError) as excinfo:
+        optimade_filter_searcher(store, Material, 'refs._httk_custom_doi CONTAINS "10."')
+    assert excinfo.value.category == "unrecognized-property"
 
 
 def test_id_filters_the_physical_entry_column_while_type_still_needs_a_handler(store):
@@ -205,9 +206,14 @@ def test_unknown_prefixed_property_raises(store):
     assert excinfo.value.category == "unrecognized-property"
 
 
-def test_unknown_unprefixed_property_matches_nothing(store):
-    searcher = optimade_filter_searcher(store, Material, "bananas = 3")
-    assert results(searcher) == []
+def test_unknown_unprefixed_property_is_unrecognized(store):
+    with pytest.raises(FilterTranslationError, match="bananas") as excinfo:
+        optimade_filter_searcher(store, Material, "bananas = 3")
+    assert excinfo.value.category == "unrecognized-property"
+
+
+def test_unknown_foreign_prefixed_property_matches_nothing(store):
+    assert results(optimade_filter_searcher(store, Material, "_exmpl_x = 3")) == []
 
 
 def test_unmatched_related_class_raises_value_error(store):

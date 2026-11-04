@@ -445,17 +445,25 @@ def test_sort_uses_each_backing_sort_mapping(plan):
     assert _records(plan.filter_searchers('type = "calculations"', sort=(("_httk_selector", True),))) == [FIRST, SECOND]
 
 
-def test_invalid_callback_literal_is_a_filter_type_error(plan):
+def test_invalid_callback_literal_is_a_filter_value_error(plan):
     with pytest.raises(FilterTranslationError) as caught:
         plan.filter_searchers('_httk_selector = "not-a-literal"')
-    assert caught.value.category == "type-mismatch"
+    assert caught.value.category == "invalid-value"
+
+
+@pytest.mark.parametrize("filter_string", ("bananas = 3", "bananas IS KNOWN", 'bananas HAS "x"', "bananas LENGTH 1"))
+def test_unknown_unprefixed_property_is_unrecognized(plan, filter_string):
+    with pytest.raises(FilterTranslationError, match="bananas") as caught:
+        plan.filter_searchers(filter_string)
+    assert caught.value.category == "unrecognized-property"
 
 
 @pytest.mark.parametrize("literal", ("2026-08-02 08:30:00Z", "2026-W31-7T08:30:00Z"))
 def test_timestamp_filters_reject_non_rfc3339_iso_forms(plan, literal):
     with pytest.raises(FilterTranslationError) as caught:
         plan.filter_searchers(f'last_modified = "{literal}"')
-    assert caught.value.category == "type-mismatch"
+    # OPTIMADE: RFC 3339 interpretation failures are 400, not a (501) type mismatch.
+    assert caught.value.category == "invalid-value"
 
 
 def test_unconfigured_family_and_missing_nonnullable_response_are_configuration_errors():

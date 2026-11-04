@@ -90,6 +90,7 @@ from httk.store.backend.sql.engine import Backend, connection_uses_autocommit
 from httk.store.backend.sql.fsck import dispatch_derivation
 from httk.store.backend.sql.graph import LogicalEdgeGraph
 from httk.store.backend.sql.layout import (
+    _INDEX_POLICY_KEY,
     METADATA_TABLE_NAME,
     STORAGE_PROTOCOL_VERSION,
     BackendFacts,
@@ -97,6 +98,9 @@ from httk.store.backend.sql.layout import (
     StorageLayout,
     StorageLayoutUpgradeRequiredError,
     StoreUnderConstructionError,
+    _index_policy_for,
+    _parse_index_policy,
+    _validate_skip_indexes,
     actual_columns,
     actual_index_names,
     actual_schema_objects,
@@ -122,6 +126,7 @@ from httk.store.backend.sql.mapping import (
     SOURCE_LID_COLUMN,
     STORE_TIMESTAMP_COLUMN,
     TARGET_LID_COLUMN,
+    IndexPolicy,
     added_column_ddl,
     backing_dispatch_column_name,
     dispatch_table_for,
@@ -385,7 +390,22 @@ class SqlStore:
         columns, new tables) and/or a declaration change that only appends record
         kinds to existing families or adds families. Non-additive or other
         differences still raise.
+    :param indexes: Which non-unique indexes a new store creates: ``"all"``, or
+        ``"minimal"``, which leaves out every child table's parent-sid index and
+        the ``store_timestamp``, ``logical_id``, ``alt_id`` and ``(alt_id,
+        alt_kind)`` indexes of record tables outside the entry families.
+        ``None`` selects the dialect default for a new store (``"minimal"`` on
+        DuckDB, whose zonemaps serve those lookups, ``"all"`` elsewhere) and
+        the stamped policy for an existing one (``"all"`` for a store created
+        before index policies existed). The policy is fixed at creation;
+        rebuild the store to change it.
+    :param skip_indexes: Names of further non-unique indexes not to create,
+        exactly as created in the database (e.g. ``ix_<table>_<column>``).
+        Stamped like ``indexes``; an empty collection on reopen adopts the stamp.
     :raises TypeError: If the first open omits both declaration forms.
+    :raises ValueError: If ``indexes`` or ``skip_indexes`` is invalid (an
+        unknown name, a unique index or a primary key), or differs from the
+        policy an existing store was created with.
     :raises httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError: If the trusted declaration or protocol does not match.
     """
 
@@ -413,6 +433,8 @@ class SqlStore:
         allow_clock_regression: bool = False,
         clock_regression_grace: bool = True,
         upgrade: bool = False,
+        indexes: Literal["all", "minimal"] | None = None,
+        skip_indexes: Collection[str] = (),
     ) -> None:
         if (
             not isinstance(store_timestamp_resolution, int)
@@ -420,6 +442,15 @@ class SqlStore:
             or store_timestamp_resolution <= 0
         ):
             raise ValueError("store_timestamp_resolution must be a positive integer")
+        if indexes not in (None, "all", "minimal"):
+            raise ValueError(f"indexes must be 'all', 'minimal' or None, not {indexes!r}")
+        if isinstance(skip_indexes, str) or not all(isinstance(name, str) for name in skip_indexes):
+            raise TypeError("skip_indexes must be a collection of index names")
+        self._requested_indexes: Literal["all", "minimal"] | None = indexes
+        self._requested_skip_indexes = frozenset(skip_indexes)
+        # Resolved at open (see _resolve_index_policy).
+        self._index_settings: tuple[Literal["all", "minimal"], frozenset[str]] = ("all", frozenset())
+        self._index_policy: IndexPolicy | None = None
         self._owns_database = False
         self._database = database
         self._entry_ids = entry_ids
@@ -691,7 +722,8 @@ class SqlStore:
         if not objects_before:
             if supplied is None:
                 raise TypeError("entry_records or entry_families is required when opening an uninitialized database")
-            expected = expected_metadata(supplied, store_timestamps=self._store_timestamps)
+            self._resolve_index_policy(supplied, None)
+            expected = expected_metadata(supplied, store_timestamps=self._store_timestamps, indexes=self._index_policy)
             metadata_table = expected.tables[METADATA_TABLE_NAME]
             if self.backend_facts.metadata_backend == "keepermap":
                 from httk.store.backend.clickhouse.support import bootstrap_fence, keeper_database_uuid
@@ -863,7 +895,7 @@ class SqlStore:
             "store_timestamps",
             _IDENTITY_OWNERSHIP_KEY,
         }
-        persistent_optional_keys = {"write_profile", ENTRY_ID_OFFSETS_KEY}
+        persistent_optional_keys = {"write_profile", ENTRY_ID_OFFSETS_KEY, _INDEX_POLICY_KEY}
         recognized_runtime_keys = {"ingest_state", "lease"}
         allowed_keys = required_keys | persistent_optional_keys | recognized_runtime_keys
         diff: dict[str, object] = {}
@@ -1069,6 +1101,7 @@ class SqlStore:
                 rejection_hint, chosen = _INTERRUPTED_UPGRADE_HINT, "reopen"
             raise StorageLayoutUpgradeRequiredError(diff, hint=rejection_hint, remedy=chosen)
         assert persisted is not None
+        self._resolve_index_policy(persisted, stored)
         assert persisted_profile in {"transactional", "degraded", "bulk-fenced"}
         self._write_profile = cast(Literal["transactional", "degraded", "bulk-fenced"], persisted_profile)
         names_before = self._check_physical_layout(connection, stored, persisted, ownership_upgrade_pending)
@@ -1096,7 +1129,7 @@ class SqlStore:
         self._entry_id_offsets = entry_id_offsets
         self._install_layout(
             persisted,
-            expected_metadata(persisted, store_timestamps=self._store_timestamps),
+            expected_metadata(persisted, store_timestamps=self._store_timestamps, indexes=self._index_policy),
             names_before,
         )
         self._initialize_store_timestamp_mark(connection)
@@ -1205,6 +1238,35 @@ class SqlStore:
             return False
         return stored_tables > current_tables
 
+    def _resolve_index_policy(self, layout: StorageLayout, stored: Mapping[str, str] | None) -> None:
+        """Settle the index policy of a new (``stored is None``) or existing store.
+
+        :param layout: The layout the store opens with.
+        :param stored: The persisted metadata rows, or ``None`` for a new store.
+        :raises ValueError: If a requested setting is invalid or differs from the stamped policy.
+        :raises httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError: If the stamp is malformed.
+        """
+        requested = self._requested_indexes, self._requested_skip_indexes
+        if self._requested_skip_indexes:
+            _validate_skip_indexes(layout, self._requested_skip_indexes, store_timestamps=self._store_timestamps)
+        if stored is None:
+            settings = (requested[0] or self.backend_facts.default_indexes, requested[1])
+        else:
+            parsed = _parse_index_policy(stored.get(_INDEX_POLICY_KEY))
+            if parsed is None:
+                raise StorageLayoutUpgradeRequiredError(
+                    {"declaration": {_INDEX_POLICY_KEY: {"actual": stored.get(_INDEX_POLICY_KEY)}}}, remedy="rebuild"
+                )
+            settings = parsed
+            if (requested[0] or settings[0], requested[1] or settings[1]) != settings:
+                raise ValueError(
+                    f"requested index policy (indexes={requested[0]!r}, skip_indexes={sorted(requested[1])!r}) "
+                    f"differs from the store's (indexes={settings[0]!r}, skip_indexes={sorted(settings[1])!r}); "
+                    "the policy is chosen at creation, rebuild the store to change it"
+                )
+        self._index_settings = settings
+        self._index_policy = _index_policy_for(layout, *settings)
+
     def _stamp_layout(
         self,
         connection: sqlalchemy.Connection,
@@ -1222,6 +1284,10 @@ class SqlStore:
         }
         if self._write_profile != "transactional":
             rows["write_profile"] = self._write_profile
+        if self._index_settings != ("all", frozenset()):
+            # Like write_profile, only a non-default policy is stamped (absent reads as all indexes).
+            indexes, skip = self._index_settings
+            rows[_INDEX_POLICY_KEY] = json.dumps({"indexes": indexes, "skip_indexes": sorted(skip)})
         if self.backend_facts.metadata_backend == "keepermap":
             from httk.store.backend.clickhouse.support import stamp_store_metadata
 
@@ -1260,11 +1326,13 @@ class SqlStore:
         self, connection: sqlalchemy.Connection, layout: StorageLayout, plan: AdditiveUpgradePlan
     ) -> None:
         """Idempotently create every missing declared table and the plan's added nullable columns."""
-        expected_metadata(layout, store_timestamps=self._store_timestamps).create_all(connection, checkfirst=True)
+        expected = expected_metadata(layout, store_timestamps=self._store_timestamps, indexes=self._index_policy)
+        expected.create_all(connection, checkfirst=True)
         for table_name, columns in plan.added_columns.items():
             present_columns = actual_columns(connection, table_name)
+            kept = {str(index.name) for index in expected.tables[table_name].indexes}
             for spec in columns:
-                statements = added_column_ddl(table_name, spec, connection)
+                statements = added_column_ddl(table_name, spec, connection, indexes=kept)
                 if spec.name in present_columns:
                     # Column already added by a prior (possibly crashed) run; only
                     # the idempotent IF NOT EXISTS index statement remains to run.
@@ -1276,6 +1344,8 @@ class SqlStore:
         self, connection: sqlalchemy.Connection, layout: StorageLayout, present: Collection[str]
     ) -> None:
         """Idempotently create declared non-unique indexes an existing table lacks (``upgrade=True``).
+
+        Indexes the store's index policy leaves out are never created.
 
         Plain indexes hold no data and stay outside the schema fingerprint, so a
         store built before one was declared (the StrongLink edge indexes) opens
@@ -1289,7 +1359,9 @@ class SqlStore:
         :return: None.
         """
         existing = actual_index_names(connection)
-        for table in expected_metadata(layout, store_timestamps=self._store_timestamps).tables.values():
+        for table in expected_metadata(
+            layout, store_timestamps=self._store_timestamps, indexes=self._index_policy
+        ).tables.values():
             if table.name in present:
                 for index in table.indexes:
                     if not index.unique and index.name not in existing:
@@ -2651,7 +2723,9 @@ class SqlStore:
         candidate = sqlalchemy.MetaData()
         requested = tuple(classes)
         for cls in requested:
-            table_for(resolve_schema(cls), candidate, store_timestamps=self._store_timestamps)
+            table_for(
+                resolve_schema(cls), candidate, store_timestamps=self._store_timestamps, indexes=self._index_policy
+            )
         families = (
             self._families_reached(candidate.tables)
             if reach_families
@@ -2660,7 +2734,7 @@ class SqlStore:
         for family in families:
             schemas = tuple(resolve_schema(record) for record in family.records)
             for schema in schemas:
-                table_for(schema, candidate, store_timestamps=self._store_timestamps)
+                table_for(schema, candidate, store_timestamps=self._store_timestamps, indexes=self._index_policy)
             if len(schemas) > 1:
                 dispatch_table_for(family.name, tuple(zip(family.record_names, schemas, strict=True)), candidate)
         return candidate
@@ -2710,11 +2784,13 @@ class SqlStore:
         """Idempotently register ``requested`` and every family ``candidate`` reaches in ``_metadata``."""
         self._known_record_types.update(requested)
         for cls in requested:
-            table_for(resolve_schema(cls), self._metadata, store_timestamps=self._store_timestamps)
+            table_for(
+                resolve_schema(cls), self._metadata, store_timestamps=self._store_timestamps, indexes=self._index_policy
+            )
         for family in self._families_reached(candidate):
             schemas = tuple(resolve_schema(record) for record in family.records)
             for schema in schemas:
-                table_for(schema, self._metadata, store_timestamps=self._store_timestamps)
+                table_for(schema, self._metadata, store_timestamps=self._store_timestamps, indexes=self._index_policy)
             if len(schemas) > 1:
                 dispatch_table_for(family.name, tuple(zip(family.record_names, schemas, strict=True)), self._metadata)
 
@@ -4981,7 +5057,8 @@ class SqlStore:
             return int(row[spec.child.element_columns[0].name])
         if spec.shape is not None:
             assert spec.shape is not None
-            return decode_fracvector_exact(row[_exact_column(spec.field)], 1, spec.shape.cols).to_fractions()[0]
+            floats = [row[column.name] for column in spec.child.element_columns[:-1]]
+            return decode_fracvector_exact(row[_exact_column(spec.field)], 1, spec.shape.cols, floats).to_fractions()[0]
         if spec.codec_name is not None:
             parts = tuple(row[column.name] for column in spec.child.element_columns)
             if spec.child.element_columns[0].nullable and all(part is None for part in parts):
@@ -5254,7 +5331,11 @@ def _encode_parent_row(
             tensor = _as_fixed_tensor(schema, spec, spec.shape, value)
             for i, part in enumerate(encode_fracvector_floats(tensor)):
                 values[_bounded_identifier(spec.field, f"_{i}")] = part
-            values[_exact_column(spec.field)] = encode_fracvector_exact(tensor)
+            # Keep the full text where the exact column is compared: by_value matches (a sentinel
+            # would miss rows written before it existed) and indexes (distinct "" would collide).
+            exact = spec.columns[-1]
+            always = schema.dedup == "by_value" or exact.unique or exact.indexed
+            values[exact.name] = encode_fracvector_exact(tensor, always=always)
         else:  # reference
             assert spec.target is not None
             values[spec.columns[0].name] = resolve_sid(spec.target, value, _field_path(path, spec.field))

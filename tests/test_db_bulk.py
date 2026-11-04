@@ -397,7 +397,8 @@ def test_successful_empty_bulk_clears_under_construction_marker(store_factory):
     database = _database_of(store)
     with database.engine.connect() as connection:
         keys = set(connection.execute(sqlalchemy.text("SELECT key FROM _httk_store_metadata")).scalars())
-    assert keys == {
+    # index_policy is persistent (DuckDB stamps its "minimal" default), not ingest residue.
+    assert keys - {"index_policy"} == {
         "protocol",
         "entry_declaration",
         "entry_schemas",

@@ -165,7 +165,11 @@ def encode_record(
                     for index, part in enumerate(encode_fracvector_floats(tensor))
                 }
             )
-            result[_exact_column(spec.field)] = encode_fracvector_exact(tensor)
+            # Keep the full text where the exact key is compared: by_value matches (a sentinel
+            # would miss documents written before it existed) and indexes (distinct "" would collide).
+            exact = spec.columns[-1]
+            always = schema.dedup == "by_value" or exact.unique or exact.indexed
+            result[exact.name] = encode_fracvector_exact(tensor, always=always)
         else:
             assert spec.target is not None
             result[plan.keys[0]] = _resolve_reference(
@@ -179,8 +183,11 @@ def _decode_child(spec: FieldSpec, value: Any, resolve_reference: Callable[[type
         return None
     assert spec.child is not None
     if spec.shape is not None:
+        names = [column.name for column in spec.child.element_columns[:-1]]
         rows = [
-            decode_fracvector_exact(element[_exact_column(spec.field)], 1, spec.shape.cols).to_fractions()[0]
+            decode_fracvector_exact(
+                element[_exact_column(spec.field)], 1, spec.shape.cols, [element[name] for name in names]
+            ).to_fractions()[0]
             for element in value
         ]
         return FracVector(rows)
@@ -236,7 +243,11 @@ def decode_record(
             assert spec.shape is not None
             exact = embedded.get(_exact_column(spec.field))
             values[spec.field] = (
-                None if exact is None else decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols)
+                None
+                if exact is None
+                else decode_fracvector_exact(
+                    exact, spec.shape.rows, spec.shape.cols, [embedded.get(column.name) for column in spec.columns[:-1]]
+                )
             )
         else:
             assert spec.target is not None

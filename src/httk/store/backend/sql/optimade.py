@@ -174,7 +174,9 @@ def optimade_filter_searcher(
     conversion and handler dispatch (rational fields compare on their
     documented-approximate float query column). Unknown names carrying
     ``prefix`` raise :class:`~httk.store.query.optimade_filters.FilterTranslationError`
-    (``"unrecognized-property"``); other unknown names match nothing, per the
+    (``"unrecognized-property"``), as do unknown unprefixed names unless the
+    standard OPTIMADE definition of the queried entry type defines them (then they match
+    nothing); unknown names with a foreign prefix match nothing, per the
     OPTIMADE specification. Unprefixed property names (beyond ``id``/``type``)
     are recognized only when a ``definition`` describes them — and even then
     they translate only if ``extra_handlers`` supplies their handlers, since

@@ -115,13 +115,15 @@ class _MongoQueryContext:
         return MongoPredicate("constant", (False,))
 
     def compare(self, left: MongoValue, operator: str, right: MongoValue) -> MongoPredicate:
+        if operator not in {"=", "!=", "<", "<=", ">", ">=", "CONTAINS", "STARTS", "ENDS"}:
+            raise FilterTranslationError(
+                f"stored-property comparison operator {operator!r} is not implemented; the property's"
+                " StoredPropertyProjection query callback must handle it rather than forward it to compare()",
+                "not-implemented",
+            )
         left, right = self._coerce_literals(_value(left), _value(right))
         if operator == "=":
             return self.equal(left, right)
-        if operator == "!=":
-            return MongoPredicate("compare", (left, operator, right))
-        if operator not in {"<", "<=", ">", ">=", "CONTAINS", "STARTS", "ENDS"}:
-            raise MongoStoredPropertyConfigurationError(f"unsupported stored-property comparison operator {operator!r}")
         return MongoPredicate("compare", (left, operator, right))
 
     def equal(self, left: MongoValue, right: MongoValue) -> MongoPredicate:
@@ -625,9 +627,10 @@ class MongoStoredPropertyPlan:
                     self._property_fulltypes(revisions, alternatives),
                     self._handlers(backing, context, public_id_prefix, revisions, alternatives),
                     known_definition_prefixes(),
+                    entry_type=self.entry_type,
                 )
             except QueryLiteralError as error:
-                raise FilterTranslationError(str(error), "type-mismatch") from error
+                raise FilterTranslationError(str(error), "invalid-value") from error
             if not isinstance(predicate, MongoPredicate):
                 raise MongoStoredPropertyConfigurationError("stored-property filter produced a foreign expression")
             # The candidate query is intentionally unrestrictive unless a

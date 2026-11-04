@@ -25,11 +25,13 @@ inside dotted relationship paths too: `refs._httk_custom_doi`, not `refs.doi`.
 The rules for names that do not resolve follow the OPTIMADE specification
 rather than being uniformly strict:
 
-- an unknown name *carrying* the prefix is an error
+- an unknown name *carrying* our prefix, or *no* prefix at all, is an error
   (`FilterTranslationError`, category `"unrecognized-property"`), because a
-  client asking for `_httk_bananas` has made a mistake worth reporting;
-- an unknown name *without* a prefix matches nothing, silently, because it may
-  be a standard property this implementation does not support.
+  client asking for `_httk_bananas` or `bananas` has made a mistake worth
+  reporting — unless the name is a standard property of the queried OPTIMADE
+  entry type that this store does not serve, which matches nothing;
+- an unknown name with *another* provider's prefix (`_exmpl_x`) matches
+  nothing, with a warning, because it belongs to a database we do not know.
 
 ## Operators
 
@@ -121,7 +123,7 @@ PLAIN_FILTERS = [
     '_httk_custom_symbols HAS ONLY "O","H"',
     'NOT _httk_custom_symbols HAS "O"',
     '_httk_custom_symbols HAS "O" AND _httk_custom_x > 1',
-    'bananas = 3',
+    '_exmpl_x = 3',
 ]
 
 #: Depth-1 filters through the 'refs' relationship, needing related_classes.
@@ -137,6 +139,7 @@ RELATED_FILTERS = [
 #: Filters that cannot be translated, and the category each reports.
 REJECTED_FILTERS = [
     "_httk_bananas = 3",
+    "bananas = 3",
     "refs.other._httk_custom_x = 1",
 ]
 
@@ -159,8 +162,8 @@ def show_plain_filters(store: SqlStore) -> None:
     for filter_string in PLAIN_FILTERS:
         searcher = optimade_filter_searcher(store, Material, filter_string)
         print(f"  {filter_string:<38} -> {names(searcher)}")
-    print("  ('bananas' carries no provider prefix, so it is an unsupported standard")
-    print("   property and matches nothing rather than raising.)")
+    print("  ('_exmpl_x' carries another provider's prefix, so it is unknown and")
+    print("   matches nothing rather than raising.)")
     print()
 
 

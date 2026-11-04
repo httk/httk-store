@@ -155,8 +155,22 @@ def test_fracvector_exact_text_is_canonical():
     # The same value with a non-minimal internal denominator encodes identically.
     plain = FracVector([[1, 2], [3, 4]])
     inflated = FracVector._of(((6, 12), (18, 24)), 6)
-    assert encode_fracvector_exact(plain) == encode_fracvector_exact(inflated)
-    assert encode_fracvector_exact(plain) == "1;1,2,3,4"
+    assert encode_fracvector_exact(plain, always=True) == encode_fracvector_exact(inflated, always=True)
+    assert encode_fracvector_exact(plain, always=True) == "1;1,2,3,4"
+
+
+def test_fracvector_exact_sentinel_matches_the_full_text():
+    decimal = FracVector([["0.1", "-2.5"], ["1/4", 3]])
+    floats = (0.1, -2.5, 0.25, 3.0)
+    assert encode_fracvector_exact(decimal) == ""
+    assert encode_fracvector_exact(decimal, always=True) == "20;2,-50,5,60"
+    # A store written before the sentinel holds the full text; both decode identically.
+    assert decode_fracvector_exact("", 2, 2, floats) == decode_fracvector_exact("20;2,-50,5,60", 2, 2) == decimal
+    assert encode_fracvector_exact(FracVector([["1/3", 0]])) == "3;1,0"
+    with pytest.raises(ValueError, match="float columns"):
+        decode_fracvector_exact("", 2, 2)
+    with pytest.raises(ValueError, match="expected 2x2"):
+        decode_fracvector_exact("", 2, 2, floats[:3])
 
 
 def test_fracvector_exact_text_rejects_shape_mismatch():

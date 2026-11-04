@@ -20,8 +20,12 @@ The translation is driven by three inputs:
   and :func:`~httk.store.query.optimade_filters.relationship_id_handler` for ``<type>.id`` relationship entries);
 - ``recognized_prefixes`` — property-name prefixes the serving side claims:
   an unknown property carrying such a prefix is an error
-  (``"unrecognized-property"``), while any other unknown property silently
-  matches nothing, as the OPTIMADE specification prescribes.
+  (``"unrecognized-property"``), while an unknown property with a foreign
+  prefix matches nothing (treated as unknown, with a warning), as the OPTIMADE
+  specification prescribes. Given the queried ``entry_type``, an unknown
+  property *without* a prefix is likewise an error unless the standard
+  OPTIMADE definition of that entry type defines it (an unserved standard
+  property, which is evaluated as unknown).
 
 Failures raise :class:`FilterTranslationError`, which carries a neutral
 ``category`` (no HTTP semantics); consumers map categories onto their
@@ -55,12 +59,14 @@ entry (see :data:`HandlerTable`), and are otherwise not implemented.
 
 import datetime
 import decimal
+import functools
 import logging
 import operator
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Any, Literal, Self, cast
 
+from httk.core import standard_entry_type
 from httk.core.optimade import FilterAst, parse_optimade_filter
 from httk.core.storage import ZipLiteral
 
@@ -101,6 +107,30 @@ __all__ = [
 ]
 
 
+@functools.cache
+def _standard_property_names(entry_type: str) -> frozenset[str]:
+    """Return the property names the standard OPTIMADE ``entry_type`` defines (``ValueError`` if none)."""
+    return frozenset(standard_entry_type(entry_type).properties)
+
+
+def _unknown_unprefixed_names_known(entry_type: str | None) -> frozenset[str] | None:
+    """Return the unprefixed names evaluated as unknown, or ``None`` to treat every one as unknown."""
+    if entry_type is None:
+        return None
+    try:
+        return _standard_property_names(entry_type)
+    except ValueError:  # Not a standard entry type: it defines no unprefixed names of its own.
+        return frozenset()
+
+
+def _unrecognized_property(key: str) -> "FilterTranslationError":
+    """Return the unknown-property error, hinting at ``TRUE``/``FALSE`` for ``true``/``false``."""
+    message = "Filter invokes unrecognized property name: " + key
+    if key in ('true', 'false'):  # Lowercase booleans lex as identifiers (identifiers are lowercase-only).
+        message += " (boolean values are written as uppercase TRUE or FALSE)"
+    return FilterTranslationError(message, "unrecognized-property")
+
+
 def _warn_unknown_property(name: str) -> None:
     _LOGGER.warning(
         "filter references unknown property %r; treated as a property with unknown value",
@@ -109,7 +139,9 @@ def _warn_unknown_property(name: str) -> None:
     )
 
 
-type FilterTranslationCategory = Literal["unrecognized-property", "not-implemented", "type-mismatch", "internal"]
+type FilterTranslationCategory = Literal[
+    "unrecognized-property", "not-implemented", "type-mismatch", "invalid-value", "internal"
+]
 """Why a filter could not be translated (see :class:`FilterTranslationError`)."""
 
 type HandlerTable = Mapping[str, Mapping[str, Callable[..., Any]]]
@@ -151,9 +183,14 @@ class FilterTranslationError(Exception):
     each category onto their own error codes):
 
     - ``"unrecognized-property"`` — the filter names an unknown property
-      carrying a recognized prefix (a caller error);
+      carrying a recognized prefix, or (given the entry type) no prefix (a
+      caller error);
     - ``"type-mismatch"`` — a filter constant does not match the property's
-      declared type (a caller error);
+      declared type (OPTIMADE reports differing types as not implemented);
+    - ``"invalid-value"`` — a constant of the right token type cannot be
+      interpreted as a property value, e.g. a string that is not an RFC 3339
+      timestamp or a literal a stored-property projection rejects with
+      ``QueryLiteralError`` (a caller error);
     - ``"not-implemented"`` — the filter uses a construct this translation (or
       the supplied handler table) does not support;
     - ``"internal"`` — an inconsistency in the translation itself.
@@ -230,7 +267,8 @@ def format_value(fulltype: str, val: tuple[Any, ...], allow_null: bool = False) 
     :param allow_null: Whether a parsed null constant is accepted.
     :return: The converted Python filter value.
     :raises FilterTranslationError: With category ``"type-mismatch"`` when the
-        constant does not fit the declared type, or ``"not-implemented"`` for
+        constant does not fit the declared type, ``"invalid-value"`` for a
+        timestamp string that is not RFC 3339, or ``"not-implemented"`` for
         dictionary-typed properties.
     """
     if fulltype.startswith('list of '):
@@ -246,6 +284,13 @@ def format_value(fulltype: str, val: tuple[Any, ...], allow_null: bool = False) 
         return outvals
     elif allow_null and val[0] == 'Null':
         return None
+    elif fulltype == 'dict':
+        raise FilterTranslationError("Filtering on dictionary properties not implemented.", "not-implemented")
+    elif isinstance(val[0], tuple):
+        raise FilterTranslationError(
+            "Type mismatch in filter, query had a list of values when a single " + fulltype + " value was expected.",
+            "type-mismatch",
+        )
     elif fulltype == 'boolean':
         if val[0] in ['Boolean']:
             return val[1] == 'TRUE'
@@ -265,9 +310,10 @@ def format_value(fulltype: str, val: tuple[Any, ...], allow_null: bool = False) 
             return _FilterFloat(val[1])
     elif fulltype == 'string' or fulltype == 'timestamp':
         if val[0] in ['String']:
+            # Every backend sees only RFC 3339 timestamp literals (a parse failure is a 400, not a type mismatch).
+            if fulltype == 'timestamp' and not _is_rfc3339_datetime(val[1]):
+                raise FilterTranslationError("Timestamp filter value is not RFC 3339: " + val[1], "invalid-value")
             return val[1]
-    elif fulltype == 'dict':
-        raise FilterTranslationError("Filtering on dictionary properties not implemented.", "not-implemented")
     elif fulltype == 'unknown':
         return val[1]
     raise FilterTranslationError(
@@ -502,16 +548,16 @@ def timestamp_handler(entry: str, op: str, value: Any, search_variable: SearchVa
     :raises FilterTranslationError: If ``value`` is not an offset-aware RFC 3339 timestamp.
     """
     if not _is_rfc3339_datetime(value):
-        raise FilterTranslationError("Timestamp filter value is not RFC 3339.", "type-mismatch")
+        raise FilterTranslationError("Timestamp filter value is not RFC 3339.", "invalid-value")
     normalized_text = str(value).replace("t", "T", 1)
     if normalized_text.endswith(("Z", "z")):
         normalized_text = normalized_text[:-1] + "+00:00"
     try:
         parsed = datetime.datetime.fromisoformat(normalized_text)
     except ValueError as exc:
-        raise FilterTranslationError("Timestamp filter value is not RFC 3339.", "type-mismatch") from exc
+        raise FilterTranslationError("Timestamp filter value is not RFC 3339.", "invalid-value") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise FilterTranslationError("Timestamp filter value must include a UTC offset.", "type-mismatch")
+        raise FilterTranslationError("Timestamp filter value must include a UTC offset.", "invalid-value")
     normalized = parsed.astimezone(datetime.UTC).isoformat()
     return string_handler(entry, op, normalized, search_variable)
 
@@ -602,6 +648,7 @@ def translate_filter_ast(
     *,
     relationship_targets: tuple[str, ...] = (),
     related_property_resolver: RelatedPropertyResolver | None = None,
+    entry_type: str | None = None,
 ) -> SearchExpression:
     """Translate one filter syntax-tree node into a search expression.
 
@@ -662,9 +709,14 @@ def translate_filter_ast(
     implemented. ``HAS <op> value`` without ``ALL``/``ANY``/``ONLY`` is not
     implemented either.
 
-    A comparison or string-matching constant is checked against the
-    property's fulltype before the handler lookup, so a scalar constant
-    against a list property is a type mismatch regardless of the handlers.
+    A comparison, string-matching or ``HAS`` constant (and the property of a
+    ``LENGTH`` filter) is checked against the property's fulltype before the
+    handler lookup, so a scalar constant against a list property (or ``HAS``/
+    ``LENGTH`` on a scalar property) is a type mismatch regardless of the
+    handlers. In an identifier-vs-identifier filter, which is not implemented,
+    an unknown non-foreign identifier is still reported as unrecognized. The
+    OPTIONAL boolean property shorthand (a ``BOOLEAN_PROPERTY`` node, e.g. the
+    bare filter ``prop``) is likewise not implemented.
 
     :param node: The parsed OPTIMADE filter AST node.
     :param search_variable: The backend search variable receiving the expression.
@@ -673,6 +725,10 @@ def translate_filter_ast(
     :param recognized_prefixes: Prefixes whose unknown properties are errors.
     :param relationship_targets: Related entry types that support dotted filters.
     :param related_property_resolver: Optional resolver for related-property filters.
+    :param entry_type: The queried entry type. When given, an unknown property
+        without a database-specific prefix is an ``"unrecognized-property"``
+        error unless the standard OPTIMADE definition of ``entry_type`` defines
+        it; when ``None``, every such property is treated as unknown.
     :return: The translated backend search expression.
     :raises FilterTranslationError: If the filter cannot be translated; see
         :class:`FilterTranslationError` for the failure categories.
@@ -687,7 +743,16 @@ def translate_filter_ast(
             recognized_prefixes,
             relationship_targets=relationship_targets,
             related_property_resolver=related_property_resolver,
+            entry_type=entry_type,
         )
+
+    standard_names = _unknown_unprefixed_names_known(entry_type)
+
+    def unknown_is_error(head: str) -> bool:
+        """Whether an unknown first name segment is an error rather than an unknown value."""
+        if head.startswith('_'):
+            return head.startswith(recognized_prefixes)
+        return standard_names is not None and head not in standard_names
 
     def relationship_semi_join(left: tuple[Any, ...], sub_ast: FilterAst) -> SearchExpression:
         """Resolve a dotted (relationship-property) node via the two-phase semi-join."""
@@ -725,13 +790,26 @@ def translate_filter_ast(
             if family != 'HAS':
                 raise FilterTranslationError("Filtering on property " + key + " not implemented.", "not-implemented")
             fulltype = 'list of string'
-        elif head in property_fulltypes or head.startswith(recognized_prefixes):
-            raise FilterTranslationError("Filter invokes unrecognized property name: " + key, "unrecognized-property")
+        elif head in property_fulltypes or unknown_is_error(head):
+            raise _unrecognized_property(key)
         else:
             _warn_unknown_property(key)
             unknown_handler, unknown_fulltype = _UNKNOWN_FAMILY_HANDLERS[family]
             return key, unknown_fulltype, unknown_handler
         return key, fulltype, None
+
+    def reject_unknown_identifier(operand: tuple[Any, ...]) -> None:
+        """Reject an unknown identifier in an identifier-vs-identifier filter by the :func:`resolve_type` rules.
+
+        Unknown-valued names (foreign-prefixed, unserved standard, or any unprefixed
+        name without ``entry_type``) pass; the comparison is then not implemented.
+        """
+        head, key = operand[1], '.'.join(operand[1:])
+        if key in property_fulltypes or key in handlers or head in relationship_targets:
+            return
+        if head not in property_fulltypes and not unknown_is_error(head):
+            return
+        raise _unrecognized_property(key)
 
     def lookup(key: str, family: str) -> Callable[..., Any]:
         handler = handlers.get(key, {}).get(family)
@@ -786,11 +864,11 @@ def translate_filter_ast(
                 assert search_expr is not None
                 return search_expr
             return relationship_semi_join(left, (node[0], ops, ('Identifier',) + tuple(left[2:]), right))
-        key, fulltype, has_handler = resolve(left, 'HAS')
+        key, fulltype, unknown_has = resolve_type(left, 'HAS')
         values = format_value(fulltype, right)
         if ops != tuple(['='] * len(values)):
             raise FilterTranslationError("HAS queries with non-equal operators not implemented yet.", "not-implemented")
-        search_expr = has_handler(key, ops, values, search_variable, node[0])
+        search_expr = (unknown_has or lookup(key, 'HAS'))(key, ops, values, search_variable, node[0])
     elif node[0] in ['LENGTH']:
         left = node[1]
         op = node[2]
@@ -809,10 +887,15 @@ def translate_filter_ast(
                 "LENGTH comparison can only be done with Numbers. Unexpected right hand side type:" + right[0],
                 "not-implemented",
             )
-        key, fulltype, length_handler = resolve(left, 'length')
-        if length_handler is not unknown_length_handler:
-            assert fulltype.startswith("list of ")
+        key, fulltype, length_handler = resolve_type(left, 'length')
+        if length_handler is None:
+            if not fulltype.startswith("list of "):
+                raise FilterTranslationError(
+                    "Type mismatch in filter, LENGTH needs a list property; " + key + " is " + fulltype + ".",
+                    "type-mismatch",
+                )
             fulltype = "integer"
+            length_handler = lookup(key, 'length')
         value = format_value(fulltype, right)
         search_expr = length_handler(key, op, value, search_variable)
     elif node[0] in ['>', '>=', '<', '<=', '=', '!=']:
@@ -826,6 +909,8 @@ def translate_filter_ast(
         if left[0] in constant_types and right[0] in constant_types:
             raise FilterTranslationError("Constant vs. Constant comparisons not implemented.", "not-implemented")
         elif left[0] == 'Identifier' and right[0] == 'Identifier':
+            reject_unknown_identifier(left)
+            reject_unknown_identifier(right)
             raise FilterTranslationError("Identifier vs. Identifier comparisons not implemented.", "not-implemented")
         else:
             if right[0] == 'Identifier' and left[0] in constant_types:
@@ -843,6 +928,8 @@ def translate_filter_ast(
         if len(left) > 2 and left[1] in relationship_targets:
             return relationship_semi_join(left, (node[0], ('Identifier',) + tuple(left[2:]), right))
         if right[0] == 'Identifier':
+            reject_unknown_identifier(left)
+            reject_unknown_identifier(right)
             raise FilterTranslationError(
                 "Identifier vs. Identifier string comparisons not implemented.", "not-implemented"
             )
@@ -855,6 +942,15 @@ def translate_filter_ast(
             return relationship_semi_join(left, (node[0], ('Identifier',) + tuple(left[2:])))
         key, _fulltype, unknown_handler = resolve(left, 'unknown')
         search_expr = unknown_handler(key, search_variable, node[0])
+    elif node[0] == 'BOOLEAN_PROPERTY':
+        left = node[1]
+        if not (len(left) > 2 and left[1] in relationship_targets):
+            resolve_type(left, 'comparison')  # An unknown property is still reported as such.
+        raise FilterTranslationError(
+            "The boolean property shorthand (" + '.'.join(left[1:]) + ") is an optional feature that is not "
+            "implemented; compare explicitly, e.g. " + '.'.join(left[1:]) + " = TRUE.",
+            "not-implemented",
+        )
     elif node[0] == 'HAS':
         # ``x HAS <op> value``; the parser leaves its constant unconverted.
         raise FilterTranslationError("HAS with an operator is not implemented.", "not-implemented")
@@ -1064,6 +1160,7 @@ def filter_searcher(
             recognized_prefixes,
             relationship_targets=relationship_targets,
             related_property_resolver=related_property_resolver,
+            entry_type=entry_type,
         )
     )
     return searcher

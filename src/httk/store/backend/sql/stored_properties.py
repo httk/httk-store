@@ -314,6 +314,12 @@ class _SqlQueryContext:
         return _SqlPredicate(sqlalchemy.false())
 
     def compare(self, left: _SqlValue, operator: str, right: _SqlValue) -> _SqlPredicate:
+        if operator not in {"=", "!=", "<", "<=", ">", ">=", "CONTAINS", "STARTS", "ENDS"}:
+            raise FilterTranslationError(
+                f"stored-property comparison operator {operator!r} is not implemented; the property's"
+                " StoredPropertyProjection query callback must handle it rather than forward it to compare()",
+                "not-implemented",
+            )
         left, right = _timestamp_literals(left, right)
         left_value, right_value = _codec_literals(_value(left), _value(right))
         if operator == "=":
@@ -1029,9 +1035,10 @@ class StoredPropertySqlPlan:
                     known_definition_prefixes(),
                     relationship_targets=relationship_targets,
                     related_property_resolver=related_property_resolver or _empty_related_resolver,
+                    entry_type=self.entry_type,
                 )
             except QueryLiteralError as error:
-                raise FilterTranslationError(str(error), "type-mismatch") from error
+                raise FilterTranslationError(str(error), "invalid-value") from error
             self._validate_clickhouse_correlation(predicate)
             searcher.add(cast(SqlExpression, predicate))
         sort_values: list[_SqlValue] = []

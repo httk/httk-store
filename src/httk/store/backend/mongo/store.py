@@ -3330,9 +3330,12 @@ class MongoStore:
             entries = embedded.get(spec.field, [])
             assert spec.child is not None
             if spec.shape is not None:
+                names = [column.name for column in spec.child.element_columns[:-1]]
                 return FracVector(
                     [
-                        decode_fracvector_exact(item[_exact_column(spec.field)], 1, spec.shape.cols).to_fractions()[0]
+                        decode_fracvector_exact(
+                            item[_exact_column(spec.field)], 1, spec.shape.cols, [item[name] for name in names]
+                        ).to_fractions()[0]
                         for item in entries
                     ]
                 )
@@ -3356,7 +3359,10 @@ class MongoStore:
             return None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
         if spec.role == "fixed_array":
             exact = embedded.get(_exact_column(spec.field))
-            return None if exact is None else decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols)
+            if exact is None:
+                return None
+            floats = [embedded.get(column.name) for column in spec.columns[:-1]]
+            return decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols, floats)
         return embedded.get(spec.columns[0].name)
 
     def _check_metadata_at(

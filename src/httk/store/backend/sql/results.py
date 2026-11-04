@@ -3,7 +3,7 @@
 import copy
 import dataclasses
 from array import array
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal, cast
 
@@ -274,7 +274,9 @@ class SqlResultSet:
                 if column.name != output.element.name
             )
         if output.spec.role == "fixed_array" and output.exact_element is not None:
-            return (output.exact_element,)
+            # The remaining float columns back the "" exact sentinel; the first is ``element``.
+            floats = tuple(output.variable._alias.c[column.name] for column in output.spec.columns[1:-1])
+            return (*floats, output.exact_element)
         return ()
 
     def _statement(self, *, limit: int | None = None) -> sqlalchemy.Select[Any]:
@@ -399,8 +401,9 @@ class SqlResultSet:
         offset = len(state._names) + state._extra_offsets[index]
         extras = state._projection_extras[index]
         if output.spec.role == "fixed_array":
-            text = state._rows[position][offset]
-            return None if text is None else _decode_fixed(text, output.spec)
+            floats = (value, *state._rows[position][offset : offset + len(extras) - 1])
+            text = state._rows[position][offset + len(extras) - 1]
+            return None if text is None else _decode_fixed(text, output.spec, floats)
         assert output.codec is not None
         query_index = next(
             index for index, (suffix, _kind) in enumerate(output.codec.columns) if suffix == output.codec.query_suffix
@@ -913,8 +916,8 @@ def _cursor_guard(generation: _Generation, current: int) -> None:
         raise ExpiredCursorRowError("cursor row expired; use it before advancing the cursor")
 
 
-def _decode_fixed(text: str, spec: FieldSpec) -> FracVector:
+def _decode_fixed(text: str, spec: FieldSpec, floats: Sequence[float]) -> FracVector:
     from httk.store.backend.codecs import decode_fracvector_exact
 
     assert spec.shape is not None
-    return decode_fracvector_exact(text, spec.shape.rows, spec.shape.cols)
+    return decode_fracvector_exact(text, spec.shape.rows, spec.shape.cols, floats)

@@ -154,7 +154,8 @@ def declaration_aspects(error: StorageLayoutUpgradeRequiredError) -> Mapping[str
 def metadata(database: Backend) -> dict[str, str]:
     with database.engine.connect() as connection:
         rows = connection.execute(sqlalchemy.text("SELECT key, value FROM _httk_store_metadata")).all()
-    return {str(key): str(value) for key, value in rows if key != "lease"}
+    # index_policy is dialect-dependent (DuckDB stamps "minimal"); these tests compare against SQLite references.
+    return {str(key): str(value) for key, value in rows if key not in ("lease", "index_policy")}
 
 
 def table_names(database: Backend) -> set[str]:

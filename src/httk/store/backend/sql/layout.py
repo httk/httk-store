@@ -1,7 +1,9 @@
 """Versioned physical layout for :class:`httk.store.backend.sql.store.SqlStore`."""
 
 import dataclasses
-from collections.abc import Mapping, Sequence
+import difflib
+import json
+from collections.abc import Collection, Mapping, Sequence
 from types import MappingProxyType
 from typing import Final, Literal
 
@@ -16,6 +18,7 @@ from httk.store.backend.schema import (
     resolve_schema,
 )
 from httk.store.backend.sql.mapping import (
+    IndexPolicy,
     backing_dispatch_column_name,
     dispatch_table_for,
     entry_dispatch_table_name,
@@ -80,6 +83,9 @@ _METADATA_DECLARATION_KEY: Final = "entry_declaration"
 _RESERVED_PREFIX: Final = "_httk_"
 WRITE_PROFILE_VOCABULARY: Final = frozenset({"transactional", "degraded", "bulk-fenced"})
 
+_INDEX_POLICY_KEY: Final = "index_policy"
+"""Metadata key of a store's index policy, stamped only when it differs from all indexes."""
+
 
 class StoreUnderConstructionError(RuntimeError):
     """A new open found an interrupted empty-store bulk ingest.
@@ -114,6 +120,7 @@ class BackendFacts:
     stage_load: Literal["attach", "duckdb-views", "client-stream"]
     finalize_map_maintenance: Literal["update", "swap"]
     supports_adhoc_indexes: bool
+    default_indexes: Literal["all", "minimal"]
 
 
 _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
@@ -133,6 +140,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         stage_load="attach",
         finalize_map_maintenance="update",
         supports_adhoc_indexes=True,
+        default_indexes="all",
     ),
     "duckdb": BackendFacts(
         transactional_ddl=True,
@@ -150,6 +158,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         stage_load="duckdb-views",
         finalize_map_maintenance="update",
         supports_adhoc_indexes=True,
+        default_indexes="minimal",
     ),
     "postgresql": BackendFacts(
         transactional_ddl=True,
@@ -167,6 +176,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         stage_load="attach",
         finalize_map_maintenance="update",
         supports_adhoc_indexes=True,
+        default_indexes="all",
     ),
     "clickhousedb": BackendFacts(
         transactional_ddl=False,
@@ -184,6 +194,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         stage_load="client-stream",
         finalize_map_maintenance="swap",
         supports_adhoc_indexes=False,
+        default_indexes="all",
     ),
 }
 
@@ -253,7 +264,9 @@ def _layout_from_declaration(value: str) -> StorageLayout:
     return layout
 
 
-def expected_metadata(layout: StorageLayout, *, store_timestamps: bool = True) -> sqlalchemy.MetaData:
+def expected_metadata(
+    layout: StorageLayout, *, store_timestamps: bool = True, indexes: IndexPolicy | None = None
+) -> sqlalchemy.MetaData:
     """Return SQLAlchemy metadata for all protocol-owned tables of ``layout``."""
     metadata = sqlalchemy.MetaData()
     metadata_table_for(metadata)
@@ -261,10 +274,69 @@ def expected_metadata(layout: StorageLayout, *, store_timestamps: bool = True) -
     for family in layout.families:
         schemas = tuple(resolve_schema(record) for record in family.records)
         for schema in schemas:
-            table_for(schema, metadata, store_timestamps=store_timestamps)
+            table_for(schema, metadata, store_timestamps=store_timestamps, indexes=indexes)
         if len(schemas) > 1:
             dispatch_table_for(family.name, tuple(zip(family.record_names, schemas, strict=True)), metadata)
     return metadata
+
+
+def _index_policy_for(
+    layout: StorageLayout, indexes: Literal["all", "minimal"], skip_indexes: Collection[str]
+) -> IndexPolicy:
+    """Return the :class:`~httk.store.backend.sql.mapping.IndexPolicy` of a store's index settings.
+
+    :param layout: The store layout; its entry-family backing tables keep their bookkeeping indexes.
+    :param indexes: ``"all"`` or ``"minimal"``.
+    :param skip_indexes: Further non-unique index names to leave out.
+    :return: The policy.
+    """
+    entry_tables = frozenset(
+        resolve_schema(record).table_name for family in layout.families for record in family.records
+    )
+    return IndexPolicy(minimal=indexes == "minimal", entry_tables=entry_tables, skip=frozenset(skip_indexes))
+
+
+def _parse_index_policy(value: str | None) -> tuple[Literal["all", "minimal"], frozenset[str]] | None:
+    """Parse a stamped index policy (absent means all indexes), returning ``None`` when malformed.
+
+    :param value: The stamped ``index_policy`` metadata value, or ``None`` when absent.
+    :return: The ``indexes`` setting and the skipped index names.
+    """
+    if value is None:
+        return "all", frozenset()
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or set(parsed) != {"indexes", "skip_indexes"}:
+        return None
+    indexes, skip = parsed["indexes"], parsed["skip_indexes"]
+    if indexes not in ("all", "minimal") or not isinstance(skip, list) or not all(isinstance(n, str) for n in skip):
+        return None
+    return indexes, frozenset(skip)
+
+
+def _validate_skip_indexes(layout: StorageLayout, names: Collection[str], *, store_timestamps: bool) -> None:
+    """Refuse ``skip_indexes`` names that are integrity constraints or that ``layout`` never creates.
+
+    :param layout: The store layout.
+    :param names: The requested index names.
+    :param store_timestamps: Whether the store keeps timestamps (and so their indexes).
+    :raises ValueError: If a name is a unique index or primary key, or is not an index of ``layout``.
+    """
+    metadata = expected_metadata(layout, store_timestamps=store_timestamps)
+    declared = {str(index.name): bool(index.unique) for table in metadata.tables.values() for index in table.indexes}
+    for name in sorted(names):
+        primary = name.startswith("sqlite_autoindex_") or (name.endswith("_pkey") and name[:-5] in metadata.tables)
+        if declared.get(name) or primary:
+            raise ValueError(
+                f"cannot skip index {name!r}: unique indexes and primary keys are integrity constraints "
+                "and cannot be skipped"
+            )
+        if name not in declared:
+            close = difflib.get_close_matches(name, [other for other, unique in declared.items() if not unique])
+            hint = f"; close matches: {', '.join(close)}" if close else ""
+            raise ValueError(f"cannot skip index {name!r}: the declared records never create it{hint}")
 
 
 def metadata_table_for(metadata: sqlalchemy.MetaData) -> sqlalchemy.Table:

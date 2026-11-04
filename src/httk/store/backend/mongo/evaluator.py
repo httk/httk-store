@@ -14,10 +14,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from httk.core.storage import QueryLiteralError
-
 from httk.store.backend.codecs import ValueCodec, codec_named
 from httk.store.backend.schema import FieldSpec, TableSchema
+from httk.store.query.optimade_filters import FilterTranslationError
 
 __all__ = [
     "MongoPredicate",
@@ -531,7 +530,11 @@ def _compare(
             }[operator]
     except TypeError:
         return None
-    raise QueryLiteralError(f"unsupported stored-property comparison operator {operator!r}")
+    raise FilterTranslationError(
+        f"stored-property comparison operator {operator!r} is not implemented; the property's"
+        " StoredPropertyProjection query callback must handle it rather than forward it to compare()",
+        "not-implemented",
+    )
 
 
 def _comparison_codec(left: MongoValue, right: MongoValue) -> ValueCodec | None:

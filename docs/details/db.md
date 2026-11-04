@@ -43,6 +43,38 @@ psycopg 3 driver is supported: a bare `postgresql://` URL is normalized to
 `postgresql+psycopg://` and any other explicit driver is rejected. See the
 [PostgreSQL testing guide](../postgres-testing.md) for local setup.
 
+### Index policy
+
+`indexes=` chooses which non-unique indexes a new SQL store creates. A new
+`DuckdbStore` defaults to `indexes="minimal"`: it leaves out every child
+table's parent-sid index and the `store_timestamp`, `logical_id`, `alt_id` and
+`(alt_id, alt_kind)` indexes of record tables outside the entry families.
+DuckDB keeps automatic min/max zonemaps and stores child rows in parent order,
+so those indexes only cost space (over 40% of a structure store) and slow
+per-record fetches. SQLite and PostgreSQL stores default to `indexes="all"`:
+their fetches need the child-table indexes. Primary keys and unique indexes
+(`uq_<table>_content_id`, `immutable_id`) are integrity constraints and are
+always created.
+
+`skip_indexes=` names further non-unique indexes to leave out, exactly as they
+are named in the database (`ix_<table>_<column>`), on any SQL store:
+
+```python
+from httk.atomistic import StructureEntry, UnitcellStructureRecord
+
+store = SqliteStore(
+    "structures.sqlite",
+    entry_records={StructureEntry: UnitcellStructureRecord},
+    skip_indexes=["ix_atomistic_unitcell_structure_optimization_type"],
+)
+```
+
+Naming a unique index, a primary key, or an index the declared records never
+create raises `ValueError`. The policy is stamped in the store on creation and
+a reopen adopts it; reopening with a different explicit policy raises
+`ValueError`, so changing it means rebuilding the store. Stores created before
+index policies existed open as `indexes="all"`.
+
 ### Advanced: `Backend` and `SqlStore`
 
 The per-dialect classes are thin subclasses of `SqlStore`. Use the two-object

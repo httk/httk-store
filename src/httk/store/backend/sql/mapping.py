@@ -21,14 +21,19 @@ documents, plus the store-managed columns:
   edge column, and its edge table indexes ``entry_id`` (performance only, outside
   the schema fingerprint).
 
+An :class:`IndexPolicy` leaves chosen non-unique indexes out of the built
+tables; the store applies its policy here, so table creation, upgrades and bulk
+ingest all see the same index set.
+
 Index names are deterministic and table-scoped — ``ix_<table>_<column>`` for
 plain indexes, ``uq_<table>_<column>`` for unique ones, columns joined by
 underscores for composites — truncated with a stable hash suffix when they
 would exceed common identifier-length limits.
 """
 
+import dataclasses
 import hashlib
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import Any, Final
 
 import sqlalchemy
@@ -63,6 +68,7 @@ __all__ = [
     "SOURCE_LID_COLUMN",
     "STORE_TIMESTAMP_COLUMN",
     "TARGET_LID_COLUMN",
+    "IndexPolicy",
     "added_column_ddl",
     "backing_dispatch_column_name",
     "dispatch_table_for",
@@ -114,7 +120,8 @@ _TYPE_FOR_KIND: Final[dict[ScalarKind, type[sqlalchemy.types.TypeEngine[Any]]]] 
     # Double (a Float subclass), not Float: a Python float is a C double, and on
     # dialects that distinguish the two (DuckDB renders Float as a 4-byte FLOAT)
     # plain Float would silently round query companions on dialects such as
-    # DuckDB. Exact float reconstruction uses the codec's text companion.
+    # DuckDB. Exact float reconstruction uses the codec's text companion; a tensor's
+    # "" exact sentinel rebuilds from these doubles, so they must be full binary64.
     "float": sqlalchemy.Double,
     "str": sqlalchemy.Text,
     "bool": sqlalchemy.Boolean,
@@ -122,11 +129,49 @@ _TYPE_FOR_KIND: Final[dict[ScalarKind, type[sqlalchemy.types.TypeEngine[Any]]]] 
 }
 
 
-def sqlalchemy_metadata(schemas: Iterable[TableSchema], *, store_timestamps: bool = True) -> sqlalchemy.MetaData:
+_INDEX_ROLE: Final = "httk_index_role"
+"""The ``Index.info`` key tagging the indexes a minimal :class:`IndexPolicy` may leave out."""
+
+
+@dataclasses.dataclass(frozen=True)
+class IndexPolicy:
+    """The non-unique indexes :func:`table_for` leaves out of the tables it builds.
+
+    Unique indexes and primary keys are integrity constraints and are always kept.
+
+    :param minimal: Whether to leave out every child table's parent-sid index
+        and the ``store_timestamp``, ``logical_id``, ``alt_id`` and
+        ``(alt_id, alt_kind)`` indexes of parent tables outside ``entry_tables``.
+    :param entry_tables: The entry-family backing tables, which keep their bookkeeping indexes.
+    :param skip: Further index names to leave out.
+    """
+
+    minimal: bool = False
+    entry_tables: frozenset[str] = frozenset()
+    skip: frozenset[str] = frozenset()
+
+    def keeps(self, table: sqlalchemy.Table, index: sqlalchemy.Index) -> bool:
+        """Whether ``index`` of ``table`` is created under this policy.
+
+        :param table: The table owning the index.
+        :param index: The index.
+        :return: ``False`` when the policy leaves the index out.
+        """
+        if index.unique:
+            return True
+        if index.name in self.skip:
+            return False
+        role = index.info.get(_INDEX_ROLE)
+        return not self.minimal or role is None or (role == "bookkeeping" and table.name in self.entry_tables)
+
+
+def sqlalchemy_metadata(
+    schemas: Iterable[TableSchema], *, store_timestamps: bool = True, indexes: IndexPolicy | None = None
+) -> sqlalchemy.MetaData:
     """A fresh :class:`sqlalchemy.MetaData` holding the tables of ``schemas`` (recursively)."""
     metadata = sqlalchemy.MetaData()
     for schema in schemas:
-        table_for(schema, metadata, store_timestamps=store_timestamps)
+        table_for(schema, metadata, store_timestamps=store_timestamps, indexes=indexes)
     return metadata
 
 
@@ -221,7 +266,13 @@ def identity_owner_tables(
     return entry, immutable
 
 
-def table_for(schema: TableSchema, metadata: sqlalchemy.MetaData, *, store_timestamps: bool = True) -> sqlalchemy.Table:
+def table_for(
+    schema: TableSchema,
+    metadata: sqlalchemy.MetaData,
+    *,
+    store_timestamps: bool = True,
+    indexes: IndexPolicy | None = None,
+) -> sqlalchemy.Table:
     """The :class:`sqlalchemy.Table` of ``schema`` within ``metadata``, building it on first use.
 
     Building is idempotent per metadata — if the table is already registered it
@@ -229,6 +280,9 @@ def table_for(schema: TableSchema, metadata: sqlalchemy.MetaData, *, store_times
     the tables of every referenced storable class (reference fields and
     storable child elements alike) are built into the same metadata, so the
     complete logical layout is available to the storage algorithms.
+
+    ``indexes`` removes the indexes it leaves out from every table of
+    ``metadata``; pass the same policy for every build into one metadata.
     """
     existing = metadata.tables.get(schema.table_name)
     if existing is not None:
@@ -244,10 +298,16 @@ def table_for(schema: TableSchema, metadata: sqlalchemy.MetaData, *, store_times
     for link in schema.links:
         link_table_for(link, metadata, store_timestamps=store_timestamps)
     for target in schema.referenced_classes():
-        table_for(resolve_schema(target), metadata, store_timestamps=store_timestamps)
+        table_for(resolve_schema(target), metadata, store_timestamps=store_timestamps, indexes=indexes)
     for spec in schema.fields:
         if spec.strong_link is not None:
             _index_strong_link_edges(spec, metadata)
+    if indexes is not None:
+        # The single filtering point of the store's index policy.
+        for built in metadata.tables.values():
+            for index in tuple(built.indexes):
+                if not indexes.keeps(built, index):
+                    built.indexes.discard(index)
     return table
 
 
@@ -322,7 +382,9 @@ def _column(spec: ColumnSpec) -> sqlalchemy.Column[Any]:
     return sqlalchemy.Column(spec.name, _TYPE_FOR_KIND[spec.kind](), nullable=spec.nullable)
 
 
-def added_column_ddl(table_name: str, spec: ColumnSpec, connection: sqlalchemy.Connection) -> list[str]:
+def added_column_ddl(
+    table_name: str, spec: ColumnSpec, connection: sqlalchemy.Connection, *, indexes: Collection[str] | None = None
+) -> list[str]:
     """The DDL statements adding one nullable column (and its declared index) to an existing table.
 
     The column type and the deterministic index name reuse the same mappings
@@ -332,17 +394,18 @@ def added_column_ddl(table_name: str, spec: ColumnSpec, connection: sqlalchemy.C
     :param table_name: The existing parent table being altered.
     :param spec: The nullable column to add (an additive upgrade only adds nullable columns).
     :param connection: The live connection whose dialect renders types and quotes identifiers.
+    :param indexes: The index names the table keeps under the store's
+        :class:`IndexPolicy`, or ``None`` to keep every declared index.
     :return: One ``ALTER TABLE ... ADD COLUMN`` statement, plus an idempotent
-        ``CREATE INDEX IF NOT EXISTS`` statement when the column declares an index.
+        ``CREATE INDEX IF NOT EXISTS`` statement when the column declares a kept index.
     """
     assert spec.nullable, "additive upgrade columns must be nullable"
     dialect = connection.dialect
     quote = dialect.identifier_preparer.quote
     type_sql = _TYPE_FOR_KIND[spec.kind]().compile(dialect=dialect)
     statements = [f"ALTER TABLE {quote(table_name)} ADD COLUMN {quote(spec.name)} {type_sql}"]
-    if spec.unique or spec.indexed:
-        prefix = "uq" if spec.unique else "ix"
-        index_name = _index_name(prefix, table_name, (spec.name,))
+    index_name = _index_name("uq" if spec.unique else "ix", table_name, (spec.name,))
+    if (spec.unique or spec.indexed) and (indexes is None or index_name in indexes):
         unique = "UNIQUE " if spec.unique else ""
         statements.append(
             f"CREATE {unique}INDEX IF NOT EXISTS {quote(index_name)} ON {quote(table_name)} ({quote(spec.name)})"
@@ -377,13 +440,19 @@ def _build_parent_table(
     items.append(
         sqlalchemy.CheckConstraint(f"{ROLE_COLUMN} IN (0, 1)", name=_index_name("ck", name, (ROLE_COLUMN, "valid")))
     )
+    # The bookkeeping indexes are tagged: a minimal IndexPolicy keeps them only on entry-family tables.
+    bookkeeping = {_INDEX_ROLE: "bookkeeping"}
     if store_timestamps:
         items.append(sqlalchemy.Column(STORE_TIMESTAMP_COLUMN, sqlalchemy.BigInteger, nullable=False))
-        items.append(sqlalchemy.Index(_index_name("ix", name, (STORE_TIMESTAMP_COLUMN,)), STORE_TIMESTAMP_COLUMN))
+        items.append(
+            sqlalchemy.Index(
+                _index_name("ix", name, (STORE_TIMESTAMP_COLUMN,)), STORE_TIMESTAMP_COLUMN, info=bookkeeping
+            )
+        )
     # Unconditional lineage column (unlike the opt-in store_timestamp): a fresh
     # record carries its own sid here, a replacement copies its predecessor's.
     items.append(sqlalchemy.Column(LOGICAL_ID_COLUMN, sqlalchemy.BigInteger, nullable=False))
-    items.append(sqlalchemy.Index(_index_name("ix", name, (LOGICAL_ID_COLUMN,)), LOGICAL_ID_COLUMN))
+    items.append(sqlalchemy.Index(_index_name("ix", name, (LOGICAL_ID_COLUMN,)), LOGICAL_ID_COLUMN, info=bookkeeping))
     # Alternative-group identity (a main's logical_id, self for mains) and kind
     # (NULL for mains). The composite index serves group/kind lookups. It is
     # deliberately NOT unique: "one alternative lineage per (group, kind)" is
@@ -393,10 +462,12 @@ def _build_parent_table(
     # instead reject an alternative's OWN revisions, which append rows copying
     # the same (group, kind). See replace().
     items.append(sqlalchemy.Column(ALT_ID_COLUMN, sqlalchemy.BigInteger, nullable=False))
-    items.append(sqlalchemy.Index(_index_name("ix", name, (ALT_ID_COLUMN,)), ALT_ID_COLUMN))
+    items.append(sqlalchemy.Index(_index_name("ix", name, (ALT_ID_COLUMN,)), ALT_ID_COLUMN, info=bookkeeping))
     items.append(sqlalchemy.Column(ALT_KIND_COLUMN, sqlalchemy.Text, nullable=True))
     items.append(
-        sqlalchemy.Index(_index_name("ix", name, (ALT_ID_COLUMN, ALT_KIND_COLUMN)), ALT_ID_COLUMN, ALT_KIND_COLUMN)
+        sqlalchemy.Index(
+            _index_name("ix", name, (ALT_ID_COLUMN, ALT_KIND_COLUMN)), ALT_ID_COLUMN, ALT_KIND_COLUMN, info=bookkeeping
+        )
     )
     if schema.dedup == "content_id":
         items.append(sqlalchemy.Column(CONTENT_ID_COLUMN, sqlalchemy.Text, nullable=False))
@@ -429,7 +500,9 @@ def _build_child_table(
             sqlalchemy.Integer,
             nullable=False,
         ),
-        sqlalchemy.Index(_index_name("ix", child.table_name, (parent_sid,)), parent_sid),
+        sqlalchemy.Index(
+            _index_name("ix", child.table_name, (parent_sid,)), parent_sid, info={_INDEX_ROLE: "parent_sid"}
+        ),
         sqlalchemy.Column(_index_column(spec.field), sqlalchemy.Integer, nullable=False),
     ]
     for column_spec in child.element_columns:

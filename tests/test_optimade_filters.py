@@ -197,7 +197,7 @@ def make_handlers() -> dict[str, Any]:
     return handlers
 
 
-def translate(filter_string, *, relationship_targets=(), resolver=None, handlers=None):
+def translate(filter_string, *, relationship_targets=(), resolver=None, handlers=None, entry_type=None):
     search_variable = FakeVariable("structures")
     return translate_filter_ast(
         parse_optimade_filter(filter_string) if isinstance(filter_string, str) else filter_string,
@@ -207,6 +207,7 @@ def translate(filter_string, *, relationship_targets=(), resolver=None, handlers
         ("_httk_",),
         relationship_targets=relationship_targets,
         related_property_resolver=resolver,
+        entry_type=entry_type,
     )
 
 
@@ -369,9 +370,34 @@ def test_not_comparison():
 # ---------------------------------------------------------------------- error categories
 
 
-def test_unknown_nonprefixed_property_matches_nothing():
-    expr = translate("bananas = 3")
-    assert expr.tree == FALSE_TREE
+@pytest.mark.parametrize(
+    "filter_string",
+    ("bananas = 3", "3 < bananas", "bananas IS KNOWN", 'bananas HAS "x"', "bananas LENGTH 1", 'bananas CONTAINS "x"'),
+)
+def test_unknown_unprefixed_property_is_unrecognized(filter_string):
+    # OPTIMADE: an unknown name without a database-specific prefix MUST be rejected (400).
+    with pytest.raises(FilterTranslationError, match="bananas") as excinfo:
+        translate(filter_string, entry_type="structures")
+    assert excinfo.value.category == "unrecognized-property"
+
+
+def test_unknown_unprefixed_property_on_custom_entry_type_is_unrecognized():
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate("bananas = 3", entry_type="_httk_gadgets")
+    assert excinfo.value.category == "unrecognized-property"
+
+
+@pytest.mark.parametrize("filter_string", ("space_group_it_number = 225", 'structure_features HAS "disorder"'))
+def test_unserved_standard_property_matches_nothing(filter_string):
+    assert translate(filter_string, entry_type="structures").tree == FALSE_TREE
+
+
+def test_unknown_unprefixed_property_without_entry_type_matches_nothing():
+    assert translate("bananas = 3").tree == FALSE_TREE
+
+
+def test_foreign_prefixed_property_matches_nothing_for_an_entry_type():
+    assert translate("_other_x = 3", entry_type="structures").tree == FALSE_TREE
 
 
 def test_unknown_provider_prefixed_property_warns_for_comparison_and_has():
@@ -464,6 +490,81 @@ def test_boolean_with_ordering_operator_not_implemented():
     with pytest.raises(FilterTranslationError) as excinfo:
         translate("bananas > TRUE")
     assert excinfo.value.category == "not-implemented"
+
+
+@pytest.mark.parametrize(
+    "filter_string", ("nelements = true", "nelements != bananas", "true = nelements", 'elements CONTAINS false')
+)
+def test_unknown_identifier_operand_is_unrecognized_not_identifier_comparison(filter_string):
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate(filter_string, entry_type="structures")
+    assert excinfo.value.category == "unrecognized-property"
+
+
+@pytest.mark.parametrize(
+    "filter_string",
+    ("nelements = true", "nelements = false", 'elements CONTAINS true', "true", "NOT false", "true = 1"),
+)
+def test_lowercase_boolean_identifier_hints_at_uppercase_literals(filter_string):
+    with pytest.raises(FilterTranslationError, match="uppercase TRUE or FALSE") as excinfo:
+        translate(filter_string, entry_type="structures")
+    assert excinfo.value.category == "unrecognized-property"
+
+
+@pytest.mark.parametrize("filter_string", ("nelements = bananas", "bananas = nelements", 'elements CONTAINS bananas'))
+def test_unknown_identifier_operand_without_entry_type_is_unknown_valued(filter_string):
+    # Legacy (no entry_type): an unknown unprefixed name is unknown-valued on either side, so the
+    # identifier-vs-identifier comparison is not implemented rather than an unrecognized property.
+    assert translate("bananas = 3").tree == FALSE_TREE
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate(filter_string)
+    assert excinfo.value.category == "not-implemented"
+
+
+@pytest.mark.parametrize(
+    "filter_string",
+    ("nelements = nsites", "nelements = _other_x", "nsites < references.year", "nelements = space_group_it_number"),
+)
+def test_known_or_foreign_identifier_operands_stay_not_implemented(filter_string):
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate(filter_string, relationship_targets=("references",), entry_type="structures")
+    assert excinfo.value.category == "not-implemented"
+
+
+@pytest.mark.parametrize(
+    "filter_string",
+    (
+        "nelements HAS 1",
+        'chemical_formula_descriptive HAS "Na"',
+        'chemical_formula_descriptive HAS ANY "Na","Cl"',
+        "nelements LENGTH 1",
+        "nsites LENGTH >= 2",
+    ),
+)
+def test_has_and_length_on_scalar_property_is_type_mismatch(filter_string):
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate(filter_string)
+    assert excinfo.value.category == "type-mismatch"
+
+
+@pytest.mark.parametrize("literal", ("2026-08-02 08:30:00Z", "2026-08-02T08:30:00", "yesterday"))
+def test_non_rfc3339_timestamp_literal_is_invalid_value(literal):
+    with pytest.raises(FilterTranslationError) as excinfo:
+        format_value("timestamp", ("String", literal))
+    assert excinfo.value.category == "invalid-value"
+
+
+@pytest.mark.parametrize("filter_string", ("nelements", "NOT nelements", "nelements AND nsites = 1", "_other_x"))
+def test_boolean_property_shorthand_not_implemented(filter_string):
+    with pytest.raises(FilterTranslationError, match="boolean property shorthand") as excinfo:
+        translate(filter_string, entry_type="structures")
+    assert excinfo.value.category == "not-implemented"
+
+
+def test_boolean_property_shorthand_on_unknown_property_is_unrecognized():
+    with pytest.raises(FilterTranslationError) as excinfo:
+        translate("bananas", entry_type="structures")
+    assert excinfo.value.category == "unrecognized-property"
 
 
 def test_property_without_handler_not_implemented():

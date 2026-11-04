@@ -78,6 +78,9 @@ class DuckdbStore(SqlStore):
     ``Backend`` shared across a ``with`` block, use :class:`~httk.store.backend.sql.engine.Backend` and
     :class:`~httk.store.backend.sql.store.SqlStore` directly.
 
+    A new DuckDB store defaults to ``indexes="minimal"``: DuckDB's zonemaps
+    serve the child-table and bookkeeping lookups those indexes would.
+
     :param path: The database file path, or ``None`` for an in-memory database.
     :param read_only: Open the file in DuckDB ``READ_ONLY`` access mode, so
         several processes may open it concurrently for reading; writes then fail.

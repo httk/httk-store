@@ -165,9 +165,10 @@ class _Chunk:
             if exact is None:
                 return None
             assert spec.shape is not None
-            # Exact text is the round-trip source; the float columns are query-only here
+            # Exact text is the round-trip source; the floats only back its "" sentinel
             # (a lazy row's ``_httk_stored_floats`` reads them directly, without decoding).
-            return decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols)
+            floats = [row[self.columns[column.name]] for column in spec.columns[:-1]]
+            return decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols, floats)
         if spec.role == "reference":
             target_sid = row[self.columns[spec.columns[0].name]]
             if target_sid is None:
@@ -210,8 +211,10 @@ class _Chunk:
         entries = grouped.get(sid, [])
         assert spec.child is not None
         if spec.shape is not None:
+            exact = columns[_exact_column(spec.field)]
+            floats = [columns[column.name] for column in spec.child.element_columns[:-1]]
             rows = [
-                decode_fracvector_exact(entry[columns[_exact_column(spec.field)]], 1, spec.shape.cols).to_fractions()[0]
+                decode_fracvector_exact(entry[exact], 1, spec.shape.cols, [entry[i] for i in floats]).to_fractions()[0]
                 for entry in entries
             ]
             return FracVector(rows)
@@ -376,7 +379,8 @@ def decode_field(store: "SqlStore", schema: TableSchema, spec: FieldSpec, sid: i
         if exact is None:
             return None
         assert spec.shape is not None
-        return decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols)
+        floats = [row[column.name] for column in spec.columns[:-1]]
+        return decode_fracvector_exact(exact, spec.shape.rows, spec.shape.cols, floats)
     raise TypeError(f"{spec.role} fields need their RowHydrator chunk")
 
 

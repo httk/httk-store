@@ -131,6 +131,7 @@ nitpick_ignore = [
     ("py:class", "sqlalchemy.Connection"),
     ("py:class", "sqlalchemy.MetaData"),
     ("py:class", "sqlalchemy.Table"),
+    ("py:class", "sqlalchemy.Index"),
     ("py:class", "sqlalchemy.ColumnElement"),
     ("py:class", "sqlalchemy.FromClause"),
     ("py:class", "sqlalchemy.Select"),

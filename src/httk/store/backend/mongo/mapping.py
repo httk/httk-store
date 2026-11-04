@@ -274,15 +274,20 @@ def index_specs_for(schema: TableSchema, *, store_timestamps: bool = True) -> li
         requested_indexed = any(column.indexed for column in field.columns)
         if not requested_unique and not requested_indexed:
             continue
-        prefix = "uq" if requested_unique else "ix"
         for column in field.columns:
-            partial = _partial_filter(f"f.{column.name}", column.kind) if requested_unique and column.nullable else None
+            unique = requested_unique
+            if field.role == "fixed_array":
+                # A Unique tensor is unique as a whole, through its exact key alone.
+                unique = column.unique
+                if not unique and not column.indexed:
+                    continue
+            partial = _partial_filter(f"f.{column.name}", column.kind) if unique and column.nullable else None
             result.append(
                 _make_index(
-                    prefix,
+                    "uq" if unique else "ix",
                     collection,
                     (column.name,),
-                    unique=requested_unique,
+                    unique=unique,
                     partial_filter_expression=partial,
                 )
             )

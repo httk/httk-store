@@ -268,3 +268,13 @@ querying and indexing. Stored values therefore reconstruct exactly at
 arbitrary precision — but SQL comparisons (and sorting) on rational fields run
 on the float companions and are **documented approximate**. Content identity
 and deduplication always use the exact form.
+
+A `FracVector` tensor whose every element is the shortest decimal of its float
+companion (coordinates parsed from a CIF, say) stores the empty string as its
+exact text: the floats already determine it, and it reconstructs as that
+decimal, exactly as `httk.core.exactmath.any_to_fraction` reads a float. Other
+tensors (`1/3`, say) keep the full text, as do fixed-shape tensors of
+`by_value` records, whose deduplication compares every parent column, and
+fixed-shape tensors declared `Indexed` or `Unique`, whose index covers the exact
+column. Stores
+written before this sentinel hold the full text everywhere and read unchanged.

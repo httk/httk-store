@@ -796,8 +796,9 @@ def _resolve_shape_field(
         raise SchemaError(f"{cls.__name__}.{name}: Shape markers apply to FracVector fields only, got {base!r}")
     if shape.rows >= 1:
         size = shape.rows * shape.cols
+        # A Unique tensor is unique as a whole: only the exact column (always full text then) carries it.
         columns = tuple(
-            ColumnSpec(_bounded_identifier(name, f"_{i}"), "float", nullable=optional, indexed=indexed, unique=unique)
+            ColumnSpec(_bounded_identifier(name, f"_{i}"), "float", nullable=optional, indexed=indexed)
             for i in range(size)
         ) + (ColumnSpec(_exact_column(name), "str", nullable=optional, indexed=indexed, unique=unique),)
         return FieldSpec(

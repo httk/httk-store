@@ -14,7 +14,7 @@ from postgres_support import POSTGRES_PARAM, postgres_database
 from httk.store import EntryIdScheme
 from httk.store.backend.mongo import MongoStore, stored_property_mongo_plan
 from httk.store.backend.mongo import stored_properties as mongo_plans
-from httk.store.backend.mongo.evaluator import evaluate
+from httk.store.backend.mongo.evaluator import MongoPredicate, evaluate
 from httk.store.backend.sql import Backend, SqlStore, stored_property_sql_plan
 from httk.store.backend.sql.stored_properties import _SqlQueryContext
 from httk.store.query.optimade_filters import FilterTranslationError, translate_filter_ast
@@ -305,6 +305,34 @@ def test_sql_list_member_predicates_stay_within_one_correlation_level(member, op
         predicate = query(context, operator, literal)
         assert predicate.correlation_depth <= 1
         assert (~predicate).correlation_depth <= 1
+
+
+def _forward_everything(context: Any, operator: str, literal: object) -> Any:
+    """An application query callback that (wrongly) forwards every operator to ``compare``."""
+    return context.compare(context.field("rmse"), operator, context.constant(literal))
+
+
+@pytest.mark.parametrize("operator", ("IS_KNOWN", "IS_UNKNOWN", "HAS_ALL", "LENGTH ="))
+def test_compare_answers_unhandled_operators_as_not_implemented(operator):
+    """``compare`` rejects non-comparison operators as not implemented (HTTP 501), never a bare error."""
+    with Backend.sqlite() as database:
+        store = SqlStore(database, entry_records=ENTRY_RECORDS, entry_ids=EntryIdScheme("httk.test", "1"))
+        searcher = store.searcher()
+        contexts = (
+            _SqlQueryContext(searcher, searcher.variable(NestedErrors)),
+            mongo_plans._MongoQueryContext(NestedErrors),
+        )
+        for context in contexts:
+            with pytest.raises(FilterTranslationError, match=operator) as caught:
+                _forward_everything(context, operator, None)
+            assert caught.value.category == "not-implemented"
+            assert "StoredPropertyProjection" in str(caught.value)
+    # The Mongo evaluator's own operator dispatch answers the same way.
+    context = mongo_plans._MongoQueryContext(NestedErrors)
+    forged = MongoPredicate("compare", (context.field("rmse"), operator, context.constant(1.0)))
+    with pytest.raises(FilterTranslationError) as caught:
+        evaluate(forged, RECORDS[0])
+    assert caught.value.category == "not-implemented"
 
 
 # ---------------------------------------------------------------------- Mongo

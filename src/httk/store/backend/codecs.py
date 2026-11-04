@@ -24,7 +24,10 @@ round-trip source of truth. The canonical text formats are:
 - :data:`FRACVECTOR_EXACT_FORMAT` — a :class:`~httk.core.FracVector` tensor as
   ``"d;n0,n1,n2,..."``: the least positive common denominator ``d`` followed by
   the integer numerators flattened row-major. Used by the schema layer for
-  fixed-shape (``Shape``) fields and per-row child-table storage.
+  fixed-shape (``Shape``) fields and per-row child-table storage. The empty
+  string is a sentinel: every element is the shortest-decimal exact value of
+  its stored float companion (``0.25`` for the float ``0.25``), so the text
+  would be redundant.
 
 httk-core is a hard dependency of httk-store, so the httk.core vector types are
 imported unconditionally; nothing in this module needs sqlalchemy.
@@ -34,11 +37,12 @@ import datetime
 import decimal
 import fractions
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from httk.core import FracScalar, FracVector, SurdScalar, SurdVector
+from httk.core.exactmath import any_to_fraction
 from httk.core.storage import register_canonical_encoder
 from httk.core.storage.rational_text import fraction_to_text
 
@@ -287,7 +291,7 @@ def _flat_fractions(value: FracVector) -> list[fractions.Fraction]:
     return flat
 
 
-def encode_fracvector_exact(value: FracVector) -> str:
+def encode_fracvector_exact(value: FracVector, *, always: bool = False) -> str:
     """The canonical :data:`FRACVECTOR_EXACT_FORMAT` text of a rational tensor.
 
     The tensor is flattened row-major and normalized through
@@ -298,35 +302,53 @@ def encode_fracvector_exact(value: FracVector) -> str:
     arbitrary precision. The shape itself is not encoded; fixed-shape schema
     fields carry it in their declaration.
 
+    Unless ``always`` is set, a tensor whose every element ``e`` satisfies
+    ``any_to_fraction(float(e)) == e`` encodes as the empty-string sentinel: its
+    :func:`encode_fracvector_floats` companions already determine it exactly, and
+    :func:`decode_fracvector_exact` rebuilds it from them.
+
     :param value: The rational tensor to encode.
-    :return: The canonical exact tensor text.
+    :param always: Return the full text even when the float companions determine the value.
+    :return: The canonical exact tensor text, or ``""`` when it is redundant.
     """
     flat = _flat_fractions(FracVector(value))
+    if not always and all(any_to_fraction(float(element)) == element for element in flat):
+        return ""
     denominator = math.lcm(*(element.denominator for element in flat)) if flat else 1
     numerators = ",".join(str(element.numerator * (denominator // element.denominator)) for element in flat)
     return f"{denominator};{numerators}"
 
 
-def decode_fracvector_exact(text: str, rows: int, cols: int) -> FracVector:
+def decode_fracvector_exact(text: str, rows: int, cols: int, floats: Sequence[float] | None = None) -> FracVector:
     """Parse :data:`FRACVECTOR_EXACT_FORMAT` text into a ``rows`` x ``cols`` :class:`~httk.core.FracVector`.
 
     The numerators are laid out row-major into a tensor of shape
-    ``(rows, cols)``; their count must equal ``rows * cols``. Raises
+    ``(rows, cols)``; their count must equal ``rows * cols``. The empty-string
+    sentinel written by :func:`encode_fracvector_exact` rebuilds every element as
+    ``any_to_fraction`` of its row-major stored float in ``floats``. Raises
     :class:`ValueError` on malformed text or a count/shape mismatch.
 
     :param text: The exact tensor text to parse.
     :param rows: The expected row count.
     :param cols: The expected column count.
+    :param floats: The stored float companions, row-major; required for the ``""`` sentinel.
     :return: The reconstructed rational tensor.
-    :raises ValueError: If the text or requested shape is invalid.
+    :raises ValueError: If the text or requested shape is invalid, or the sentinel lacks its floats.
     """
     if rows < 1 or cols < 1:
         raise ValueError(f"decode_fracvector_exact requires rows >= 1 and cols >= 1, got {rows}x{cols}")
-    denominator_text, _, numerators_text = text.partition(";")
-    denominator = int(denominator_text)
-    if denominator < 1:
-        raise ValueError(f"invalid exact tensor text {text!r}; denominator must be positive")
-    numerators = [int(part) for part in numerators_text.split(",")] if numerators_text else []
+    if text == "":
+        if floats is None:
+            raise ValueError("the empty exact tensor sentinel needs its stored float columns")
+        elements = [any_to_fraction(part) for part in floats]
+        denominator = math.lcm(*(element.denominator for element in elements))
+        numerators = [element.numerator * (denominator // element.denominator) for element in elements]
+    else:
+        denominator_text, _, numerators_text = text.partition(";")
+        denominator = int(denominator_text)
+        if denominator < 1:
+            raise ValueError(f"invalid exact tensor text {text!r}; denominator must be positive")
+        numerators = [int(part) for part in numerators_text.split(",")] if numerators_text else []
     if len(numerators) != rows * cols:
         raise ValueError(f"exact tensor text {text!r} holds {len(numerators)} elements; expected {rows}x{cols}")
     noms = tuple(tuple(numerators[row * cols : (row + 1) * cols]) for row in range(rows))

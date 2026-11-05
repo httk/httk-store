@@ -3018,6 +3018,30 @@ class MongoStore:
         self._identity._instances.pop((FileRecord, int(sid)), None)
         return updated
 
+    def reclaim_space(self, effort: typing.Literal["light", "full"] = "light") -> int | None:
+        """Return storage space the database no longer needs to the server.
+
+        ``"light"`` does nothing (WiredTiger reuses freed space by itself);
+        ``"full"`` runs ``compact`` on every non-system collection of the store
+        database. ``compact`` needs exclusive use of the collection on older
+        servers and may be refused by some deployments; server errors propagate.
+
+        :param effort: ``"light"`` or ``"full"``, as for ``SqlStore.reclaim_space``.
+        :return: Always None; MongoDB reports no file size to shrink.
+        :raises ValueError: If ``effort`` is not ``"light"`` or ``"full"``.
+        :raises RuntimeError: Inside an active store transaction.
+        """
+        if effort not in ("light", "full"):
+            raise ValueError(f"effort must be 'light' or 'full', not {effort!r}")
+        if self._current_transaction() is not None:
+            raise RuntimeError("reclaim_space cannot run inside an active MongoStore transaction")
+        if effort == "full":
+            database = self._database.database
+            for name in sorted(database.list_collection_names()):
+                if not name.startswith("system."):
+                    database.command("compact", name)
+        return None
+
     def link(self, source: Any, name: str, target: Any) -> None:
         """Assert a weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
 

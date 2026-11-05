@@ -65,6 +65,9 @@ recovery, OPTIMADE serving, and store-layout versioning.
 
 To query or serve an existing SQL database in place, see {doc}`details/db-tables`.
 
+`store.reclaim_space("full")` shrinks a store after deletions or a long build of
+small saves; see [Reclaiming space](details/db-recovery.md#reclaiming-space).
+
 (serving-application-records)=
 ## Serving application records
 

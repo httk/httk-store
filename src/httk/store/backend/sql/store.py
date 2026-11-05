@@ -38,6 +38,7 @@ import itertools
 import json
 import math
 import os
+import shutil
 import threading
 import time
 import typing
@@ -4233,6 +4234,149 @@ class SqlStore:
                 self._after_degraded_write(f"relocate-file:{table_name}")
         self._identity._instances.pop((FileRecord, int(sid)), None)
         return updated
+
+    def reclaim_space(self, effort: Literal["light", "full"] = "light") -> int | None:
+        """Return storage space the database no longer needs to the filesystem or server.
+
+        Per dialect, ``"light"`` / ``"full"`` run:
+
+        - SQLite: ``PRAGMA optimize`` (which does not shrink the file) / ``VACUUM``.
+        - DuckDB: ``CHECKPOINT`` / a rewrite of the database into a fresh file
+          (``COPY FROM DATABASE``) that then replaces the original. ``CHECKPOINT``
+          and ``VACUUM`` never shrink a DuckDB file, so only ``"full"`` does.
+        - PostgreSQL: ``VACUUM (ANALYZE)`` / ``VACUUM (FULL, ANALYZE)`` per base
+          table of the store's schema. ``VACUUM FULL`` takes an ACCESS EXCLUSIVE
+          lock on each table and needs free disk space equal to the largest table.
+        - ClickHouse: nothing / ``OPTIMIZE TABLE ... FINAL`` per MergeTree-family table.
+
+        Every base table in the store's schema (or ClickHouse database) is
+        processed. On an in-memory database both efforts run the in-place
+        statement, or nothing, and return None.
+
+        ``"full"`` needs exclusive use of the database. The DuckDB rewrite needs
+        a file-backed, read-write store that owns its backend (a per-dialect
+        store such as ``DuckdbStore``) and no other store, ``Backend`` or process
+        with the file open; it refuses otherwise and leaves the original
+        untouched. The rewritten file keeps the original's permission bits, but
+        not its ownership or ACLs. Using this store from another thread during the rewrite
+        (for example a reader checking out a connection mid-swap) is unsupported.
+
+        :param effort: ``"light"`` for cheap in-place maintenance, ``"full"`` to
+            rewrite storage and shrink it.
+        :return: The number of bytes the database file (and, for DuckDB, its WAL)
+            shrank by (0 if it did not shrink) for a file-backed SQLite or DuckDB
+            store, else None.
+        :raises ValueError: If ``effort`` is not ``"light"`` or ``"full"``.
+        :raises RuntimeError: Inside an active transaction or open bulk-ingest
+            context, or when a DuckDB ``"full"`` precondition does not hold.
+        """
+        if effort not in ("light", "full"):
+            raise ValueError(f"effort must be 'light' or 'full', not {effort!r}")
+        if self._current_connection() is not None:
+            raise RuntimeError("reclaim_space cannot run inside an active SqlStore transaction")
+        self._reject_during_bulk()
+        engine = self._database.engine
+        dialect = engine.dialect.name
+        location = engine.url.database
+        path = location if dialect in ("sqlite", "duckdb") and location not in (None, "", ":memory:") else None
+
+        def size() -> int:
+            assert path is not None
+            wal = path + ".wal"  # DuckDB's WAL; httk SQLite stores do not use WAL mode
+            return os.path.getsize(path) + (os.path.getsize(wal) if os.path.exists(wal) else 0)
+
+        with self._mutation_lock, self._layout_write_scope():
+            before = size() if path is not None else 0
+            if dialect in ("sqlite", "postgresql"):
+                with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                    if dialect == "sqlite":
+                        connection.exec_driver_sql("VACUUM" if effort == "full" else "PRAGMA optimize")
+                    else:
+                        options = "FULL, ANALYZE" if effort == "full" else "ANALYZE"
+                        quote = connection.dialect.identifier_preparer.quote
+                        for name in sorted(actual_table_names(connection)):
+                            connection.exec_driver_sql(f"VACUUM ({options}) {quote(name)}")
+            elif dialect == "duckdb":
+                if effort == "full" and path is not None:
+                    self._rewrite_duckdb_file(path)
+                else:
+                    with engine.connect() as connection:
+                        connection.exec_driver_sql("CHECKPOINT")
+                        connection.commit()
+            elif dialect == "clickhousedb" and effort == "full":
+                with engine.connect() as connection:
+                    names = connection.exec_driver_sql(
+                        "SELECT name FROM system.tables WHERE database = currentDatabase() "
+                        "AND endsWith(engine, 'MergeTree')"
+                    ).scalars()
+                    quote = connection.dialect.identifier_preparer.quote
+                    for name in sorted(names):
+                        connection.exec_driver_sql(f"OPTIMIZE TABLE {quote(name)} FINAL")
+            return max(0, before - size()) if path is not None else None
+
+    def _rewrite_duckdb_file(self, path: str) -> None:
+        """Rewrite the DuckDB file at ``path`` compactly and swap it into place (see :meth:`reclaim_space`)."""
+        import duckdb
+
+        if not self._owns_database:
+            raise RuntimeError(
+                "reclaim_space(effort='full') on DuckDB needs a store that owns its backend (e.g. DuckdbStore); "
+                "a caller-supplied Backend may have other users of the file"
+            )
+        engine = self._database.engine
+        tmp = path + ".reclaim"
+        with engine.connect() as connection:
+            if str(connection.exec_driver_sql("SELECT current_setting('access_mode')").scalar()).lower() == "read_only":
+                raise RuntimeError("reclaim_space(effort='full') cannot rewrite a read-only DuckDB store")
+            name = str(connection.exec_driver_sql("SELECT current_database()").scalar_one())
+        try:
+            for stale in (tmp, tmp + ".wal"):
+                if os.path.exists(stale):
+                    os.remove(stale)
+            with engine.connect() as connection:
+                connection.exec_driver_sql("DETACH DATABASE IF EXISTS httk_reclaim")
+                try:
+                    literal = tmp.replace("'", "''")
+                    connection.exec_driver_sql(f"ATTACH '{literal}' AS httk_reclaim")
+                    quoted = '"' + name.replace('"', '""') + '"'
+                    connection.exec_driver_sql(f"COPY FROM DATABASE {quoted} TO httk_reclaim")
+                    connection.commit()
+                finally:
+                    connection.rollback()
+                    connection.exec_driver_sql("DETACH DATABASE IF EXISTS httk_reclaim")
+                    connection.commit()
+            # Pool only: Backend.dispose() is irreversible, this store reconnects lazily.
+            # ponytail: a reader thread of this store connecting between the probe and os.replace
+            # is unsupported (documented); fence reads with a lock if concurrent full reclaims matter.
+            engine.dispose()
+            try:
+                # Fails while a read-write instance lives in this process (ConnectionException) or
+                # another process holds the write lock (IOException). Held open until after the
+                # swap, it keeps other processes from opening the old file read-write meanwhile.
+                probe = duckdb.connect(path, read_only=True)
+            except (duckdb.ConnectionException, duckdb.IOException) as error:
+                raise RuntimeError(
+                    "reclaim_space(effort='full') refused: the DuckDB file is still open elsewhere "
+                    "(in this or another process); close every other store, Backend or process using this file first"
+                ) from error
+            try:
+                if os.path.exists(path + ".wal") or os.path.exists(tmp + ".wal"):
+                    raise RuntimeError("reclaim_space(effort='full') refused: a DuckDB WAL file was left unmerged")
+                shutil.copymode(path, tmp)
+                with open(tmp, "rb") as handle:
+                    os.fsync(handle.fileno())
+                os.replace(tmp, path)
+            finally:
+                probe.close()
+        except BaseException:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+        directory = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def stored_property_plan(self, family: type) -> Any:
         """Return the wire-form SQL stored-property plan for one configured entry family.

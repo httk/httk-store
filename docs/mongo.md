@@ -31,3 +31,6 @@ syntax, deduplication semantics, clock guard, and fsck repair behavior.
 The full guide, {doc}`details/mongo`, covers the document mapping, query
 translation, continuation paging, replica-set requirements, and the documented
 differences from the SQL backend.
+
+`store.reclaim_space("full")` runs `compact` on every collection of the store
+database; see [Reclaiming space](details/db-recovery.md#reclaiming-space).

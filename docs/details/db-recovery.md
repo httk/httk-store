@@ -158,3 +158,39 @@ WHERE key = 'ingest_state' AND value = '<observed marker JSON>';
 ```
 
 Do not delete values belonging to a live writer or use broad key-only deletes.
+
+## Reclaiming space
+
+Deleted, replaced or rewritten rows leave free space behind that most engines
+reuse for later writes but do not hand back to the filesystem.
+`store.reclaim_space()` runs cheap in-place maintenance and
+`store.reclaim_space("full")` rewrites storage to shrink it:
+
+| Backend | `"light"` (default) | `"full"` |
+|---|---|---|
+| SQLite | `PRAGMA optimize` (does not shrink the file) | `VACUUM` |
+| DuckDB | `CHECKPOINT` | rewrite into a fresh file and swap it into place |
+| PostgreSQL | `VACUUM (ANALYZE)` per table | `VACUUM (FULL, ANALYZE)` per table |
+| ClickHouse | nothing | `OPTIMIZE TABLE ... FINAL` per MergeTree table |
+| MongoDB | nothing | `compact` per collection |
+
+Every base table (or collection) in the store's schema or database is
+processed. For a file-backed SQLite or DuckDB store the return value is the
+number of bytes the database file (and, for DuckDB, its WAL) shrank by (0 if
+it did not); otherwise it is `None`.
+Both efforts are refused inside `store.transaction()` or an open `bulk_ingest`.
+
+`"full"` needs exclusive use of the database:
+
+- DuckDB never shrinks a file in place, not even with `CHECKPOINT` or `VACUUM`;
+  a store built by many small saves can be about twice its compact size. The
+  full rewrite copies the database (`COPY FROM DATABASE`, keeping indexes,
+  constraints and sequence state) into `<file>.reclaim` and replaces the
+  original with it. It needs a file-backed, read-write store that owns its
+  backend (`DuckdbStore`, not `SqlStore(Backend.duckdb(...))`), and refuses,
+  leaving the original untouched, while any other store, `Backend` or process
+  has the file open. The new file keeps the original's permission bits but not
+  its ownership or ACLs. Using the same store from another thread during the
+  swap is unsupported.
+- PostgreSQL `VACUUM FULL` takes an ACCESS EXCLUSIVE lock on each table in turn
+  and needs free disk space equal to the largest table.

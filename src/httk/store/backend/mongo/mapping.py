@@ -270,24 +270,18 @@ def index_specs_for(schema: TableSchema, *, store_timestamps: bool = True) -> li
     for field in schema.fields:
         if field.role == "child":
             continue
-        requested_unique = any(column.unique for column in field.columns)
-        requested_indexed = any(column.indexed for column in field.columns)
-        if not requested_unique and not requested_indexed:
-            continue
+        # Per-column flags, as in SQL: an encoded field's Indexed/Unique sits on its
+        # codec's query column only, and a Unique tensor is unique through its exact key.
         for column in field.columns:
-            unique = requested_unique
-            if field.role == "fixed_array":
-                # A Unique tensor is unique as a whole, through its exact key alone.
-                unique = column.unique
-                if not unique and not column.indexed:
-                    continue
-            partial = _partial_filter(f"f.{column.name}", column.kind) if unique and column.nullable else None
+            if not column.unique and not column.indexed:
+                continue
+            partial = _partial_filter(f"f.{column.name}", column.kind) if column.unique and column.nullable else None
             result.append(
                 _make_index(
-                    "uq" if unique else "ix",
+                    "uq" if column.unique else "ix",
                     collection,
                     (column.name,),
-                    unique=unique,
+                    unique=column.unique,
                     partial_filter_expression=partial,
                 )
             )

@@ -168,9 +168,14 @@ def test_decorated_only_records_layout_is_unchanged() -> None:
         # FileRecord.url became nullable (lost files), via the structure source_file.
         # Re-pinned 2026-10-22: the `references` weak link on the unitcell structure
         # and FileRecord tables (only their `links` entries changed).
-        (ResultWithStructure,): "eb908fc1a6719b56",
-        (Result,): "6f112d9b5ed9c225",
-        (Alpha, Beta): "1329a570deae655b",
+        # Re-pinned November 5, 2026 (all three): plain floats lost their `_exact` column
+        # (storage protocol "3"): formation_energy, Alpha.value and, via the structure,
+        # SpeciesConstituentRecord.mass. Restoring the old float codec columns alone
+        # reproduces the previous eb908fc1a6719b56 / 6f112d9b5ed9c225 / 1329a570deae655b;
+        # NumericUnitcellStructureRecord is not part of these layouts.
+        (ResultWithStructure,): "d8452526aefbdae0",
+        (Result,): "84a01b57df46e5e0",
+        (Alpha, Beta): "0e5c3dbfcf40770e",
     }
     for records, digest in layouts.items():
         layout = normalize_entry_types(list(records))

@@ -21,6 +21,9 @@ The markers below are `typing.Annotated` metadata plus one class variable:
   nine columns of the parent table.
 - `Annotated[FracVector, Shape(0, 3)]` — a *variable* number of 3-vectors; `0`
   means "any length", so this becomes a child table with one row per vector.
+- `Annotated[tuple[tuple[float, ...], ...], Shape(3, 3)]` — a float matrix
+  (say, from a numpy array): nine plain `DOUBLE` columns, no exact text.
+  `float_matrix` turns nested sequences or arrays into this tuple form.
 - `list[str]` — likewise a child table. `Author | None` becomes a nullable
   foreign key, and the referenced `Author` is saved recursively first.
 - `Annotated[str, Skip()]` — not stored at all; it comes back as the field's
@@ -72,7 +75,7 @@ from pathlib import Path
 from typing import Annotated, ClassVar
 
 from httk.core import FracVector
-from httk.core.storage import Indexed, Shape, Skip, StorageInfo, content_id, stored_property
+from httk.core.storage import Indexed, Shape, Skip, StorageInfo, content_id, float_matrix, stored_property
 
 from httk.store.backend.schema import resolve_schema
 from httk.store.backend.sql import Backend, SqlStore
@@ -103,6 +106,7 @@ class Measurement:
     symbols: list[str]  # child table
     author: Author | None = None  # nullable foreign key
     scratch: Annotated[str, Skip()] = "not stored"  # never written
+    stress: Annotated[tuple[tuple[float, ...], ...], Shape(3, 3)] | None = None  # float matrix, DOUBLE columns
 
     @stored_property
     def natoms(self) -> int:
@@ -131,6 +135,7 @@ PEROVSKITE = Measurement(
     coords=FracVector([[0, 0, 0], [Fraction(1, 2), Fraction(1, 2), Fraction(1, 2)]]),
     symbols=["Ca", "Ti", "O"],
     author=ADA,
+    stress=float_matrix([[1.5, 0, 0], [0, 1.5, 0], [0, 0, -0.25]], 3, rows=3),
 )
 
 ROCKSALT = Measurement(
@@ -187,6 +192,7 @@ def show_round_trip(store: SqlStore, database: Backend) -> int:
     )
     print(f"  cell[0][1]:    {fetched.cell[0][1].to_fraction()}  (exact, not {float(Fraction(1, 3))!r})")
     print(f"  a float round-trip would instead have given: {Fraction(float(Fraction(1, 3)))}")
+    print(f"  the float matrix comes back as floats: stress[2] = {fetched.stress[2] if fetched.stress else None}")
     print(
         f"  whole tensors equal: cell {fetched.cell == PEROVSKITE.cell}, coords {fetched.coords == PEROVSKITE.coords}"
     )
@@ -207,6 +213,7 @@ def show_dedup(store: SqlStore, sid: int) -> None:
         coords=FracVector([[0, 0, 0], [Fraction(1, 2), Fraction(1, 2), Fraction(1, 2)]]),
         symbols=["Ca", "Ti", "O"],
         author=Author("Lovelace", 1843),
+        stress=((1.5, 0.0, 0.0), (0.0, 1.5, 0.0), (0.0, 0.0, -0.25)),
         scratch="a different scratch value: not stored, so not part of the identity",
     )
     twin_sid = store.save(twin)

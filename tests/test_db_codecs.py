@@ -46,12 +46,12 @@ def test_codec_for_matches_exact_type_then_subclass():
     assert codec_for(list[int]) is None
 
 
-def test_float_codec_preserves_signed_zero_exactly():
+def test_float_codec_is_one_column_and_folds_signed_zero():
     codec = codec_named("float")
-    assert codec.encode(-0.0)[1] == "-0x0.0p+0"
-    assert codec.encode(0.0)[1] == "0x0.0p+0"
-    assert math.copysign(1.0, codec.decode(codec.encode(-0.0))) == -1.0
-    assert math.copysign(1.0, codec.decode(codec.encode(0.0))) == 1.0
+    assert codec.columns == (("", "float"),)
+    assert [value.hex() for value in codec.encode(-0.0)] == ["0x0.0p+0"]  # signed zero is not content
+    assert type(codec.encode(1)[0]) is float
+    assert math.isnan(codec.encode(math.nan)[0])
 
     class MyFraction(Fraction):
         pass

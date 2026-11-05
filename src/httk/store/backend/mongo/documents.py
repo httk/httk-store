@@ -1,6 +1,7 @@
 """Encoding and decoding of MongoStore record documents."""
 
 import inspect
+import itertools
 import typing
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -10,6 +11,8 @@ from httk.core import FracVector
 from httk.core.storage import Shape
 
 from httk.store.backend.codecs import (
+    _float_tensor,
+    _float_tensor_rows,
     codec_named,
     decode_fracvector_exact,
     encode_fracvector_exact,
@@ -20,6 +23,7 @@ from httk.store.backend.schema import (
     TableSchema,
     _bounded_identifier,
     _exact_column,
+    _is_float_tensor,
 )
 
 from .mapping import document_fields_for
@@ -110,7 +114,11 @@ def encode_record(
         if spec.role == "child":
             assert spec.child is not None
             elements: list[Any] = []
-            if spec.shape is not None:
+            if _is_float_tensor(spec):
+                assert spec.shape is not None
+                for float_row in _float_tensor_rows(value, 0, spec.shape.cols, f"{record_type.__name__}.{spec.field}"):
+                    elements.append(dict(zip(plan.element_keys, float_row, strict=True)))
+            elif spec.shape is not None:
                 assert spec.shape is not None
                 for row in _tensor_rows(schema, spec, spec.shape, value):
                     parts = encode_fracvector_floats(row)
@@ -156,6 +164,12 @@ def encode_record(
         elif spec.role == "encoded":
             assert spec.codec_name is not None
             result.update(dict(zip(plan.keys, codec_named(spec.codec_name).encode(value), strict=True)))
+        elif spec.role == "fixed_array" and _is_float_tensor(spec):
+            assert spec.shape is not None
+            float_rows = _float_tensor_rows(
+                value, spec.shape.rows, spec.shape.cols, f"{record_type.__name__}.{spec.field}"
+            )
+            result.update(zip(plan.keys, itertools.chain.from_iterable(float_rows), strict=True))
         elif spec.role == "fixed_array":
             assert spec.shape is not None
             tensor = _as_fixed_tensor(schema, spec, spec.shape, value)
@@ -182,6 +196,8 @@ def _decode_child(spec: FieldSpec, value: Any, resolve_reference: Callable[[type
     if value is None:
         return None
     assert spec.child is not None
+    if _is_float_tensor(spec):
+        return tuple(tuple(element[column.name] for column in spec.child.element_columns) for element in value)
     if spec.shape is not None:
         names = [column.name for column in spec.child.element_columns[:-1]]
         rows = [
@@ -239,6 +255,10 @@ def decode_record(
             values[spec.field] = (
                 None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
             )
+        elif spec.role == "fixed_array" and _is_float_tensor(spec):
+            assert spec.shape is not None
+            floats = [embedded.get(key) for key in plan.keys]
+            values[spec.field] = None if floats[0] is None else _float_tensor(floats, spec.shape.cols)
         elif spec.role == "fixed_array":
             assert spec.shape is not None
             exact = embedded.get(_exact_column(spec.field))

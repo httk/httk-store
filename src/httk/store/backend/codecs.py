@@ -7,14 +7,17 @@ mirrors the leaf-codec registry idiom in :mod:`httk.core.vectors`: a frozen
 dataclass plus module-level registration functions, with built-in codecs
 registered at import time.
 
+A plain ``float`` (and each float sequence element) is one ``DOUBLE``
+column with no text companion: the column itself is the binary64 value.
+Signed zero is not content, so ``-0.0`` is stored as ``0.0`` (as content
+identity hashes it). Equality and ``NaN`` handling follow the backend; SQLite
+cannot store ``NaN`` and rejects it on write.
+
 Rational values are stored **losslessly**: a query/index column holds the
 nearest ``float`` (comparisons on it are documented float-approximate), while a
 companion ``*_exact`` text column holds a canonical exact form that is the
 round-trip source of truth. The canonical text formats are:
 
-- ``float.hex()`` — the exact finite IEEE-754 binary64 value, including the
-  sign of zero. Used for scalar ``float`` fields and float sequence elements;
-  the accompanying SQL ``DOUBLE`` remains the query/sort presentation.
 - :data:`FRACTION_EXACT_FORMAT` — a reduced fraction as ``"p/q"``, always with
   the ``/q`` part (``"1/1"`` for one), denominator positive. Used for
   :class:`fractions.Fraction` and :class:`~httk.core.FracScalar`.
@@ -37,6 +40,7 @@ import datetime
 import decimal
 import fractions
 import math
+import reprlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -368,6 +372,38 @@ def encode_fracvector_floats(value: FracVector) -> tuple[float, ...]:
     return tuple(float(element) for element in _flat_fractions(FracVector(value)))
 
 
+def _float_tensor_rows(value: Any, rows: int, cols: int, field: str) -> list[tuple[float, ...]]:
+    """Validate a canonical float-tensor value and return its rows ready to bind (``-0.0`` as ``0.0``).
+
+    The writer does not convert other sequences or arrays: content identity was
+    already computed from the value, so it must be the canonical form.
+
+    :param value: The field value, a ``tuple[tuple[float, ...], ...]``.
+    :param rows: The declared row count; ``0`` accepts any number of rows.
+    :param cols: The declared row width.
+    :param field: The ``Class.field`` name for the diagnostic.
+    :return: The rows as tuples of plain Python floats.
+    :raises ValueError: If the value is not the canonical form of the declared shape.
+    """
+    if (
+        not isinstance(value, tuple)
+        or (rows and len(value) != rows)
+        or not all(
+            isinstance(row, tuple) and len(row) == cols and all(isinstance(x, float) for x in row) for row in value
+        )
+    ):
+        raise ValueError(
+            f"{field}: expected {rows or 'any number of'} rows of {cols} floats as tuple[tuple[float, ...], ...] "
+            f"(normalise with httk.core.storage.float_matrix), got {reprlib.repr(value)}"
+        )
+    return [tuple(float(x) + 0.0 for x in row) for row in value]
+
+
+def _float_tensor(floats: Sequence[float], cols: int) -> tuple[tuple[float, ...], ...]:
+    """Regroup row-major stored floats into a float-tensor value of ``cols``-wide rows."""
+    return tuple(tuple(floats[i : i + cols]) for i in range(0, len(floats), cols))
+
+
 # --------------------------------------------------------------------- built-in codecs
 
 
@@ -398,12 +434,12 @@ def _decode_surdscalar(values: tuple[Any, ...]) -> Any:
 
 
 def _encode_float(value: Any) -> tuple[Any, ...]:
-    exact = float(value)
-    return (exact, exact.hex())
+    # Signed zero is not content: + 0.0 folds -0.0 to 0.0 (and keeps NaN) under round-to-nearest.
+    return (float(value) + 0.0,)
 
 
 def _decode_float(values: tuple[Any, ...]) -> Any:
-    return float.fromhex(values[1])
+    return values[0]
 
 
 def _encode_datetime(value: Any) -> tuple[Any, ...]:
@@ -422,7 +458,7 @@ register_value_codec(
     ValueCodec(
         name="float",
         python_type=float,
-        columns=_EXACT_COLUMNS,
+        columns=(("", "float"),),
         encode=_encode_float,
         decode=_decode_float,
     )

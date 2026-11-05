@@ -119,9 +119,10 @@ _TYPE_FOR_KIND: Final[dict[ScalarKind, type[sqlalchemy.types.TypeEngine[Any]]]] 
     "int": sqlalchemy.Integer,
     # Double (a Float subclass), not Float: a Python float is a C double, and on
     # dialects that distinguish the two (DuckDB renders Float as a 4-byte FLOAT)
-    # plain Float would silently round query companions on dialects such as
-    # DuckDB. Exact float reconstruction uses the codec's text companion; a tensor's
-    # "" exact sentinel rebuilds from these doubles, so they must be full binary64.
+    # plain Float would silently round the stored floats. A plain float field is
+    # this column alone, and a tensor's "" exact sentinel rebuilds from these
+    # doubles, so they must be full binary64. Signed zero is not content: the codec
+    # binds 0.0 for -0.0 (SQLite REAL affinity and DuckDB compression fold it anyway).
     "float": sqlalchemy.Double,
     "str": sqlalchemy.Text,
     "bool": sqlalchemy.Boolean,

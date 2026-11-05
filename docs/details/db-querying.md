@@ -276,5 +276,19 @@ decimal, exactly as `httk.core.exactmath.any_to_fraction` reads a float. Other
 tensors (`1/3`, say) keep the full text, as do fixed-shape tensors of
 `by_value` records, whose deduplication compares every parent column, and
 fixed-shape tensors declared `Indexed` or `Unique`, whose index covers the exact
-column. Stores
-written before this sentinel hold the full text everywhere and read unchanged.
+column.
+
+### Plain floats
+
+A plain `float` field has no exact text companion: its `DOUBLE` column is the
+value, and comparisons on it follow the backend. `-0.0` is stored as `0.0`, so
+`-0.0 == 0.0` everywhere and signed zero never splits a `distinct_count`. `NaN`
+differs by backend:
+
+| Backend | `NaN` |
+| --- | --- |
+| SQLite | cannot be stored; saving one raises `ValueError` |
+| PostgreSQL, DuckDB | `NaN = NaN` in SQL, and `COUNT(DISTINCT ...)` folds them |
+| MongoDB stored-property evaluator (Python) | `NaN != NaN` |
+| MongoDB server queries (`$eq`) | expected `NaN == NaN`; not verified by the test suite |
+| ClickHouse | stored (the extended bulk suite ingests it); comparison semantics not verified |

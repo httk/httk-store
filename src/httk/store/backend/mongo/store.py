@@ -28,12 +28,13 @@ from pymongo.errors import BulkWriteError, CollectionInvalid, DuplicateKeyError,
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
-from httk.store.backend.codecs import codec_named, decode_fracvector_exact
+from httk.store.backend.codecs import _float_tensor, codec_named, decode_fracvector_exact
 from httk.store.backend.schema import (
     LinkSpec,
     SchemaError,
     TableSchema,
     _exact_column,
+    _is_float_tensor,
     resolve_schema,
 )
 from httk.store.storage_layout import (
@@ -118,7 +119,7 @@ from .mapping import (
 
 __all__ = ["MongoStore", "StoreClockRegressionError"]
 
-_DOCUMENT_LAYOUT = "mongo-v2"
+_DOCUMENT_LAYOUT = "mongo-v3"
 _IDENTITY_OWNERS = "_httk_identity_owners"
 _IDENTITY_VERSION = "1"
 _RESERVED_PREFIX = "_httk_"
@@ -3329,6 +3330,8 @@ class MongoStore:
                 return None
             entries = embedded.get(spec.field, [])
             assert spec.child is not None
+            if _is_float_tensor(spec):
+                return tuple(tuple(item[column.name] for column in spec.child.element_columns) for item in entries)
             if spec.shape is not None:
                 names = [column.name for column in spec.child.element_columns[:-1]]
                 return FracVector(
@@ -3357,6 +3360,9 @@ class MongoStore:
         if spec.role == "encoded":
             parts = tuple(embedded.get(column.name) for column in spec.columns)
             return None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
+        if spec.role == "fixed_array" and _is_float_tensor(spec):
+            floats = [embedded.get(column.name) for column in spec.columns]
+            return None if floats[0] is None else _float_tensor(floats, spec.shape.cols)
         if spec.role == "fixed_array":
             exact = embedded.get(_exact_column(spec.field))
             if exact is None:

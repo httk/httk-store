@@ -64,7 +64,8 @@ def _assert_same(found: typing.Any, expected: NullableElements) -> None:
         for left, right in zip(got, want, strict=True):
             assert type(left) is type(right), (field, left, right)
             if isinstance(right, float):
-                assert left.hex() == right.hex(), (field, left, right)  # exact, including -0.0
+                # Exact, except that signed zero is not content: a reopened store reads -0.0 back as 0.0.
+                assert (left + 0.0).hex() == (right + 0.0).hex(), (field, left, right)
             else:
                 assert left == right, field
 
@@ -73,7 +74,7 @@ def test_nullable_element_columns_resolve_nullable() -> None:
     schema = resolve_schema(NullableElements)
     assert schema.field("values").child == ChildTableSpec(
         "nullable_elements_values",
-        (ColumnSpec("values", "float", nullable=True), ColumnSpec("values_exact", "str", nullable=True)),
+        (ColumnSpec("values", "float", nullable=True),),
     )
     assert schema.field("counts").child == ChildTableSpec(
         "nullable_elements_counts", (ColumnSpec("counts", "int", nullable=True),)
@@ -86,15 +87,15 @@ def test_nullable_element_columns_resolve_nullable() -> None:
     assert all(column.nullable for column in maybe.child.element_columns)
 
 
-# The fields fingerprint of PlainElements computed with the pre-change schema.py.
-_PLAIN_FIELDS_FINGERPRINT = "ab19d75f9ab09c12878239558014ff1488a2f3797714af197eca3c21500299af"
+# The fields fingerprint of PlainElements with the single-column float layout (storage protocol "3").
+_PLAIN_FIELDS_FINGERPRINT = "bdaec75cc625fb8133871c7924ab1111c408d87023a0cb828ad4694f123f4eac"
 
 
 def test_non_nullable_element_layout_unchanged() -> None:
     schema = resolve_schema(PlainElements)
     assert schema.field("values").child == ChildTableSpec(
         "plain_elements_values",
-        (ColumnSpec("values", "float", nullable=False), ColumnSpec("values_exact", "str", nullable=False)),
+        (ColumnSpec("values", "float", nullable=False),),
     )
     assert schema.field("counts").child == ChildTableSpec(
         "plain_elements_counts", (ColumnSpec("counts", "int", nullable=False),)
@@ -166,11 +167,8 @@ def test_clickhouse_round_trip() -> None:
 def test_mongo_validator_allows_null_elements() -> None:
     fields = validator_for(resolve_schema(NullableElements))["$jsonSchema"]["properties"]["f"]["properties"]
     values = fields["values"]["items"]
-    assert values["properties"] == {
-        "values": {"bsonType": ["double", "null"]},
-        "values_exact": {"bsonType": ["string", "null"]},
-    }
-    assert values["required"] == ["values", "values_exact"]
+    assert values["properties"] == {"values": {"bsonType": ["double", "null"]}}
+    assert values["required"] == ["values"]
     assert fields["counts"]["items"]["properties"] == {"counts": {"bsonType": ["int", "long", "null"]}}
     plain = validator_for(resolve_schema(PlainElements))["$jsonSchema"]["properties"]["f"]["properties"]
     assert plain["values"]["items"]["properties"]["values"] == {"bsonType": "double"}
@@ -181,15 +179,15 @@ def test_mongo_validator_allows_null_elements() -> None:
 def test_served_json_keeps_none_elements(module: typing.Any) -> None:
     schema = resolve_schema(NullableElements)
     served = module._json_value(schema, schema.field("values"), RECORD.values)
-    assert served == [1.5, None, -0.0, 0.1, None]
-    assert math.copysign(1.0, served[2]) == -1.0
+    assert served == [1.5, None, 0.0, 0.1, None]
+    assert math.copysign(1.0, served[2]) == 1.0  # signed zero is not content: served as stored
 
 
 def test_mongo_document_round_trip_without_server() -> None:
     schema = resolve_schema(NullableNotes)
     projected = {field: getattr(NOTED, field) for field in NOTED.__dataclass_fields__}
     embedded = encode_record(schema, projected, NOTED, NullableNotes, lambda target, value: 0)
-    assert embedded["values"][1] == {"values": None, "values_exact": None}
+    assert embedded["values"][1] == {"values": None}
     assert embedded["counts"][0] == {"counts": None}
     _assert_same(decode_record(schema, {"f": embedded}, lambda target, sid: None), NOTED)
 

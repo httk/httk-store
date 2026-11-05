@@ -69,10 +69,11 @@ __all__ = [
     "read_store_metadata",
 ]
 
-STORAGE_PROTOCOL_VERSION: Final = "2"
+STORAGE_PROTOCOL_VERSION: Final = "3"
 # The value is the major store generation only, compared for strict equality on
-# reopen; it is never parsed. Bump it to "3" solely on a breaking change to the
-# physical SqlStore layout that an existing store could not be reopened against.
+# reopen; it is never parsed. Bump it solely on a breaking change to the
+# physical SqlStore layout that an existing store could not be reopened against
+# ("3": plain floats lost their ``*_exact`` text companion).
 """The persisted SqlStore layout protocol implemented by this package."""
 
 METADATA_TABLE_NAME: Final = "_httk_store_metadata"
@@ -121,6 +122,7 @@ class BackendFacts:
     finalize_map_maintenance: Literal["update", "swap"]
     supports_adhoc_indexes: bool
     default_indexes: Literal["all", "minimal"]
+    stores_nan: bool
 
 
 _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
@@ -141,6 +143,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         finalize_map_maintenance="update",
         supports_adhoc_indexes=True,
         default_indexes="all",
+        stores_nan=False,
     ),
     "duckdb": BackendFacts(
         transactional_ddl=True,
@@ -159,6 +162,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         finalize_map_maintenance="update",
         supports_adhoc_indexes=True,
         default_indexes="minimal",
+        stores_nan=True,
     ),
     "postgresql": BackendFacts(
         transactional_ddl=True,
@@ -177,6 +181,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         finalize_map_maintenance="update",
         supports_adhoc_indexes=True,
         default_indexes="all",
+        stores_nan=True,
     ),
     "clickhousedb": BackendFacts(
         transactional_ddl=False,
@@ -195,6 +200,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         finalize_map_maintenance="swap",
         supports_adhoc_indexes=False,
         default_indexes="all",
+        stores_nan=True,
     ),
 }
 

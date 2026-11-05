@@ -34,7 +34,9 @@ lookups fall back to the database.
 
 import contextlib
 import datetime
+import itertools
 import json
+import math
 import os
 import threading
 import time
@@ -69,6 +71,7 @@ from httk.core.storage import (
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from httk.store.backend.codecs import (
+    _float_tensor_rows,
     codec_named,
     decode_fracvector_exact,
     encode_fracvector_exact,
@@ -82,6 +85,7 @@ from httk.store.backend.schema import (
     _bounded_identifier,
     _exact_column,
     _index_column,
+    _is_float_tensor,
     _parent_sid_column,
     _present_column,
     resolve_schema,
@@ -3764,7 +3768,10 @@ class SqlStore:
                 connection, record_type, value, projection, field_path, top_level=False, id_series=id_series
             )
 
-        return _encode_parent_row(schema, source, projected, path, resolve_sid)
+        values = _encode_parent_row(schema, source, projected, path, resolve_sid)
+        if not self.backend_facts.stores_nan:
+            _reject_nan(schema.table_name, (values,))
+        return values
 
     @staticmethod
     def _projected_value(record_type: type, source: Any, projected: Mapping[str, object], spec: FieldSpec) -> Any:
@@ -3800,6 +3807,8 @@ class SqlStore:
             )
 
         rows = _encode_child_rows(schema, spec, sid, value, path, resolve_sid)
+        if not self.backend_facts.stores_nan:
+            _reject_nan(spec.child.table_name, rows)
         if rows:
             table = self._table(spec.child.table_name)
             self._touch_dirty_table(connection, table)
@@ -4952,6 +4961,8 @@ class SqlStore:
             # content id is unchanged. The IS NULL guard sits in the statement,
             # so a concurrent writer's committed value is never overwritten.
             table = self._table(schema.table_name)
+            if not self.backend_facts.stores_nan:
+                _reject_nan(table.name, fills)
             for fill in fills:
                 connection.execute(
                     sqlalchemy.update(table)
@@ -5029,8 +5040,10 @@ class SqlStore:
             sqlalchemy.select(*columns).where(table.c[parent_column] == sid).order_by(table.c[index_column])
         ).mappings()
         decoded = [self._metadata_child_element(spec, cast(Mapping[str, Any], row)) for row in rows]
-        if spec.shape is not None:
-            value: Any = FracVector(decoded)
+        if _is_float_tensor(spec):
+            value: Any = tuple(decoded)
+        elif spec.shape is not None:
+            value = FracVector(decoded)
         elif typing.get_origin(spec.python_type) is tuple:
             value = tuple(decoded)
         else:
@@ -5055,6 +5068,8 @@ class SqlStore:
         assert spec.child is not None
         if spec.target is not None:
             return int(row[spec.child.element_columns[0].name])
+        if _is_float_tensor(spec):
+            return tuple(row[column.name] for column in spec.child.element_columns)
         if spec.shape is not None:
             assert spec.shape is not None
             floats = [row[column.name] for column in spec.child.element_columns[:-1]]
@@ -5326,6 +5341,13 @@ def _encode_parent_row(
             encoded = codec_named(spec.codec_name).encode(value)
             for column, part in zip(spec.columns, encoded, strict=True):
                 values[column.name] = part
+        elif spec.role == "fixed_array" and _is_float_tensor(spec):
+            assert spec.shape is not None
+            float_rows = _float_tensor_rows(
+                value, spec.shape.rows, spec.shape.cols, f"{schema.cls.__name__}.{spec.field}"
+            )
+            for column, part in zip(spec.columns, itertools.chain.from_iterable(float_rows), strict=True):
+                values[column.name] = part
         elif spec.role == "fixed_array":
             assert spec.shape is not None
             tensor = _as_fixed_tensor(schema, spec, spec.shape, value)
@@ -5369,7 +5391,17 @@ def _encode_child_rows(
     parent_column = _parent_sid_column(schema.table_name)
     index_column = _index_column(spec.field)
     rows: list[dict[str, Any]] = []
-    if spec.shape is not None:
+    if _is_float_tensor(spec):
+        assert spec.shape is not None
+        float_rows = (
+            []
+            if value is None
+            else _float_tensor_rows(value, 0, spec.shape.cols, f"{schema.cls.__name__}.{spec.field}")
+        )
+        names = [column.name for column in spec.child.element_columns]
+        for position, float_row in enumerate(float_rows):
+            rows.append({parent_column: sid, index_column: position} | dict(zip(names, float_row, strict=True)))
+    elif spec.shape is not None:
         for position, row_tensor in enumerate(_tensor_rows(schema, spec, spec.shape, value)):
             row: dict[str, Any] = {parent_column: sid, index_column: position}
             for i, part in enumerate(encode_fracvector_floats(row_tensor)):
@@ -5396,6 +5428,21 @@ def _encode_child_rows(
                 row[spec.child.element_columns[0].name] = element
             rows.append(row)
     return rows
+
+
+def _reject_nan(table_name: str, rows: Iterable[Mapping[str, Any]]) -> None:
+    """Raise on any NaN float bound for ``table_name``: SQLite would silently store NULL.
+
+    :param table_name: The physical table the rows are written to.
+    :param rows: The encoded column values.
+    :raises ValueError: If a value is a float NaN.
+    """
+    for row in rows:
+        for column_name, value in row.items():
+            if isinstance(value, float) and math.isnan(value):
+                raise ValueError(
+                    f"{table_name}.{column_name} is NaN: SQLite cannot store NaN; store None or use another backend"
+                )
 
 
 def _metadata_scalar_equal(left: Any, right: Any) -> bool:

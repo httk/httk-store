@@ -51,6 +51,7 @@ from httk.store.backend.schema import (
     _bounded_identifier,
     _exact_column,
     _index_column,
+    _is_float_tensor,
     _parent_sid_column,
     _present_column,
     resolve_schema,
@@ -100,7 +101,7 @@ _REL_ROOT: Final[str] = apply_definition_prefix("relationships", RUNS_DEFINITION
 
 _CORE_PROPERTIES: Final[frozenset[str]] = frozenset(("id", "type"))
 _INTRINSIC_PROPERTIES: Final[frozenset[str]] = frozenset(("id", "type", "immutable_id", "_httk_id", "_httk_kind"))
-_EXACT_CODEC_NAMES: Final = frozenset(("float", "fraction", "fracscalar", "surdscalar"))
+_EXACT_CODEC_NAMES: Final = frozenset(("fraction", "fracscalar", "surdscalar"))
 _NO_LITERAL: Final = object()
 _RFC3339_TIMESTAMP: Final = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z",
@@ -327,9 +328,7 @@ class _SqlQueryContext:
         if operator == "!=":
             equal = self.equal(left_value, right_value)
             return _SqlPredicate(sqlalchemy.not_(equal.clause), correlation_depth=equal.correlation_depth)
-        if (
-            left_value.exact_element is not None or right_value.exact_element is not None
-        ) and not _exact_ordering_uses_float_companion(left_value, right_value):
+        if left_value.exact_element is not None or right_value.exact_element is not None:
             raise QueryLiteralError("ordering an exact stored value is not implemented")
         if operator == "<":
             clause = _SqlPredicate(_bool_clause(left_value.element < right_value.element))
@@ -633,7 +632,8 @@ class _SqlQueryContext:
 
     def _child_scalar_value(self, scope: _SqlScope, spec: FieldSpec) -> _SqlValue:
         assert spec.child is not None
-        if spec.codec_name is None:
+        if spec.codec_name is None or _is_float_tensor(spec):
+            # Plain elements, and a tensor's first element column.
             return _SqlValue(
                 scope.alias.c[spec.child.element_columns[0].name],
                 scope=scope,
@@ -1052,8 +1052,7 @@ class StoredPropertySqlPlan:
                 # a bare constant in ORDER BY).
                 continue
             # SqlSearcher._order_by ranks NULLs last before each sort key.
-            order_element = value.element if value.codec is not None and value.codec.name == "float" else value.exact
-            searcher.add_sort(SqlColumn(searcher, order_element), descending)
+            searcher.add_sort(SqlColumn(searcher, value.element), descending)
         return searcher, variable, tuple(sort_values)
 
     def _validate_clickhouse_correlation(self, value: object) -> None:
@@ -1260,7 +1259,7 @@ class StoredPropertySqlPlan:
         sorter = projection.sort
         assert sorter is not None
         value = _value(sorter(cast(Any, context)))
-        if value.exact_element is not None and (value.codec is None or value.codec.name != "float"):
+        if value.exact_element is not None:
             raise StoredPropertySqlConfigurationError(
                 f"{backing.backing.__name__}.{name} cannot sort an exact value through its canonical text column"
             )
@@ -1893,12 +1892,6 @@ def _timestamp_literals(left: _SqlValue, right: _SqlValue) -> tuple[_SqlValue, _
             literal=_NO_LITERAL,
         )
     return left, right
-
-
-def _exact_ordering_uses_float_companion(left: _SqlValue, right: _SqlValue) -> bool:
-    """Whether exact operands belong to float fields whose DOUBLE remains orderable."""
-    codecs = tuple(value.codec for value in (left, right) if value.codec is not None)
-    return bool(codecs) and all(codec.name == "float" for codec in codecs)
 
 
 def _codec_literal(value: _SqlValue, codec: ValueCodec, needs_exact: bool) -> _SqlValue:

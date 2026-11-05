@@ -26,6 +26,7 @@ from httk.store.backend.schema import (
     FieldSpec,
     SchemaError,
     TableSchema,
+    _is_float_tensor,
     resolve_schema,
 )
 from httk.store.entry_providers import strong_link_markers, wire_relationship_key
@@ -488,6 +489,8 @@ def _json_value(schema: TableSchema, spec: FieldSpec, value: Any) -> Any:
         assert spec.codec_name is not None
         codec = codec_named(spec.codec_name)
         return codec.encode(value)[_query_index(codec)]
+    if _is_float_tensor(spec):
+        return [list(row) for row in value]
     if spec.role == "fixed_array":
         assert spec.shape is not None
         return _as_fixed_tensor(schema, spec, spec.shape, value).to_floats()

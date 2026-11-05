@@ -137,6 +137,7 @@ from httk.store.backend.sql.store import (
     _encode_promoted_descendants,
     _field_path,
     _metadata_scalar_equal,
+    _reject_nan,
 )
 from httk.store.store_common import (
     EntryDispatchIntegrityError,
@@ -1461,6 +1462,9 @@ class BulkIngest:
 
     def _flush(self) -> None:
         assert self._connection is not None
+        if not self._store.backend_facts.stores_nan:
+            for table_name, rows in self._rows.items():
+                _reject_nan(table_name, rows)
         if any(self._rows.values()):
             self._resolve_and_insert()
         self._rows_by_sid.clear()

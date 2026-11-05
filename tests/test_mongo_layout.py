@@ -144,8 +144,8 @@ def test_first_open_stamps_layout_capabilities_and_reopen_trusts(mongo_test_data
         "store_timestamps",
         "identity_ownership",
     }
-    assert document["protocol"] == "2"
-    assert document["document_layout"] == "mongo-v2"
+    assert document["protocol"] == "3"
+    assert document["document_layout"] == "mongo-v3"
     assert MongoStore(mongo_test_database).layout == store.layout
 
 

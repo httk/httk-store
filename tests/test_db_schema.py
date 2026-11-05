@@ -188,7 +188,7 @@ class BareFracVectorRecord:
     cell: FracVector
 
 
-def test_scalar_fields_and_exact_float_codec_columns():
+def test_scalar_fields_and_single_column_float_codec():
     schema = resolve_schema(ScalarRecord)
     assert schema.table_name == "scalar_record"
     kinds = {spec.field: (spec.columns[0].name, spec.columns[0].kind) for spec in schema.fields}
@@ -201,10 +201,7 @@ def test_scalar_fields_and_exact_float_codec_columns():
     }
     assert schema.field("energy").role == "encoded"
     assert schema.field("energy").codec_name == "float"
-    assert [(column.name, column.kind) for column in schema.field("energy").columns] == [
-        ("energy", "float"),
-        ("energy_exact", "str"),
-    ]
+    assert [(column.name, column.kind) for column in schema.field("energy").columns] == [("energy", "float")]
     assert all(spec.role == "scalar" for spec in schema.fields if spec.field != "energy")
 
 

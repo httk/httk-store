@@ -10,9 +10,11 @@ from typing import Any, Final, Literal, cast
 import sqlalchemy
 from httk.core import FracScalar, FracVector
 
+from httk.store.backend.codecs import _float_tensor
 from httk.store.backend.schema import (
     FieldSpec,
     _bounded_identifier,
+    _is_float_tensor,
     resolve_schema,
 )
 from httk.store.backend.sql.mapping import SID_COLUMN
@@ -273,6 +275,9 @@ class SqlResultSet:
                 for column in output.spec.columns
                 if column.name != output.element.name
             )
+        if output.spec.role == "fixed_array" and _is_float_tensor(output.spec):
+            # The first float column is ``element``; the rest complete the tensor.
+            return tuple(output.variable._alias.c[column.name] for column in output.spec.columns[1:])
         if output.spec.role == "fixed_array" and output.exact_element is not None:
             # The remaining float columns back the "" exact sentinel; the first is ``element``.
             floats = tuple(output.variable._alias.c[column.name] for column in output.spec.columns[1:-1])
@@ -400,6 +405,10 @@ class SqlResultSet:
             return output.presentation_converter(value) if output.presentation_converter is not None else value
         offset = len(state._names) + state._extra_offsets[index]
         extras = state._projection_extras[index]
+        if output.spec.role == "fixed_array" and _is_float_tensor(output.spec):
+            assert output.spec.shape is not None
+            floats = (value, *state._rows[position][offset : offset + len(extras)])
+            return None if value is None else _float_tensor(floats, output.spec.shape.cols)
         if output.spec.role == "fixed_array":
             floats = (value, *state._rows[position][offset : offset + len(extras) - 1])
             text = state._rows[position][offset + len(extras) - 1]

@@ -622,10 +622,18 @@ def test_parallel_signed_zero_is_not_a_conflict(store_factory, measure):
 
 
 def test_parallel_nan_metadata_conflicts(store_factory):
-    """NaN never equals itself: two NaN identity-excluded floats under one content id conflict (both backends)."""
+    """NaN never equals itself: two NaN identity-excluded floats under one content id conflict.
+
+    SQLite cannot store NaN at all, so there the ingest fails on the NaN itself.
+    """
     store = store_factory()
     _require_bulk(store)
-    with pytest.raises(EntryMetadataConflictError, match="measure"), store.bulk_ingest(workers=2) as bulk:
+    expected = (
+        pytest.raises(ValueError, match="measure is NaN: SQLite cannot store NaN")
+        if _database_of(store).engine.dialect.name == "sqlite"
+        else pytest.raises(EntryMetadataConflictError, match="measure")
+    )
+    with expected, store.bulk_ingest(workers=2) as bulk:
         bulk.save(FloatMeta("k", math.nan))  # token 0 -> worker 0
         bulk.save(FloatMeta("k", math.nan))  # token 1 -> worker 1
     assert not _has_application_rows(store, _database_of(store))
@@ -898,6 +906,8 @@ def test_parallel_nan_attribution_is_schema_order_first(store_factory, run):
     """When several identity-excluded floats are NaN, the conflict is attributed to the schema-order-first field."""
     store = store_factory()
     _require_bulk(store)
+    if _database_of(store).engine.dialect.name == "sqlite":
+        pytest.skip("SQLite rejects NaN before any conflict scan")
     with pytest.raises(EntryMetadataConflictError, match=r"TwoFloatMeta\.alpha:"), store.bulk_ingest(workers=2) as bulk:
         bulk.save(TwoFloatMeta("k", math.nan, math.nan))  # token 0 -> worker 0
         bulk.save(TwoFloatMeta("k", math.nan, math.nan))  # token 1 -> worker 1

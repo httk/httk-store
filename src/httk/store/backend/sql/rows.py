@@ -12,13 +12,14 @@ from typing import Any
 import sqlalchemy
 from httk.core import FracVector
 
-from httk.store.backend.codecs import codec_named, decode_fracvector_exact
+from httk.store.backend.codecs import _float_tensor, codec_named, decode_fracvector_exact
 from httk.store.backend.schema import (
     FieldSpec,
     SchemaError,
     TableSchema,
     _exact_column,
     _index_column,
+    _is_float_tensor,
     _parent_sid_column,
     _present_column,
     resolve_schema,
@@ -160,6 +161,10 @@ class _Chunk:
             assert spec.codec_name is not None
             parts = tuple(row[self.columns[column.name]] for column in spec.columns)
             return None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
+        if spec.role == "fixed_array" and _is_float_tensor(spec):
+            assert spec.shape is not None
+            floats = [row[self.columns[column.name]] for column in spec.columns]
+            return None if floats[0] is None else _float_tensor(floats, spec.shape.cols)
         if spec.role == "fixed_array":
             exact = row[self.columns[_exact_column(spec.field)]]
             if exact is None:
@@ -210,6 +215,9 @@ class _Chunk:
         grouped, columns = self._child_rows(spec)
         entries = grouped.get(sid, [])
         assert spec.child is not None
+        if _is_float_tensor(spec):
+            indices = [columns[column.name] for column in spec.child.element_columns]
+            return tuple(tuple(entry[i] for i in indices) for entry in entries)
         if spec.shape is not None:
             exact = columns[_exact_column(spec.field)]
             floats = [columns[column.name] for column in spec.child.element_columns[:-1]]
@@ -374,6 +382,10 @@ def decode_field(store: "SqlStore", schema: TableSchema, spec: FieldSpec, sid: i
         assert spec.codec_name is not None
         parts = tuple(row[column.name] for column in spec.columns)
         return None if all(part is None for part in parts) else codec_named(spec.codec_name).decode(parts)
+    if spec.role == "fixed_array" and _is_float_tensor(spec):
+        assert spec.shape is not None
+        floats = [row[column.name] for column in spec.columns]
+        return None if floats[0] is None else _float_tensor(floats, spec.shape.cols)
     if spec.role == "fixed_array":
         exact = row[_exact_column(spec.field)]
         if exact is None:

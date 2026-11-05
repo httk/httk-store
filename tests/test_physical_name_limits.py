@@ -2,6 +2,7 @@
 
 import dataclasses
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import ClassVar
 
 import pytest
@@ -30,7 +31,7 @@ class LongChildNames:
 
 
 LongColumnNames = dataclasses.make_dataclass(
-    "LongColumnNames", [(_LONG_FIELD + "a", float), (_LONG_FIELD + "b", float)], frozen=True
+    "LongColumnNames", [(_LONG_FIELD + "a", Fraction), (_LONG_FIELD + "b", Fraction)], frozen=True
 )
 
 
@@ -84,7 +85,7 @@ def test_non_ascii_names_are_bounded_on_utf8_bytes():
 def test_exact_duplicate_after_bounding_is_rejected():
     """A declared column equal to another column's hash-shortened name is refused, naming both sources."""
     shortened = _bounded_identifier(_LONG_FIELD, "_exact")
-    record = dataclasses.make_dataclass("Clash", [(_LONG_FIELD, float), (shortened, int)], frozen=True)
+    record = dataclasses.make_dataclass("Clash", [(_LONG_FIELD, Fraction), (shortened, int)], frozen=True)
     with pytest.raises(ValueError, match=f"Clash.{_LONG_FIELD} column 1 and .*Clash.{shortened} column 0"):
         normalize_entry_families(_declare(record))
 

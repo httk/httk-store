@@ -9,7 +9,6 @@ belong in the backend-neutral query and paging suites.
 """
 
 import datetime
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -351,17 +350,19 @@ def test_round_trip_optionals_and_optional_reference(store_factory):
     assert fetched == sample
 
 
-def test_float_round_trip_and_content_lookup_preserve_signed_zero(store_factory):
+def test_float_round_trip_stores_signed_zero_as_zero(store_factory):
+    """Signed zero is not content: -0.0 is stored and fetched as 0.0, with the same content id."""
     record = FloatRecord(-0.0, (-0.0, 0.0, 1.25))
     key = content_id(record)
+    assert key == content_id(FloatRecord(0.0, (0.0, 0.0, 1.25)))
     store = store_factory()
     sid = store.save(record)
     reopened = store_factory.reopen(store)
     fetched = reopened.fetch(FloatRecord, sid)
     assert content_id(fetched) == key
     assert reopened.fetch_by_content_id(FloatRecord, key) == fetched
-    assert math.copysign(1.0, fetched.scalar) == -1.0
-    assert [math.copysign(1.0, value) for value in fetched.values[:2]] == [-1.0, 1.0]
+    assert [value.hex() for value in (fetched.scalar, *fetched.values[:2])] == ["0x0.0p+0"] * 3
+    assert reopened.save(fetched) == sid
 
 
 def test_fixed_array_accepts_single_row_for_shape_1_n(store_factory):

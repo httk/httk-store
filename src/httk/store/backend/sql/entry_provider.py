@@ -27,8 +27,8 @@ The schema-to-OPTIMADE type mapping is:
   approximate);
 - :class:`datetime.datetime` fields — ``timestamp``, served as ISO-8601 text;
 - fixed-shape (``Shape(r, c)``) and variable-rows (``Shape(0, c)``)
-  :class:`~httk.core.FracVector` fields — ``list of list of float`` (the fixed
-  shape also declares its dimension sizes);
+  :class:`~httk.core.FracVector` and float-tensor fields — ``list of list of
+  float`` (the fixed shape also declares its dimension sizes);
 - ``list``/``tuple`` fields of scalars or of the codec types above — ``list
   of`` the mapped element type.
 
@@ -68,6 +68,7 @@ from httk.store.backend.schema import (
     SchemaError,
     TableSchema,
     _index_column,
+    _is_float_tensor,
     _parent_sid_column,
     resolve_schema,
 )
@@ -661,6 +662,8 @@ def _json_value(schema: TableSchema, spec: FieldSpec, value: Any) -> Any:
         assert spec.codec_name is not None
         codec = codec_named(spec.codec_name)
         return codec.encode(value)[_query_index(codec)]
+    if _is_float_tensor(spec):
+        return [list(row) for row in value]
     if spec.role == "fixed_array":
         assert spec.shape is not None
         return _as_fixed_tensor(schema, spec, spec.shape, value).to_floats()

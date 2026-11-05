@@ -14,9 +14,9 @@ derives DDL, inserts, selects, and reconstruction alike.
 Resolution rules (field annotation, then the resulting relational shape):
 
 - ``int``/``str``/``bool``/``bytes`` — one scalar column named after the field
-  (``bool`` is its own column kind, never folded into ``int``). ``float`` uses
-  a query ``DOUBLE`` plus an exact ``*_exact`` hexadecimal text column so
-  signed zero and every other finite binary64 value round-trip unchanged.
+  (``bool`` is its own column kind, never folded into ``int``). ``float`` is
+  one ``DOUBLE`` column with no ``*_exact`` companion; ``-0.0`` is stored as
+  ``0.0``, and ``NaN`` round-trips everywhere except SQLite, which rejects it.
 - ``X | None`` — the field is optional; all of its columns become nullable.
 - a type with a registered :class:`~httk.store.backend.codecs.ValueCodec`
   (:class:`fractions.Fraction`, :class:`~httk.core.FracScalar`,
@@ -28,6 +28,13 @@ Resolution rules (field annotation, then the resulting relational shape):
 - ``Annotated[FracVector, Shape(0, c)]`` — variable rows in a child table
   ``<parent>_<name>``, each row ``c`` float columns plus a ``name_exact`` text
   column with the same exact encoding per row.
+- ``Annotated[tuple[tuple[float, ...], ...], Shape(r, c)]`` — a float tensor
+  laid out like the ``FracVector`` forms above but with no ``name_exact``
+  column: the ``DOUBLE`` columns are the value (``-0.0`` is stored as
+  ``0.0``). The field value must be the canonical
+  ``tuple[tuple[float, ...], ...]``; ``httk.core.storage.float_matrix``
+  normalises nested sequences and arrays to it. ``Unique`` is rejected on a
+  float tensor, and ``KeepStored`` on any tensor field.
 - ``list[T]`` / homogeneous ``tuple[T, ...]`` — a child table: scalar or
   codec-typed elements store their columns per row; storable-dataclass elements
   store one ``name_sid`` foreign-key column per row.
@@ -77,6 +84,7 @@ from httk.core.storage import (
     STORAGE_INFO_ATTRIBUTE,
     DedupPolicy,
     Indexed,
+    KeepStored,
     Related,
     Shape,
     Skip,
@@ -158,6 +166,14 @@ def _exact_column(field: str) -> str:
 def _sid_sequence_name(table_name: str) -> str:
     """Return the ``sid`` sequence name of ``table_name``."""
     return _bounded_identifier(table_name, "_sid_seq")
+
+
+def _is_float_tensor(spec: "FieldSpec") -> bool:
+    """Return whether ``spec`` is a ``Shape``-annotated float tensor (no exact column).
+
+    A 1-D ``tuple[float, ...]`` child also has ``codec_name == "float"`` but no shape.
+    """
+    return spec.shape is not None and spec.codec_name == "float"
 
 
 type FieldRole = Literal["scalar", "encoded", "fixed_array", "child", "reference"]
@@ -606,6 +622,7 @@ def _resolve_field(
     skipped = False
     related: Related | None = None
     strong_link: StrongLink | None = None
+    keep_stored = False
     while True:
         origin = typing.get_origin(base)
         if origin is Annotated:
@@ -621,6 +638,8 @@ def _resolve_field(
                     shape = marker
                 elif isinstance(marker, Related):
                     related = marker
+                elif isinstance(marker, KeepStored):
+                    keep_stored = True
                 elif isinstance(marker, StrongLink):
                     strong_link = marker
             base = arguments[0]
@@ -652,6 +671,8 @@ def _resolve_field(
         return None
 
     spec = _resolve_unwrapped_field(cls, table_name, name, base, shape, optional, indexed, unique, derived)
+    if keep_stored and spec.shape is not None:
+        raise SchemaError(f"{cls.__name__}.{name}: KeepStored does not apply to a Shape-annotated tensor field")
     if related is not None:
         if spec.role != "reference" and not (spec.role == "child" and spec.target is not None):
             raise SchemaError(
@@ -776,7 +797,7 @@ def _resolve_unwrapped_field(
 
     raise SchemaError(
         f"{cls.__name__}.{name}: type {base!r} is not storable; expected a scalar "
-        f"(int/float/str/bool/bytes), a codec type, a Shape-annotated FracVector, a list/tuple, "
+        f"(int/float/str/bool/bytes), a codec type, a Shape-annotated FracVector or float tensor, a list/tuple, "
         f"or a storable frozen dataclass"
     )
 
@@ -792,8 +813,42 @@ def _resolve_shape_field(
     unique: bool,
     derived: bool,
 ) -> FieldSpec:
+    if base == tuple[tuple[float, ...], ...]:
+        if unique:
+            # ponytail: no single column carries a float tensor's identity; add a digest column if Unique is needed.
+            raise SchemaError(f"{cls.__name__}.{name}: Unique does not apply to a float tensor")
+        if shape.rows >= 1:
+            columns = tuple(
+                ColumnSpec(_bounded_identifier(name, f"_{i}"), "float", nullable=optional, indexed=indexed)
+                for i in range(shape.rows * shape.cols)
+            )
+            return FieldSpec(
+                field=name,
+                python_type=base,
+                role="fixed_array",
+                columns=columns,
+                codec_name="float",
+                shape=shape,
+                derived=derived,
+                optional=optional,
+            )
+        floats = tuple(ColumnSpec(_bounded_identifier(name, f"_{i}"), "float") for i in range(shape.cols))
+        child = ChildTableSpec(table_name=_child_table_name(table_name, name), element_columns=floats)
+        return FieldSpec(
+            field=name,
+            python_type=base,
+            role="child",
+            codec_name="float",
+            shape=shape,
+            child=child,
+            derived=derived,
+            optional=optional,
+        )
     if base is not FracVector:
-        raise SchemaError(f"{cls.__name__}.{name}: Shape markers apply to FracVector fields only, got {base!r}")
+        raise SchemaError(
+            f"{cls.__name__}.{name}: Shape markers apply to FracVector and tuple[tuple[float, ...], ...] "
+            f"fields only, got {base!r}"
+        )
     if shape.rows >= 1:
         size = shape.rows * shape.cols
         # A Unique tensor is unique as a whole: only the exact column (always full text then) carries it.

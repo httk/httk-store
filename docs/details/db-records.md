@@ -40,9 +40,16 @@ class StructureRecord:
         return len(self.symbols)
 ```
 
-Scalars (`int`/`str`/`bool`/`bytes`) become columns, while `float` gets a query
-`DOUBLE` plus an exact hexadecimal text companion so signed zero and every
-other finite binary64 value round-trip unchanged. `X | None` makes fields
+Scalars (`int`/`str`/`bool`/`bytes`) become columns, and a `float` (or each
+element of a `tuple[float, ...]`) is one `DOUBLE` column with no text
+companion. Every binary64 value round-trips, except that signed zero is not
+content: `-0.0` is stored as `0.0` on every backend, just as content identity
+hashes it. `NaN` is stored on PostgreSQL and DuckDB; ClickHouse bulk ingest
+accepts it (its tests do not read the value back), and MongoDB is expected to
+store it, which the test suite does not verify. SQLite cannot store it, and a
+save raises `ValueError` instead. Since a `NaN` has no content identity, it
+only reaches storage in `IdentitySkip` fields or records that are not
+content-deduplicated. `X | None` makes fields
 nullable, rationals and datetimes are encoded by value codecs, lists and tuples
 become child tables, and nested storable dataclasses become foreign keys (saved
 recursively first). Classes you cannot modify can be described externally with
@@ -52,6 +59,53 @@ fields (see [Weak links](db-relationships.md#weak-links)).
 
 For the distinction between exact storage and approximate SQL comparisons, see
 [Exact rationals, approximate comparisons](db-querying.md#exact-rationals-approximate-comparisons).
+
+### Float tensors
+
+A float matrix, such as one that starts out as a numpy array, is declared as
+`Annotated[tuple[tuple[float, ...], ...], Shape(rows, cols)]`. It is laid out
+like a `FracVector` tensor, but its `DOUBLE` columns are the whole value, with
+no `*_exact` text column:
+
+- `Shape(3, 3)` stores nine columns `basis_0` to `basis_8` inline (row-major).
+  An optional (`| None`) fixed tensor is `None` when its columns are NULL.
+- `Shape(0, 3)` stores a child table with one row per matrix row and three
+  element columns `coords_0` to `coords_2`. Stored-property queries can count
+  or filter those rows (a child scope's `field("value")` is its first column).
+
+The field value must be in the canonical form `tuple[tuple[float, ...], ...]`
+with the declared shape, because content identity is computed from it before
+the store sees it; the store raises `ValueError` for any other form instead
+of converting it, but requires nothing more, so a hand-built canonical tuple
+may hold `inf` (or `NaN`, where the backend stores it and the field is outside
+content identity). `httk.core.storage.float_matrix` is the strict normaliser:
+it produces the canonical form from nested sequences or arrays without
+importing numpy, folds `-0.0` to `0.0` and rejects non-finite values. Call it
+in the record's `__post_init__`:
+
+```python
+from dataclasses import dataclass
+from typing import Annotated
+
+from httk.core.storage import Shape, float_matrix
+
+
+@dataclass(frozen=True)
+class RelaxedCell:
+    basis: Annotated[tuple[tuple[float, ...], ...], Shape(3, 3)]
+    coords: Annotated[tuple[tuple[float, ...], ...], Shape(0, 3)]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "basis", float_matrix(self.basis, 3, rows=3))
+        object.__setattr__(self, "coords", float_matrix(self.coords, 3))
+```
+
+Each element follows the plain-`float` rules above: `-0.0` is stored as
+`0.0`, and SQLite rejects `NaN`. `Indexed` indexes every column of a fixed
+float tensor. `Unique` is rejected, because no single column carries the
+value. `KeepStored` is rejected on every tensor field, exact or float.
+Entry providers serve float tensors as lists of lists, with OPTIMADE type
+`list of list of float`.
 
 ## Storing and fetching
 

@@ -794,11 +794,7 @@ class MongoStoredPropertyPlan:
             raise MongoStoredPropertyConfigurationError(
                 "stored-property sort callback must return a direct Mongo field"
             )
-        if (
-            value._codec is not None
-            and value._codec.name != "float"
-            and any(suffix == "_exact" for suffix, _kind in value._codec.columns)
-        ):
+        if value._codec is not None and any(suffix == "_exact" for suffix, _kind in value._codec.columns):
             raise MongoStoredPropertyConfigurationError(
                 f"{backing.backing.__name__}.{name} cannot sort an exact value through its canonical text channel"
             )

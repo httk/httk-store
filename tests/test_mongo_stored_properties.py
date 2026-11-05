@@ -237,8 +237,9 @@ def test_evaluator_nullable_exact_distinct_and_exists_semantics():
     assert evaluate(context.not_(ordinary), record) is None
     assert evaluate(context.equal(context.field("value"), context.null()), record) is True
 
+    # A plain float has no exact text channel: Python float semantics, so -0.0 == 0.0 and NaN != NaN.
     zero = _EvaluatorRecord(-0.0, record.values)
-    assert evaluate(context.exact_equal(context.field("value"), context.constant(0.0)), zero) is False
+    assert evaluate(context.exact_equal(context.field("value"), context.constant(0.0)), zero) is True
 
     values = context.scope("values")
     distinct = context.equal(context.distinct_count(values, values.field("value")), context.constant(3))

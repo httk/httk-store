@@ -275,7 +275,7 @@ def test_empty_database_requires_declaration_and_stamps_metadata_only(
             sqlalchemy.text("SELECT value FROM _httk_store_metadata WHERE key = 'entry_declaration'")
         ).scalar_one()
         assert declaration == '{"families":[],"format":2}'
-    assert STORAGE_PROTOCOL_VERSION == "2"
+    assert STORAGE_PROTOCOL_VERSION == "3"
     assert SqlStore(database).entry_layout == ()
 
 
@@ -527,7 +527,7 @@ def test_concurrent_register_tables_miss_builds_each_table_once(
     assert results["first"] == results["second"] == frozenset({"unlaid_record"})
 
 
-@pytest.mark.parametrize("old_protocol", ["v2.1.0", "v2.3.0", "v2.4.0", "v2.5.0"])
+@pytest.mark.parametrize("old_protocol", ["v2.1.0", "v2.3.0", "v2.4.0", "v2.5.0", "2"])
 def test_protocol_and_explicit_declaration_mismatches_have_structured_diffs(
     database: Backend, old_protocol: str
 ) -> None:

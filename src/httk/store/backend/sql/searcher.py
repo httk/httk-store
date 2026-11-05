@@ -83,6 +83,7 @@ from httk.store.backend.schema import (
     TableSchema,
     _bounded_identifier,
     _exact_column,
+    _is_float_tensor,
     _parent_sid_column,
     _present_column,
     resolve_schema,
@@ -1239,10 +1240,11 @@ class SqlVariable:
         codec: ValueCodec | None = None
         if spec.target is not None:
             column_name = _bounded_identifier(spec.field, "_sid")
-        elif spec.codec_name is not None:
+        elif spec.codec_name is not None and not _is_float_tensor(spec):
             codec = codec_named(spec.codec_name)
             column_name = _bounded_identifier(spec.field, codec.query_suffix)
         else:
+            # Plain elements, and a tensor's first element column (FracVector or float).
             column_name = spec.child.element_columns[0].name
         return SqlColumn(
             self._searcher,
@@ -1458,7 +1460,9 @@ class SqlSearcher:
             decoder: Any = None
             if variable._spec is not None:
                 spec = variable._spec
-                if spec.role == "fixed_array":
+                if spec.role == "fixed_array" and _is_float_tensor(spec):
+                    pass  # no exact column: results regroup the float columns themselves
+                elif spec.role == "fixed_array":
                     exact_element = (
                         variable._variable._alias.c[_exact_column(spec.field)] if variable._variable else None
                     )

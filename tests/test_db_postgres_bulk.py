@@ -12,11 +12,11 @@ Two properties that only diverge on PostgreSQL:
 
 import math
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
 import pytest
 import sqlalchemy
-from httk.core.storage import StorageInfo
+from httk.core.storage import IdentitySkip, StorageInfo
 from postgres_support import IsolatedPostgresDatabase, postgres_admin_uri
 
 from httk.store.backend.sql import Backend, SqlStore
@@ -85,6 +85,40 @@ def test_bulk_preserves_nan_floats_like_serial(pg_stores, mode):
     # Compare query-visible state: NaN, matching a serial PostgreSQL save (not NULL).
     assert required is not None and math.isnan(required), mode
     assert optional is not None and math.isnan(optional), mode
+
+
+@dataclass(frozen=True)
+class Series:
+    """A content-deduplicated record whose identity-excluded float sequence may hold NaN."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="pgnan_series")
+
+    label: str
+    series: Annotated[tuple[float, ...], IdentitySkip()] = ()
+
+
+@pytest.mark.parametrize("mode", ["serial", "deferred", "parallel"])
+def test_bulk_preserves_nan_float_sequence_elements_like_serial(pg_stores, mode):
+    """A NaN child element survives the SQLite-shard staging, restored by (parent sid, index)."""
+    store, database = pg_stores()
+    record = Series(label="probe", series=(1.5, math.nan, -0.0, math.nan))
+    if mode == "serial":
+        store.save(record)
+    else:
+        # Deferred/parallel bulk cannot verify identity-excluded child sequences against duplicates.
+        options = {"finalize": "deferred"} if mode == "deferred" else {"workers": 2}
+        with store.bulk_ingest(verify_metadata=False, **options) as bulk:
+            bulk.save(record)
+
+    with database.engine.connect() as connection:
+        stored = [
+            row[0]
+            for row in connection.execute(
+                sqlalchemy.text("SELECT series FROM pgnan_series_series ORDER BY series_index")
+            )
+        ]
+    assert stored[0] == 1.5 and stored[2].hex() == "0x0.0p+0", mode  # signed zero is stored as 0.0
+    assert math.isnan(stored[1]) and math.isnan(stored[3]), mode
 
 
 def test_failed_bulk_leaves_no_orphan_sequence_and_recovers(pg_stores):

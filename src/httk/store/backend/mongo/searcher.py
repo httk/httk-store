@@ -20,6 +20,7 @@ from httk.store.backend.schema import (
     SchemaError,
     TableSchema,
     _bounded_identifier,
+    _is_float_tensor,
     resolve_schema,
 )
 from httk.store.query import Slicer, UnsupportedQueryError
@@ -1156,7 +1157,10 @@ class MongoVariable:
             return reference
         if spec.role == "child":
             assert spec.child is not None
-            child_codec: ValueCodec | None = codec_named(spec.codec_name) if spec.codec_name is not None else None
+            # A tensor child (FracVector or float) queries its first element key without a codec.
+            child_codec: ValueCodec | None = (
+                codec_named(spec.codec_name) if spec.codec_name is not None and not _is_float_tensor(spec) else None
+            )
             return MongoField(
                 self,
                 f"f.{spec.field}",

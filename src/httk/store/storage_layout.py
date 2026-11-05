@@ -57,12 +57,13 @@ __all__ = [
     "validate_entry_id_fields",
 ]
 
-DECLARATION_PROTOCOL_VERSION: Final = "2"
+DECLARATION_PROTOCOL_VERSION: Final = "3"
 """The current backend-neutral declaration protocol.
 
 The value is the major generation only, compared for strict equality on reopen
-and never parsed. Bump it to "3" solely on a breaking change to the declaration
-protocol that an existing store could not be reopened against.
+and never parsed. Bump it solely on a breaking change to the declaration
+protocol that an existing store could not be reopened against ("3": plain
+floats lost their ``*_exact`` text companion).
 """
 
 ADDITIVE_UPGRADE_HINT: Final = (

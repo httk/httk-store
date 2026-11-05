@@ -236,7 +236,8 @@ class _MetadataPlan:
 
 _MISSING_METADATA = object()
 # ponytail: only scalar/encoded KeepStored fields are filled in place (all FileRecord
-# needs); a nested or fixed-array KeepStored field keeps its stored value, add a role here if one appears.
+# needs; tensors reject KeepStored at schema resolution); a nested KeepStored field keeps its stored value,
+# add a role here if one appears.
 _KEEP_FILLED_ROLES = frozenset({"scalar", "encoded"})
 
 

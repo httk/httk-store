@@ -34,6 +34,7 @@ class MongoMappingRecord:
     name: Annotated[str, Indexed()]
     amount: Annotated[float | None, Unique()]
     cell: Annotated[FracVector, Shape(2, 2)]
+    ratio: Annotated[Fraction, Indexed()]
 
 
 @dataclass(frozen=True)
@@ -77,13 +78,15 @@ def test_document_plan_preserves_columns_and_embeds_children() -> None:
     )
 
 
-def test_indexes_include_exact_channel_and_nullable_partial_unique() -> None:
-    """Markers cover every generated column and nullable uniques are partial."""
+def test_indexes_sit_on_query_columns_and_nullable_uniques_are_partial() -> None:
+    """Markers index an encoded field's query column only, as in SQL, and nullable uniques are partial."""
     specs = index_specs_for(resolve_schema(MongoMappingRecord))
     names = {spec.name for spec in specs}
     assert "ix_mongo_mapping_record_name" in names
     assert "uq_mongo_mapping_record_amount" in names
     assert "uq_mongo_mapping_record_cell_exact" not in names
+    assert "ix_mongo_mapping_record_ratio" in names
+    assert not any(name.endswith("_exact") for name in names)
     partial = next(spec for spec in specs if spec.name == "uq_mongo_mapping_record_amount")
     assert partial.partial_filter_expression == {"f.amount": {"$exists": True, "$type": "double"}}
 

@@ -13,13 +13,12 @@ lease-plus-marker boundary until P3 supplies its nontransactional loader and
 finalizer. It does not provide rollback or exact restoration; marker residue
 fails closed and the default recovery is drop-and-reingest.
 
-**Known limitation — PostgreSQL bulk `NaN` in a list-of-floats field.** Under
-PostgreSQL bulk ingest, a `NaN` value inside a stored **list-of-floats (child)
-field** is not preserved: it reads back as `NULL`. Bulk ingest stages rows
-through SQLite shards, which cannot represent `NaN`, so the value is lost in the
-list column. A **scalar** float `NaN` IS preserved under bulk ingest, and the
-serial `save()` path preserves `NaN` in both scalar and list-of-floats fields on
-every backend.
+**`NaN` floats.** Bulk ingest stores `NaN` exactly as `save()` does. On
+PostgreSQL the deferred and parallel paths stage rows through SQLite shards,
+which cannot represent `NaN`; the workers record every `NaN` cell, in scalar
+and list-of-floats (child) fields alike, and the load restores it. A SQLite
+store cannot hold `NaN` at all, so every SQLite ingest path raises `ValueError`
+naming the table and column, like `save()`.
 
 ```python
 # Per-record save loop

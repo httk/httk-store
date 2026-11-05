@@ -180,7 +180,7 @@ def test_parent_table_columns_and_types():
     assert isinstance(table.c["formula"].type, sqlalchemy.Text) and not table.c["formula"].nullable
     assert isinstance(table.c["spacegroup"].type, sqlalchemy.Integer)
     assert isinstance(table.c["energy"].type, sqlalchemy.Float)
-    assert isinstance(table.c["energy_exact"].type, sqlalchemy.Text)
+    assert "energy_exact" not in table.c
     assert isinstance(table.c["stable"].type, sqlalchemy.Boolean)
     assert isinstance(table.c["payload"].type, sqlalchemy.LargeBinary)
     assert table.c["note"].nullable and table.c["weight"].nullable

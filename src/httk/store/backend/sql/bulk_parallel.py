@@ -65,6 +65,8 @@ from httk.core.storage import StorageProjectionCycleError, resolve_storage_recor
 from httk.store.backend.schema import (
     TableSchema,
     _bounded_identifier,
+    _index_column,
+    _parent_sid_column,
     resolve_schema,
 )
 from httk.store.backend.sql.layout import actual_table_names
@@ -86,6 +88,7 @@ from httk.store.backend.sql.store import (
     _encode_parent_row,
     _encode_promoted_descendants,
     _field_path,
+    _reject_nan,
 )
 from httk.store.store_common import (
     EntryDispatchIntegrityError,
@@ -180,14 +183,15 @@ def unsupported_metadata_reason(record_type: type) -> str | None:
 def _plain_float_skip_fields(record_type: type) -> tuple[tuple[str, str], ...]:
     """The ``(field, column)`` pairs of ``record_type``'s plain-``float`` ``IdentitySkip`` fields.
 
-    Only the plain Python-``float`` codec is meant here — not the exact numeric
-    codecs (``fraction``, ``fracscalar``, tensor codecs) that also carry a float
-    column beside their exact text channel. A NaN in a plain-float column reads
-    back as ``NaN`` on DuckDB and as ``NULL`` on SQLite (which has no NaN), so it
-    cannot be told apart from a real ``None`` once stored; the worker therefore
-    flags NaN-bearing content ids while it still holds the source value, and the
-    merge treats a duplicated flagged content id as a conflict (serial's
-    ``NaN != NaN``).
+    Only the plain Python-``float`` codec (a scalar or a fixed float tensor) is
+    meant here — not the exact numeric codecs (``fraction``, ``fracscalar``,
+    ``FracVector`` tensors) that also carry a float column beside their exact
+    text channel. SQL ``DISTINCT`` folds NaNs on DuckDB
+    and PostgreSQL (SQLite rejects NaN outright), so a stored NaN cannot show a
+    conflict; the worker therefore flags NaN-bearing content ids while it still
+    holds the source value, and the merge treats a duplicated flagged content id
+    as a conflict, matching the serial path, whose Python metadata comparison
+    treats ``NaN != NaN``.
     """
     plan = _metadata_plan(record_type)
     if plan is None:
@@ -243,9 +247,10 @@ class _WorkerManifest:
     shards: dict[str, Any]
     # (table, content_id, field) triples whose identity-excluded float held a NaN.
     nan_content: list[tuple[str, str, str]] = field(default_factory=list)
-    # (table, stage_sid, column) cells whose float held a NaN (SQLite shards only;
-    # restored on PostgreSQL load where NaN survives, unlike SQLite's NULL).
-    nan_floats: list[tuple[str, int, str]] = field(default_factory=list)
+    # (table, key columns, key values, column) cells whose float held a NaN (SQLite
+    # shards only; restored on PostgreSQL load where NaN survives, unlike SQLite's
+    # NULL). The key is the stage sid of a parent row, (parent sid, index) of a child row.
+    nan_floats: list[tuple[str, tuple[str, ...], tuple[int, ...], str]] = field(default_factory=list)
 
 
 # Fork-inherited handles the worker reads from module scope (never pickled).
@@ -536,11 +541,13 @@ class _WorkerEncoder:
         self._tables: set[str] = set()
         self._nan_content: set[tuple[str, str, str]] = set()
         self._nan_rows: list[dict[str, Any]] = []
-        # (table, stage_sid, column) cells that held a NaN float.  SQLite shards
-        # store NaN as NULL; only PostgreSQL (which keeps NaN) restores them at
-        # load time so bulk matches a serial ``save()``.  Recorded only for the
-        # SQLite shard backend (Parquet/DuckDB shards preserve NaN natively).
-        self._nan_floats: set[tuple[str, int, str]] = set()
+        # Cells that held a NaN float (see _WorkerManifest.nan_floats).  SQLite
+        # shards store NaN as NULL; only PostgreSQL (which keeps NaN) restores them
+        # at load time so bulk matches a serial ``save()``.  Recorded only for the
+        # SQLite shard backend (Parquet/DuckDB shards preserve NaN natively); a
+        # SQLite target rejects NaN instead, like a serial save.
+        self._nan_floats: set[tuple[str, tuple[str, ...], tuple[int, ...], str]] = set()
+        self._rejects_nan = not store.backend_facts.stores_nan
         self._since_flush = 0
 
     @property
@@ -738,12 +745,13 @@ class _WorkerEncoder:
         elif schema.dedup == "by_value" and self._deduplicate_in_worker:
             self._value_index[table_name][tuple(sorted(values.items()))] = sid
         self._buffer(table_name, row)
-        self._record_nan_floats(table_name, row)
+        self._check_nan_floats(table_name, row, (SID_COLUMN,))
 
         for spec in schema.fields:
             if spec.role != "child":
                 continue
             assert spec.child is not None
+            child_key = (_parent_sid_column(table_name), _index_column(spec.field))
             child_rows = _encode_child_rows(
                 schema,
                 spec,
@@ -754,6 +762,7 @@ class _WorkerEncoder:
             )
             for child_row in child_rows:
                 self._buffer(spec.child.table_name, child_row)
+                self._check_nan_floats(spec.child.table_name, child_row, child_key)
         return sid
 
     def _promote_buffered_role(self, table_name: str, sid: int) -> bool:
@@ -775,25 +784,26 @@ class _WorkerEncoder:
             self._rows_by_sid.setdefault(table_name, {})[row[SID_COLUMN]] = row
         self._tables.add(table_name)
 
-    def _record_nan_floats(self, table_name: str, row: dict[str, Any]) -> None:
-        """Note any NaN float cell so a PostgreSQL load can reinstate it.
+    def _check_nan_floats(self, table_name: str, row: dict[str, Any], key_columns: tuple[str, ...]) -> None:
+        """Reject a NaN float bound for a SQLite target, or note it so a PostgreSQL load can reinstate it.
 
-        A SQLite shard flattens NaN to NULL; recording ``(table, sid, column)``
-        lets the PostgreSQL stage/merge load restore ``NaN`` and stay identical
-        to a serial ``save()``.  Only SQLite shards lose NaN -- both the SQLite
-        and PostgreSQL backends use them -- so this is keyed off the writer, not
-        the dialect name; the Parquet/DuckDB shard backend preserves NaN itself.
-
-        Scoped to sid-bearing parent rows, matching the ``_nan_content`` sidecar:
-        child element tables are keyed by ``(parent_sid, index)`` rather than a
-        sid, so a NaN inside a ``list[float]`` element is out of this path.
+        A SQLite shard flattens NaN to NULL.  A SQLite target cannot store NaN at
+        all, so it fails like a serial ``save()``.  A PostgreSQL target keeps NaN:
+        recording ``(table, key columns, key, column)`` -- the stage sid of a
+        parent row, ``(parent sid, index)`` of a child element row -- lets its
+        stage/merge load restore ``NaN``.  Only SQLite shards lose NaN, so the
+        recording is keyed off the writer; the Parquet/DuckDB shard backend
+        preserves NaN itself.
         """
-        if not isinstance(self._writer, _SqliteShardWriter) or SID_COLUMN not in row:
+        if self._rejects_nan:
+            _reject_nan(table_name, (row,))
             return
-        sid = row[SID_COLUMN]
+        if not isinstance(self._writer, _SqliteShardWriter):
+            return
         for column_name, candidate in row.items():
             if isinstance(candidate, float) and math.isnan(candidate):
-                self._nan_floats.add((table_name, sid, column_name))
+                key = tuple(row[name] for name in key_columns)
+                self._nan_floats.add((table_name, key_columns, key, column_name))
 
     def _flush(self) -> None:
         for table_name, rows in self._rows.items():
@@ -1100,12 +1110,12 @@ def _copy_sqlite_shard(
     database: str,
     tables: list[str] | tuple[str, ...],
     destinations: dict[str, sqlalchemy.Table],
-    nan_cells: dict[str, dict[int, set[str]]] | None = None,
+    nan_cells: dict[str, tuple[tuple[str, ...], dict[tuple[int, ...], set[str]]]] | None = None,
 ) -> None:
     """Stream one SQLite shard into tables on the destination connection.
 
-    ``nan_cells`` (``{table: {sid: {column, ...}}}``) names cells that held a NaN
-    float the SQLite shard flattened to NULL.  It is supplied only for a
+    ``nan_cells`` (``{table: (key columns, {key: {column, ...}})}``) names cells
+    that held a NaN float the SQLite shard flattened to NULL.  It is supplied only for a
     PostgreSQL destination (which keeps NaN); each such cell is reinstated as
     ``NaN`` during the insert so bulk matches a serial ``save()`` and a NOT NULL
     float column never sees the intermediate NULL.
@@ -1123,8 +1133,9 @@ def _copy_sqlite_shard(
             while rows := cursor.fetchmany(_SQLITE_COPY_BATCH_SIZE):
                 records = [dict(zip(columns, row, strict=True)) for row in rows]
                 if table_nan:
+                    key_columns, cells = table_nan
                     for record in records:
-                        restore = table_nan.get(record[SID_COLUMN])
+                        restore = cells.get(tuple(record[name] for name in key_columns))
                         if restore:
                             for column_name in restore:
                                 record[column_name] = math.nan
@@ -1133,12 +1144,14 @@ def _copy_sqlite_shard(
         source.close()
 
 
-def _nan_cells_from_manifests(manifests: list[_WorkerManifest]) -> dict[str, dict[int, set[str]]]:
-    """Index every manifest's recorded NaN float cells as ``{table: {sid: {column}}}``."""
-    cells: dict[str, dict[int, set[str]]] = {}
+def _nan_cells_from_manifests(
+    manifests: list[_WorkerManifest],
+) -> dict[str, tuple[tuple[str, ...], dict[tuple[int, ...], set[str]]]]:
+    """Index every manifest's recorded NaN float cells as ``{table: (key columns, {key: {column}})}``."""
+    cells: dict[str, tuple[tuple[str, ...], dict[tuple[int, ...], set[str]]]] = {}
     for manifest in manifests:
-        for table_name, sid, column in manifest.nan_floats:
-            cells.setdefault(table_name, {}).setdefault(sid, set()).add(column)
+        for table_name, key_columns, key, column in manifest.nan_floats:
+            cells.setdefault(table_name, (key_columns, {}))[1].setdefault(key, set()).add(column)
     return cells
 
 
@@ -1537,18 +1550,12 @@ class _Merger:
             return []
         columns: list[tuple[str, str]] = []
         for spec in plan.skipped_specs:
-            if spec.codec_name == "float":
-                # The plain-float codec stores an exact text companion for lossless
-                # reconstruction, but ``-0.0`` and ``0.0`` differ there while serial's
-                # ``_metadata_scalar_equal`` compares them with IEEE ``==``. Compare
-                # only the float column (whose SQL equality is IEEE) and drop the
-                # string companion; NaN is handled separately below. Exact numeric
-                # codecs (fraction, fracscalar, tensors) keep their exact text
-                # channel — dropping it would collapse them to a float approximation
-                # and silently accept e.g. Fraction(2**53) vs Fraction(2**53 + 1).
-                columns.extend((column.name, spec.field) for column in spec.columns if column.kind == "float")
-            else:
-                columns.extend((column.name, spec.field) for column in spec.columns)
+            # A plain float is its one DOUBLE column, whose SQL equality is IEEE
+            # (``-0.0 = 0.0``, like serial's ``_metadata_scalar_equal``); NaN is
+            # handled separately above. Exact numeric codecs (fraction, fracscalar,
+            # tensors) compare their exact text channel too, so e.g.
+            # Fraction(2**53) vs Fraction(2**53 + 1) still conflict.
+            columns.extend((column.name, spec.field) for column in spec.columns)
         for spec in plan.skipped_nested:
             if (
                 spec.role == "reference"

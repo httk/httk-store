@@ -139,6 +139,7 @@ from httk.store.backend.sql.store import (
     _metadata_scalar_equal,
     _reject_nan,
 )
+from httk.store.storage_layout import refuse_undeclared_entry
 from httk.store.store_common import (
     EntryDispatchIntegrityError,
     EntryIdConflictError,
@@ -937,6 +938,7 @@ class BulkIngest:
             raise ValueError("bulk ingest saves mains only; alternative_of/alternative_kind are not supported")
         reject_cursor_proxy(obj)
         record_type = resolve_storage_record(obj, as_record=as_record)
+        refuse_undeclared_entry(self._store.layout, obj, record_type)
         promoted = self._promoted_types(record_type, promote)
         if self._parallel:
             return self._parallel_save(obj, as_record, record_type, promoted)

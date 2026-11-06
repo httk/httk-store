@@ -337,3 +337,28 @@ def test_reference_field_and_exposed_weak_link_to_same_class_is_ambiguous(mongo_
         optimade_filter_searcher(
             store, AmbiguousArticle, 'authors.id HAS "author-1"', related_classes={"authors": WAuthor}
         )
+
+
+@dataclass(frozen=True)
+class Counted:
+    name: str
+    nelements: int | None
+    symbols: list[str]
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+
+
+@pytest.mark.parametrize(
+    ("flt", "expected"),
+    [
+        ('NOT (_httk_custom_symbols HAS "O" AND _httk_custom_nelements=2)', ["m3", "m4", "m5"]),
+        ('NOT (_httk_custom_symbols HAS "O" OR _httk_custom_nelements=2)', ["m5"]),
+        ('NOT (_httk_custom_symbols HAS "O" AND _httk_custom_nelements!=2)', ["m1", "m3", "m4", "m5"]),
+    ],
+)
+def test_negated_set_and_unknown_scalar_stays_unknown(mongo_test_database, flt, expected):
+    # OPTIMADE: comparisons involving unknown values MUST NOT match, also under NOT next to a HAS.
+    store = MongoStore(mongo_test_database, entry_records={})
+    for index, (symbols, nelements) in enumerate([(["O"], 2), (["O"], None), (["Fe"], 2), (["Fe"], None), (["Fe"], 3)]):
+        store.save(Counted(f"m{index + 1}", nelements, symbols, f"counted-{index}", f"counted-{index}~1"))
+    assert sorted(row.name for row in results(optimade_filter_searcher(store, Counted, flt))) == expected

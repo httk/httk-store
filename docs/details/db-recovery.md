@@ -172,7 +172,7 @@ reuse for later writes but do not hand back to the filesystem.
 | DuckDB | `CHECKPOINT` | rewrite into a fresh file and swap it into place |
 | PostgreSQL | `VACUUM (ANALYZE)` per table | `VACUUM (FULL, ANALYZE)` per table |
 | ClickHouse | nothing | `OPTIMIZE TABLE ... FINAL` per MergeTree table |
-| MongoDB | nothing | `compact` per collection |
+| MongoDB | nothing | `compact` (with `force`, so a replica-set primary runs it) per collection |
 
 Every base table (or collection) in the store's schema or database is
 processed. For a file-backed SQLite or DuckDB store the return value is the

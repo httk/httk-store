@@ -8,8 +8,9 @@ matches", not MongoDB's row-like ``$ne`` interpretation.
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import reduce
 from itertools import islice
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from httk.core.storage import resolve_storage_record
 
@@ -37,6 +38,8 @@ __all__ = [
     "ComparisonNode",
     "IsInNode",
     "LinkPredicateNode",
+    "MongoChildRecordField",
+    "MongoChildRecords",
     "MongoExpression",
     "MongoField",
     "MongoLinkField",
@@ -130,6 +133,20 @@ class LinkPredicateNode:
 
 
 @dataclass(frozen=True, slots=True)
+class ChildRecordNode:
+    """An existential ``$elemMatch`` predicate over one child-record traversal's looked-up elements.
+
+    ``path`` is the traversal's temporary ``$lookup`` array of element documents
+    and ``predicate`` an ``$elemMatch`` body over one of them. Conjoined (or
+    disjoined) nodes of one path merge into a single body before rendering (see
+    :func:`_correlate`), so they constrain one element; ``~`` is set-wise.
+    """
+
+    path: str
+    predicate: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class StringMatchNode:
     """Match literal text in a scalar string field."""
 
@@ -179,6 +196,7 @@ Node = (
     | ChildStringNode
     | ReferenceEqualityNode
     | LinkPredicateNode
+    | ChildRecordNode
     | StringMatchNode
     | AndNode
     | OrNode
@@ -412,7 +430,12 @@ def _render_child_string(
 
 
 def _reject_link_output(value: Any) -> None:
-    """Reject projecting or sorting by a weak-link path (variable-length, like a child role)."""
+    """Reject projecting or sorting by a weak-link path or a field of child records (variable-length)."""
+    if isinstance(value, MongoChildRecordField):
+        raise UnsupportedQueryError(
+            "a field of child records is variable-length and cannot be a scalar output or sort key; child-record "
+            "traversals are usable only as search predicates, so project the variable and read its records instead"
+        )
     if isinstance(value, (MongoLinkSet, MongoLinkField)):
         raise UnsupportedQueryError(
             "a weak-link path is variable-length and cannot be a scalar or object output or sort key"
@@ -464,6 +487,9 @@ def render_node(node: Node) -> tuple[dict[str, Any], dict[str, Any]]:
         return _render_comparison(ComparisonNode(left, "eq", _FieldReference(right)))
     if isinstance(node, LinkPredicateNode):
         return _render_link(node)
+    if isinstance(node, ChildRecordNode):
+        # The lookup array is always present, exactly as for a weak link.
+        return _render_link(LinkPredicateNode(node.path, node.predicate, False))
     if isinstance(node, StringMatchNode):
         return _render_string(node)
     if isinstance(node, AndNode):
@@ -482,6 +508,83 @@ def render_node(node: Node) -> tuple[dict[str, Any], dict[str, Any]]:
     if isinstance(node, AlwaysFalseNode):
         return _unknown_constant(), {}
     raise TypeError(f"unsupported Mongo query node {type(node).__name__}")
+
+
+def _conjuncts(node: Node) -> list[Node]:
+    """Flatten a chain of ``AND`` nodes."""
+    if isinstance(node, AndNode):
+        return [*_conjuncts(node.left), *_conjuncts(node.right)]
+    return [node]
+
+
+def _traversal_uses(node: Node, positive: bool = True) -> dict[str, bool]:
+    """Map each child-record traversal ``node`` reaches to whether it filters that traversal's elements.
+
+    A reference filters (selects witness elements, as a SQL WHERE condition on
+    the joined element row does) unless it sits below ``NOT`` or is a for-all
+    ``has_only``; those read the whole element set instead.
+    """
+    if isinstance(node, (AndNode, OrNode)):
+        uses = _traversal_uses(node.left, positive)
+        for path, filters in _traversal_uses(node.right, positive).items():
+            uses[path] = uses.get(path, False) or filters
+        return uses
+    if isinstance(node, NotNode):
+        return _traversal_uses(node.child, False)
+    if isinstance(node, ChildRecordNode):
+        return {node.path: positive}
+    if (
+        isinstance(node, (ChildSetNode, ChildComparisonNode, ChildStringNode))
+        and isinstance(node.field, MongoChildRecords)
+        and node.field._lookup_path is not None
+    ):
+        # An element-sid condition on a traversal object that is also chained.
+        return {node.field._lookup_path: positive and getattr(node, "operation", None) != "has_only"}
+    return {}
+
+
+def _correlate(node: Node) -> Node:
+    """Merge the conditions on one child-record traversal into one ``$elemMatch``, as SQL shares one joined row.
+
+    Within an ``AND`` chain (and within an ``OR``), the :class:`ChildRecordNode`
+    conditions of one traversal merge into a single node, so they must hold on
+    one element. Any other mix that SQL evaluates on one joined element row,
+    i.e. a traversal used by several conjuncts of which one selects elements
+    while not being a plain element condition, has no faithful per-array
+    rendering and is refused.
+
+    :param node: The predicate tree to rewrite.
+    :return: The rewritten tree.
+    :raises httk.store.query.UnsupportedQueryError: If a traversal is used in a combination that cannot be correlated.
+    """
+    if isinstance(node, OrNode):
+        left, right = _correlate(node.left), _correlate(node.right)
+        if isinstance(left, ChildRecordNode) and isinstance(right, ChildRecordNode) and left.path == right.path:
+            return ChildRecordNode(left.path, {"$or": [left.predicate, right.predicate]})
+        return OrNode(left, right)
+    if isinstance(node, NotNode):
+        return NotNode(_correlate(node.child))
+    if not isinstance(node, AndNode):
+        return node
+    conjuncts: list[Node] = []
+    bodies: dict[str, list[dict[str, Any]]] = {}
+    for conjunct in map(_correlate, _conjuncts(node)):
+        if isinstance(conjunct, ChildRecordNode):
+            bodies.setdefault(conjunct.path, []).append(conjunct.predicate)
+        else:
+            conjuncts.append(conjunct)
+    conjuncts.extend(
+        ChildRecordNode(path, body[0] if len(body) == 1 else {"$and": body}) for path, body in bodies.items()
+    )
+    uses = [_traversal_uses(conjunct) for conjunct in conjuncts]
+    for path in {path for use in uses for path in use}:
+        filters = [use[path] for use in uses if path in use]
+        if len(filters) > 1 and any(filters):
+            raise UnsupportedQueryError(
+                "a child-record traversal is constrained by several conditions that MongoDB cannot evaluate on one "
+                "element; combine its element conditions with & and | only, or use a fresh traversal for each"
+            )
+    return reduce(AndNode, conjuncts)
 
 
 class MongoExpression:
@@ -651,6 +754,69 @@ class MongoField:
         raise AttributeError(f"{self._path!r} holds a value, not a reference to another record")
 
 
+class MongoChildRecords(MongoField):
+    """A child field holding storable records (``v.sites``), chainable into the element fields.
+
+    As a field it is the embedded array of element sids, so comparisons and the
+    set operations behave exactly as on any child field. Attribute access
+    (``v.sites.symbol``) registers one ``$lookup`` of the element collection per
+    traversal object, into a temporary array, and yields a
+    :class:`MongoChildRecordField` over it. Conditions taken from one traversal
+    object therefore constrain one element: ``site = v.sites`` then
+    ``(site.symbol == 'Cl') & (site.x > 0.4)`` needs one site satisfying both.
+    A fresh ``v.sites`` access is independent. Scalar and encoded element
+    fields chain; reference, child and tensor element fields raise
+    :class:`~httk.store.query.UnsupportedQueryError`.
+
+    :param variable: The query variable owning the child field.
+    :param spec: The stored child field specification.
+    """
+
+    __slots__ = ("_lookup_path",)
+
+    def __init__(self, variable: "MongoVariable", spec: FieldSpec) -> None:
+        assert spec.child is not None and spec.target is not None
+        super().__init__(
+            variable, f"f.{spec.field}", spec, None, tuple(column.name for column in spec.child.element_columns)
+        )
+        self._lookup_path: str | None = None
+
+    def __getattr__(self, name: str) -> "MongoChildRecordField":
+        if name.startswith("_"):
+            raise AttributeError(name)
+        target = cast(type, self._spec.target)
+        schema = resolve_schema(target)
+        try:
+            element_spec = schema.field(name)
+        except SchemaError:
+            raise AttributeError(
+                f"{target.__name__} has no stored field {name!r} to query through "
+                f"{self._variable._cls.__name__}.{self._spec.field}"
+            ) from None
+        if element_spec.role not in ("scalar", "encoded"):
+            raise UnsupportedQueryError(
+                f"child-record chaining reaches only scalar and encoded fields; {target.__name__}.{name} "
+                f"is a {element_spec.role} field"
+            )
+        if self._lookup_path is None:
+            from httk.store.backend.mongo.mapping import collection_name_for
+
+            # No as_of filter: element documents are stored with or before their parent document.
+            searcher = self._variable._searcher
+            self._lookup_path = f"_httk_child_{len(searcher._child_lookups)}"
+            searcher._child_lookups.append(
+                {
+                    "$lookup": {
+                        "from": collection_name_for(schema),
+                        "localField": f"{self._path}.{self._child_keys[0]}",
+                        "foreignField": "_id",
+                        "as": self._lookup_path,
+                    }
+                }
+            )
+        return MongoChildRecordField(self._lookup_path, element_spec)
+
+
 class MongoReference:
     """A chainable single-sid reference field."""
 
@@ -800,7 +966,7 @@ class MongoLinkSet:
     def _register(self) -> None:
         """Append this link's ``$lookup`` stage once, on first predicate use.
 
-        ``_link_lookups`` is consumed only at :meth:`MongoSearcher._pipeline`,
+        ``_link_lookups`` is consumed only when a pipeline is rendered (``_lookup_stages``),
         so a late append (from a predicate built after other stages exist) is
         order-safe.
         """
@@ -975,7 +1141,7 @@ class MongoLinkSet:
                 f"children, tensors, or nested links of a weak-link target is not supported)"
             )
         self._register()
-        return MongoLinkField(self, spec)
+        return MongoLinkField(self._path, spec)
 
 
 class MongoLinkField:
@@ -986,18 +1152,19 @@ class MongoLinkField:
     "some live-linked target satisfies the comparison", and ``~`` negates set-wise
     (including a vacuous match on a zero-link source).
 
-    :param link_set: The traversal supplying the link array path and target codec context.
+    :param path: The link ``$lookup`` array path of the traversal.
     :param spec: The resolved scalar or encoded target field.
     """
 
     __slots__ = ("_codec", "_path", "_spec", "_value_key")
+    _key_prefix: ClassVar[str] = "_httk_target.f."
 
-    def __init__(self, link_set: MongoLinkSet, spec: FieldSpec) -> None:
-        self._path = link_set._path
+    def __init__(self, path: str, spec: FieldSpec) -> None:
+        self._path = path
         self._spec = spec
         if spec.role == "scalar":
             self._codec = None
-            self._value_key = f"_httk_target.f.{spec.columns[0].name}"
+            self._value_key = f"{self._key_prefix}{spec.columns[0].name}"
         else:
             assert spec.codec_name is not None
             codec = codec_named(spec.codec_name)
@@ -1005,7 +1172,7 @@ class MongoLinkField:
             query_column = next(
                 column for column in spec.columns if column.name == _bounded_identifier(spec.field, codec.query_suffix)
             )
-            self._value_key = f"_httk_target.f.{query_column.name}"
+            self._value_key = f"{self._key_prefix}{query_column.name}"
 
     def _encode(self, value: Any) -> Any:
         if value is None or self._codec is None:
@@ -1027,8 +1194,11 @@ class MongoLinkField:
         operators = {"lt": "$lt", "le": "$lte", "gt": "$gt", "ge": "$gte"}
         return {key: {"$ne": None, operators[op]: value}}
 
+    def _node(self, predicate: dict[str, Any]) -> MongoExpression:
+        return MongoExpression(LinkPredicateNode(self._path, predicate, False))
+
     def _comparison(self, op: Literal["eq", "ne", "lt", "le", "gt", "ge"], value: Any) -> MongoExpression:
-        return MongoExpression(LinkPredicateNode(self._path, self._predicate(op, self._encode(value)), False))
+        return self._node(self._predicate(op, self._encode(value)))
 
     def __eq__(self, other: object) -> MongoExpression:  # type: ignore[override]
         return self._comparison("eq", other)
@@ -1058,7 +1228,7 @@ class MongoLinkField:
             "startswith": f"^{escaped}",
             "endswith": f"{escaped}$",
         }[mode]
-        return MongoExpression(LinkPredicateNode(self._path, {self._value_key: {"$regex": pattern}}, False))
+        return self._node({self._value_key: {"$regex": pattern}})
 
     def contains(self, text: str) -> MongoExpression:
         """Match a live-linked target whose field contains ``text`` (case-sensitive)."""
@@ -1071,6 +1241,71 @@ class MongoLinkField:
     def endswith(self, suffix: str) -> MongoExpression:
         """Match a live-linked target whose field ends with ``suffix``."""
         return self._string_match("endswith", suffix)
+
+
+class MongoChildRecordField(MongoLinkField):
+    """A scalar or encoded element field of a child-record traversal (``v.sites.symbol``), compared existentially.
+
+    Each condition is a ``ChildRecordNode`` over the traversal's looked-up
+    element array: "some element satisfies it", with ``~`` set-wise ("no
+    element satisfies it", true for a record without elements). Conditions of
+    one traversal object combined with ``&``/``|`` constrain one element.
+
+    :param path: The traversal's temporary ``$lookup`` array path.
+    :param spec: The resolved scalar or encoded element field.
+    """
+
+    __slots__ = ()
+    _key_prefix: ClassVar[str] = "f."
+
+    def _node(self, predicate: dict[str, Any]) -> MongoExpression:
+        return MongoExpression(ChildRecordNode(self._path, predicate))
+
+    def _comparison(self, op: Literal["eq", "ne", "lt", "le", "gt", "ge"], value: Any) -> MongoExpression:
+        if value is None or isinstance(value, (MongoField, MongoLinkField)):
+            # ponytail: SQL matches `== None` on the outer join's phantom row and compares columns; neither maps
+            # onto an $elemMatch body, so both are refused rather than approximated.
+            raise UnsupportedQueryError(
+                f"a child-record element field ({self._spec.field}) compares only with literal values on MongoDB"
+            )
+        return super()._comparison(op, value)
+
+    def _members(self, values: tuple[Any, ...]) -> list[Any]:
+        if any(value is None for value in values):
+            raise ValueError("None is not a valid member of a child-field set operation")
+        return [self._encode(value) for value in values]
+
+    def has(self, value: Any) -> MongoExpression:
+        """Match a record with an element whose field equals ``value``.
+
+        :param value: The element value to find.
+        :return: The matching expression.
+        """
+        return self.has_any(value)
+
+    def has_any(self, *values: Any) -> MongoExpression:
+        """Match a record with an element whose field is among ``values``.
+
+        :param \\*values: The values of which at least one element must match.
+        :return: The matching expression.
+        """
+        return self._node({self._value_key: {"$in": self._members(values)}})
+
+    def has_only(self, *values: Any) -> MongoExpression:
+        """Match a record none of whose elements has a known field value outside ``values``.
+
+        :param \\*values: The complete set of allowed element values.
+        :return: The condition; a record without elements matches.
+        """
+        return ~self._node({self._value_key: {"$nin": [*self._members(values), None]}})
+
+    def is_in(self, *values: Any) -> MongoExpression:
+        """Universally constrain the element values, exactly as :meth:`has_only`.
+
+        :param \\*values: The complete set of allowed element values.
+        :return: The condition; a record without elements matches.
+        """
+        return self.has_only(*values)
 
 
 class MongoVariable:
@@ -1157,6 +1392,8 @@ class MongoVariable:
             return reference
         if spec.role == "child":
             assert spec.child is not None
+            if spec.target is not None:
+                return MongoChildRecords(self, spec)
             # A tensor child (FracVector or float) queries its first element key without a codec.
             child_codec: ValueCodec | None = (
                 codec_named(spec.codec_name) if spec.codec_name is not None and not _is_float_tensor(spec) else None
@@ -1223,6 +1460,9 @@ class MongoSearcher:
         # after reference lookups and before the truth ``$match``.
         self._link_lookups: list[dict[str, Any]] = []
         self._link_index = 0
+        # Child-record element ``$lookup`` stages (one per chained traversal object), emitted after the
+        # reference lookups by _lookup_stages() and unset after the truth ``$match``.
+        self._child_lookups: list[dict[str, Any]] = []
         # Phase 5 attaches its client-authoritative predicate evaluator here.
         # MongoResultSet owns the single candidate iterator that applies it.
         self._row_verifier: Callable[[dict[str, Any]], bool] | None = None
@@ -1459,10 +1699,22 @@ class MongoSearcher:
                 progress = True
             if not progress:
                 raise UnsupportedQueryError("Mongo search contains a cyclic or disconnected variable join")
-        return stages
+        # Weak-link and child-record arrays depend only on the source document (and, for a
+        # lookup-variable source, its already-unwound alias), so they follow the reference lookups
+        # and precede the truth match that reads them, on every pipeline (paged ones included).
+        return [*stages, *self._link_lookups, *self._child_lookups]
 
     def _truth_filter(self) -> dict[str, Any]:
-        return _and(*(render_node(expression.node)[0] for expression in self._expressions))
+        if not self._expressions:
+            return {}
+        # One tree, so conditions on one child-record traversal correlate across add() calls too.
+        return render_node(_correlate(reduce(AndNode, (expression.node for expression in self._expressions))))[0]
+
+    def _unset_child_lookups(self) -> list[dict[str, Any]]:
+        """Return the stage dropping the child-record element arrays after the truth ``$match``, if any."""
+        if not self._child_lookups:
+            return []
+        return [{"$unset": [stage["$lookup"]["as"] for stage in self._child_lookups]}]
 
     def _main_alt_stages(self) -> list[dict[str, Any]]:
         """Restrict each declared variable to mains, hiding named alternatives.
@@ -1537,11 +1789,8 @@ class MongoSearcher:
             raise ValueError("this searcher has no query variables; call variable() first")
         self._require_verifier_identity()
         pipeline = self._lookup_stages()
-        # Weak-link arrays depend only on the source document's logical_id (and,
-        # for a lookup-variable source, its already-unwound alias), so they follow
-        # the reference lookups and precede the truth match that reads them.
-        pipeline.extend(self._link_lookups)
         pipeline.append({"$match": self._truth_filter()})
+        pipeline.extend(self._unset_child_lookups())
         if self._only_main_alt:
             pipeline.extend(self._main_alt_stages())
         if self._only_latest:

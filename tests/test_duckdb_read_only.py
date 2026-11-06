@@ -61,3 +61,39 @@ def test_two_read_only_handles_open_the_same_file_at_once(tmp_path: Path) -> Non
     finally:
         first.dispose()
         second.dispose()
+
+
+def test_locked_file_raises_oserror_and_open_emits_no_index_warning(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+    import warnings
+
+    _require_duckdb()
+    from httk.store.backend.sql.stores import DuckdbStore
+
+    path = tmp_path / "locked.duckdb"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        DuckdbStore(path, entry_records={}).close()
+        DuckdbStore(path, read_only=True, entry_records={}).close()
+    assert not [w for w in caught if w.category.__name__ == "DuckDBEngineWarning"]
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import duckdb,sys;c=duckdb.connect(sys.argv[1]);print('ok',flush=True);input()",
+            str(path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ok"
+        with pytest.raises(OSError, match="in use by another process"):
+            DuckdbStore(path, read_only=True, entry_records={})
+    finally:
+        holder.kill()
+        holder.wait()

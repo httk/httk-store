@@ -126,6 +126,11 @@ def conformance_cases() -> tuple[ConformanceCase, ...]:
         _case("~tags.has_any('q', 'r')", lambda v: ~v.tags.has_any("q", "r"), "bcd"),
         _case("tags.has_only('p')", lambda v: v.tags.has_only("p"), "bcd"),
         _case("~tags.has_only('p')", lambda v: ~v.tags.has_only("p"), "aef"),
+        # A set operation beside a scalar under ~: the scalar stays three-valued (e is unknown, not true).
+        _case("~(tags.has('p') & (n == 2))", lambda v: ~(v.tags.has("p") & (v.n == 2)), "acdef"),
+        _case("~(tags.has('q') & (n == 1))", lambda v: ~(v.tags.has("q") & (v.n == 1)), "bcdf"),
+        _case("~(tags.has('q') | (n == 2))", lambda v: ~(v.tags.has("q") | (v.n == 2)), "d"),
+        _case("~(tags.has('q') & (n != 1))", lambda v: ~(v.tags.has("q") & (v.n != 1)), "abcdf"),
         # Kleene logic: c is (unknown, true), e is (unknown, false).
         _case("(n > 1) | (name == None)", lambda v: (v.n > 1) | (v.name == None), "bcdf"),
         _case("(n > 1) & (name == None)", lambda v: (v.n > 1) & (v.name == None), ""),

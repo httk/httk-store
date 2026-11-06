@@ -300,6 +300,7 @@ class MongoResultSet:
         assert all("$group" not in stage for stage in pipeline)
         assert all("$unwind" not in stage or stage["$unwind"].get("preserveNullAndEmptyArrays") for stage in pipeline)
         pipeline.append({"$match": self._plan._truth_filter()})
+        pipeline.extend(self._plan._unset_child_lookups())
         for index, key in enumerate(keys):
             field = self._page_field(key)
             null_rank = 0 if key.order.nulls == "first" else 1

@@ -232,6 +232,49 @@ class StorageLayout:
         return MappingProxyType({family.name: family.record_names for family in self.families})
 
 
+def refuse_undeclared_entry(layout: StorageLayout, obj: object, record_type: type) -> None:
+    """Refuse a top-level save as a record that a family-declaring store does not declare.
+
+    :param layout: The store's normalized layout; one without families accepts anything.
+    :param obj: The object being saved; its ``type`` attribute names its entry type.
+    :param record_type: The resolved storage record class.
+    :raises ValueError: If the entry type's or the record's registered family is declared without this record.
+    """
+    if not layout.families:
+        return
+    # A dataclass field named ``type`` is data, not the entry type.
+    is_field = dataclasses.is_dataclass(obj) and any(f.name == "type" for f in dataclasses.fields(obj))
+    entry_type = None if is_field else getattr(obj, "type", None)
+    family = None
+    if isinstance(entry_type, str) and entry_type:
+        matches = [f for f in layout.families if getattr(f.family, "type", None) == entry_type]
+        if any(record_type in f.records for f in matches):
+            return
+        family = matches[0] if matches else None
+    if family is None:
+        declared = {f.name: f for f in layout.families}
+        for name in _registered_names_for(record_type, known_entry_records(), entry_record_info):
+            family_name = entry_record_info(name)[1]
+            if family_name in declared:
+                family, entry_type = declared[family_name], family_name
+                break
+            raise ValueError(
+                f"{record_type.__name__} is registered for the {family_name!r} entry family, which this store "
+                f"does not declare; declare that family (rebuild the store, or reopen with upgrade=True for an "
+                f"additive declaration)"
+            )
+    if family is None or record_type in family.records:
+        return
+    records = [
+        r for f in layout.families if f is family or getattr(f.family, "type", None) == entry_type for r in f.records
+    ]
+    raise ValueError(
+        f"this store declares {', '.join(r.__name__ for r in records)} for {entry_type!r} entries, "
+        f"not {record_type.__name__}; save with as_record=<a declared record>, or declare "
+        f"{record_type.__name__} for the family and reopen with upgrade=True"
+    )
+
+
 def validate_entry_id_fields(layout: StorageLayout) -> None:
     """Require entry-id fields on every backing of a defined entry family."""
     required = (

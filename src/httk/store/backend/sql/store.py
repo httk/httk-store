@@ -43,6 +43,7 @@ import threading
 import time
 import typing
 import uuid
+import warnings
 import weakref
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from types import TracebackType
@@ -157,6 +158,7 @@ from httk.store.storage_layout import (
     family_entry_type_definition,
     next_entry_id_offset,
     parse_entry_id_offsets,
+    refuse_undeclared_entry,
     schema_fingerprint_diff,
     schema_fingerprint_json,
 )
@@ -1970,7 +1972,10 @@ class SqlStore:
             if name.startswith("_httk_"):
                 continue
             try:
-                tables[name] = sqlalchemy.Table(name, reflection_metadata, autoload_with=connection)
+                # The duckdb driver cannot reflect indexes and only column types are used here.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="duckdb-engine doesn't yet support reflection on indices")
+                    tables[name] = sqlalchemy.Table(name, reflection_metadata, autoload_with=connection)
             except SQLAlchemyError:
                 continue
         for name, table in tables.items():
@@ -3036,6 +3041,7 @@ class SqlStore:
         self._reject_during_bulk()
         reject_cursor_proxy(obj)
         record_type = resolve_storage_record(obj, as_record=as_record)
+        refuse_undeclared_entry(self.layout, obj, record_type)
         projection = SaveProjection()
         timestamp_state = getattr(self._local, "store_timestamp_transaction", None)
         _publish_after_commit = (

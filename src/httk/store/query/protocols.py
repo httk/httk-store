@@ -390,7 +390,11 @@ class SearchField(Protocol):
 
         A field may hold a *reference* to another stored record, and attribute
         access chains into that record's own fields — ``variable.ref.doi`` —
-        to any depth. Whether a given field is a reference is a property of the
+        to any depth. A backend may also chain a field holding a tuple of stored
+        records into the element fields (``variable.sites.symbol``, supported
+        by the SQL and MongoDB backends); a condition on such a chain holds when
+        some element matches it, and conditions taken from one chained object
+        apply to the same element. Whether a given field is a reference is a property of the
         stored class, not of this contract, so the chain is only resolved when
         the query is built: a backend raises :class:`AttributeError` for a name
         that is not a field of the referenced record, and for chaining off a

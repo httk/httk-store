@@ -277,9 +277,10 @@ Then save each structure with `as_record=SitesStructureRecord`:
 :dedent: 8
 ```
 
-Always pass `as_record=`. `store.save(structure)` without it does not fail.
-It silently writes the full *httk-atomistic* table graph instead, and those
-rows are not served.
+Pass `as_record=`. A store that declares entry families refuses to save an
+entry as a record its family does not declare: `store.save(structure)` without
+it raises `ValueError` naming the declared record, instead of writing the
+default *httk-atomistic* tables.
 
 The example builds its two structures exactly in code:
 
@@ -291,8 +292,11 @@ The example builds its two structures exactly in code:
 
 ## 8. Query it in Python
 
-The search DSL reaches the site table through a `SiteRecord` variable. This
-search finds the chlorine sites of all stored structures:
+The search DSL chains from the `sites` field into the site table.
+`s.sites.symbol == "Cl"` finds the structures that have a chlorine site.
+Conditions on one `s.sites` object apply to the same site, so the second search
+finds only the structures with a chlorine site near the origin. A fresh
+`s.sites` access matches its own site instead:
 
 ```{literalinclude} ../../examples/custom_layout/build_sites_store.py
 :language: python
@@ -371,9 +375,6 @@ table. Without it, such a job reports a `storage_error` that names the missing
 
 - A tuple of a storable dataclass always goes through a link table. Inline
   multi-column child rows without a link table are not supported.
-- The search DSL does not chain through the `sites` field: `s.sites.symbol`
-  raises `AttributeError`. Search a `SiteRecord` variable, or filter the
-  served properties.
 - A filter on a response-only property answers 501 "not implemented".
 - Every reopen needs the registration, whether from the module-level call,
   `--records` or a registration package.

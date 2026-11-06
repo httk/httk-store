@@ -27,7 +27,14 @@ class KeepHolder:
     f: FileRecord
 
 
+_IDS = EntryIdScheme("httk.test", "1")
 _FAMILIES = (
+    EntryFamilyDeclaration(
+        name="files",
+        family=FileEntry,
+        definition_id=FileEntry.definition_id,
+        records=(EntryRecordDeclaration(name="core-file", record=FileRecord, definition_id=FileEntry.definition_id),),
+    ),
     EntryFamilyDeclaration(
         name="test-keep-stored",
         family=KeepHolderFamily,
@@ -43,10 +50,10 @@ def store(request: pytest.FixtureRequest) -> Iterator[SqlStore]:
     if request.param == "duckdb":
         pytest.importorskip("duckdb_engine")
         with Backend.duckdb() as database:
-            yield SqlStore(database, entry_families=_FAMILIES)
+            yield SqlStore(database, entry_families=_FAMILIES, entry_ids=_IDS)
         return
     with Backend.sqlite() as database:
-        yield SqlStore(database, entry_families=_FAMILIES)
+        yield SqlStore(database, entry_families=_FAMILIES, entry_ids=_IDS)
 
 
 def _file_rows(store: SqlStore) -> list[Any]:
@@ -99,7 +106,7 @@ def test_bulk_resave_keeps_first_location(
 def test_mongo_resave_keeps_first_location(mongo_test_database: Any) -> None:
     from httk.store.backend.mongo import MongoStore
 
-    store = MongoStore(mongo_test_database, entry_families=_FAMILIES)
+    store = MongoStore(mongo_test_database, entry_families=_FAMILIES, entry_ids=_IDS)
     sid = store.save(_FIRST)
     assert store.save(_SECOND) == sid
     store.save(KeepHolder("b", _SECOND))
@@ -191,7 +198,7 @@ def test_bulk_serial_first_non_null_url_wins(
 def test_mongo_first_non_null_url_wins(mongo_test_database: Any) -> None:
     from httk.store.backend.mongo import MongoStore
 
-    store = MongoStore(mongo_test_database, entry_families=_FAMILIES)
+    store = MongoStore(mongo_test_database, entry_families=_FAMILIES, entry_ids=_IDS)
     sid = store.save(_LOST)
     assert store.fetch(FileRecord, sid).url is None
     assert store.save(_FIRST) == sid
@@ -206,7 +213,7 @@ def test_mongo_first_non_null_url_wins(mongo_test_database: Any) -> None:
 def test_fill_never_overwrites_a_concurrently_committed_value(monkeypatch: pytest.MonkeyPatch) -> None:
     """A writer that read NULL must not overwrite another writer's url committed meanwhile (READ COMMITTED race)."""
     with Backend.sqlite() as database:
-        store = SqlStore(database, entry_families=_FAMILIES)
+        store = SqlStore(database, entry_families=_FAMILIES, entry_ids=_IDS)
         sid = store.save(_LOST)
         original = SqlStore._metadata_parent_row
 

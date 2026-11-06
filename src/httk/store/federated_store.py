@@ -76,6 +76,8 @@ class _Predicate:
     path: tuple[str, ...]
     operation: str
     arguments: tuple[object, ...]
+    nodes: tuple[object, ...]
+    """One identity token per path step: the federated field object taken at that step."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,25 +146,42 @@ class _FederatedPlan:
     count_cache: _FederatedCountCache
 
 
-def _child_field(variable: SearchVariable, path: tuple[str, ...]) -> SearchField:
-    field: SearchField | SearchVariable = variable
-    for name in path:
-        field = cast(SearchField, getattr(field, name))
+def _child_field(
+    variable: SearchVariable,
+    path: tuple[str, ...],
+    nodes: tuple[object, ...] | None = None,
+    resolved: dict[object, object] | None = None,
+) -> SearchField:
+    """Walk ``path`` from a child variable, resolving each federated node once per replay.
+
+    Steps that share a node (one :class:`FederatedField` object) resolve to the
+    same child field, so ``site = s.sites`` then ``site.symbol`` and ``site.x``
+    reach one child traversal, exactly as on the child store itself.
+    """
+    resolved = {} if resolved is None else resolved
+    field: object = variable
+    for name, node in zip(path, nodes or tuple(object() for _ in path), strict=True):
+        if node not in resolved:
+            resolved[node] = getattr(field, name)
+        field = resolved[node]
     return cast(SearchField, field)
 
 
-def _replay_ast(ast: _FederatedAst, variable: SearchVariable) -> SearchExpression:
+def _replay_ast(
+    ast: _FederatedAst, variable: SearchVariable, resolved: dict[object, object] | None = None
+) -> SearchExpression:
+    resolved = {} if resolved is None else resolved
     if isinstance(ast, _Constant):
         return variable.always_true() if ast.value else variable.always_false()
     if isinstance(ast, _Predicate):
-        operation = getattr(_child_field(variable, ast.path), ast.operation)
+        operation = getattr(_child_field(variable, ast.path, ast.nodes, resolved), ast.operation)
         return cast(SearchExpression, operation(*ast.arguments))
     if isinstance(ast, _And):
-        return _replay_ast(ast.left, variable) & _replay_ast(ast.right, variable)
+        return _replay_ast(ast.left, variable, resolved) & _replay_ast(ast.right, variable, resolved)
     if isinstance(ast, _Or):
-        return _replay_ast(ast.left, variable) | _replay_ast(ast.right, variable)
+        return _replay_ast(ast.left, variable, resolved) | _replay_ast(ast.right, variable, resolved)
     if isinstance(ast, _Not):
-        return ~_replay_ast(ast.expression, variable)
+        return ~_replay_ast(ast.expression, variable, resolved)
     raise AssertionError(f"unknown federated AST node: {type(ast).__name__}")
 
 
@@ -241,8 +260,9 @@ def _count_plan(store: "FederatedStore", plan: _FederatedPlan) -> int:
         except Exception as exc:
             raise _source_error(source, "count searcher construction", exc) from exc
         try:
+            resolved: dict[object, object] = {}  # shared across expressions, so correlation spans add() calls
             for ast in plan.expressions:
-                child_searcher.add(_replay_ast(ast, child_variable))
+                child_searcher.add(_replay_ast(ast, child_variable, resolved))
         except Exception as exc:
             raise _source_error(source, "count expression replay", exc) from exc
         try:
@@ -287,8 +307,9 @@ def _execute_plan(
         except Exception as exc:
             raise _source_error(source, "searcher construction", exc) from exc
         try:
+            resolved: dict[object, object] = {}  # shared across expressions, so correlation spans add() calls
             for ast in plan.expressions:
-                child_searcher.add(_replay_ast(ast, child_variable))
+                child_searcher.add(_replay_ast(ast, child_variable, resolved))
         except Exception as exc:
             raise _source_error(source, "expression replay", exc) from exc
         try:
@@ -646,21 +667,28 @@ class FederatedVariable:
     def __getattr__(self, name: str) -> "FederatedField":
         if name.startswith("_"):
             raise AttributeError(name)
-        return FederatedField(self, (name,))
+        return FederatedField(self, (name,), (object(),))
 
 
 class FederatedField:
     """Represent a backend-neutral path from a federated root variable.
 
+    Each step carries an identity token, so conditions taken from one field
+    object (``site = v.sites``, then ``site.symbol`` and ``site.x``) replay
+    through one child traversal and stay correlated, while a fresh ``v.sites``
+    access is independent, as on a single store.
+
     :param variable: The federated root variable owning the path.
     :param path: The field path relative to that variable.
+    :param nodes: One identity token per path step.
     """
 
-    __slots__ = ("_path", "_variable")
+    __slots__ = ("_nodes", "_path", "_variable")
 
-    def __init__(self, variable: FederatedVariable, path: tuple[str, ...]) -> None:
+    def __init__(self, variable: FederatedVariable, path: tuple[str, ...], nodes: tuple[object, ...]) -> None:
         self._variable = variable
         self._path = path
+        self._nodes = nodes
 
     def _predicate(self, operation: str, *arguments: object) -> "FederatedExpression":
         if any(
@@ -668,7 +696,9 @@ class FederatedField:
             for argument in arguments
         ):
             raise UnsupportedQueryError("federated queries do not support field-to-field comparisons")
-        return self._variable._searcher._expression(_Predicate(self._path, operation, arguments), operation)
+        return self._variable._searcher._expression(
+            _Predicate(self._path, operation, arguments, self._nodes), operation
+        )
 
     def __eq__(self, value: object) -> "FederatedExpression":  # type: ignore[override]
         return self._predicate("__eq__", value)
@@ -747,7 +777,7 @@ class FederatedField:
     def __getattr__(self, name: str) -> "FederatedField":
         if name.startswith("_"):
             raise AttributeError(name)
-        return FederatedField(self._variable, (*self._path, name))
+        return FederatedField(self._variable, (*self._path, name), (*self._nodes, object()))
 
 
 class FederatedExpression:

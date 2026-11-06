@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
-from httk.core import FileRecord
+from httk.core import FileEntry, FileRecord
 from httk.core.storage import StorageInfo
 from sqlalchemy import event
 
-from httk.store import EntryFamilyDeclaration, EntryRecordDeclaration
+from httk.store import EntryFamilyDeclaration, EntryIdScheme, EntryRecordDeclaration
 from httk.store.backend.sql import Backend, SqlStore
 
 
@@ -27,7 +27,14 @@ class FileHolder:
     f: FileRecord
 
 
+_IDS = EntryIdScheme("httk.test", "1")
 _FAMILIES = (
+    EntryFamilyDeclaration(
+        name="files",
+        family=FileEntry,
+        definition_id=FileEntry.definition_id,
+        records=(EntryRecordDeclaration(name="core-file", record=FileRecord, definition_id=FileEntry.definition_id),),
+    ),
     EntryFamilyDeclaration(
         name="test-fsck-files",
         family=FileHolderFamily,
@@ -96,7 +103,7 @@ def sql_database(request: pytest.FixtureRequest) -> Iterator[Backend]:
 
 def test_sql_fsck_verifies_file_records(sql_database: Backend, tmp_path: Path) -> None:
     root = tmp_path / "data"
-    store = SqlStore(sql_database, entry_families=_FAMILIES)
+    store = SqlStore(sql_database, entry_families=_FAMILIES, entry_ids=_IDS)
     sids = _populate(store, root)
     exclusive = sql_database.engine.dialect.name == "duckdb"
 
@@ -113,7 +120,7 @@ def test_mongo_fsck_verifies_file_records(mongo_test_database: Any, tmp_path: Pa
     from httk.store.backend.mongo import MongoStore
 
     root = tmp_path / "data"
-    store = MongoStore(mongo_test_database, entry_families=_FAMILIES)
+    store = MongoStore(mongo_test_database, entry_families=_FAMILIES, entry_ids=_IDS)
     sids = _populate(store, root)
     assert store.fsck().files_checked == 0
     _assert_summary(store.fsck(data_dir=root), sids, store)
@@ -144,12 +151,12 @@ def _relocate_and_check(store: Any, root: Path, **fsck: Any) -> None:
 
 
 def test_sql_relocate_file_and_lost_files(sql_database: Backend, tmp_path: Path) -> None:
-    store = SqlStore(sql_database, entry_families=_FAMILIES)
+    store = SqlStore(sql_database, entry_families=_FAMILIES, entry_ids=_IDS)
     _relocate_and_check(store, tmp_path / "data", exclusive=sql_database.engine.dialect.name == "duckdb")
 
 
 def test_sql_relocate_file_without_file_rows(sql_database: Backend) -> None:
-    store = SqlStore(sql_database, entry_families=_FAMILIES)
+    store = SqlStore(sql_database, entry_families=_FAMILIES, entry_ids=_IDS)
     with pytest.raises(KeyError, match="no FileRecord table"):
         store.relocate_file(1, "data/x")
     store.save(FileRecord("data/x", "x", sha256="ab" * 32))
@@ -161,7 +168,7 @@ def test_sql_relocate_file_without_file_rows(sql_database: Backend) -> None:
 def test_mongo_relocate_file_and_lost_files(mongo_test_database: Any, tmp_path: Path) -> None:
     from httk.store.backend.mongo import MongoStore
 
-    _relocate_and_check(MongoStore(mongo_test_database, entry_families=_FAMILIES), tmp_path / "data")
+    _relocate_and_check(MongoStore(mongo_test_database, entry_families=_FAMILIES, entry_ids=_IDS), tmp_path / "data")
 
 
 def _compare_and_swap(store: Any) -> None:
@@ -182,7 +189,7 @@ def _compare_and_swap(store: Any) -> None:
 
 
 def test_sql_relocate_file_compare_and_swap(sql_database: Backend) -> None:
-    store = SqlStore(sql_database, entry_families=_FAMILIES)
+    store = SqlStore(sql_database, entry_families=_FAMILIES, entry_ids=_IDS)
     statements: list[str] = []
 
     def capture(_conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
@@ -202,4 +209,4 @@ def test_sql_relocate_file_compare_and_swap(sql_database: Backend) -> None:
 def test_mongo_relocate_file_compare_and_swap(mongo_test_database: Any) -> None:
     from httk.store.backend.mongo import MongoStore
 
-    _compare_and_swap(MongoStore(mongo_test_database, entry_families=_FAMILIES))
+    _compare_and_swap(MongoStore(mongo_test_database, entry_families=_FAMILIES, entry_ids=_IDS))

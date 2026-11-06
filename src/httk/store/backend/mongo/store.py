@@ -62,6 +62,7 @@ from httk.store.storage_layout import (
     normalize_entry_families,
     normalize_entry_records,
     parse_entry_id_offsets,
+    refuse_undeclared_entry,
     schema_fingerprint_diff,
     schema_fingerprint_json,
     validate_entry_id_fields,
@@ -1761,6 +1762,7 @@ class MongoStore:
         reject_cursor_proxy(obj)
         self._require_identity_ownership()
         record_type = resolve_storage_record(obj, as_record=as_record)
+        refuse_undeclared_entry(self.layout, obj, record_type)
         alt_request = (
             _AlternativeRequest(
                 alternative_of=alternative_of,
@@ -3023,8 +3025,9 @@ class MongoStore:
 
         ``"light"`` does nothing (WiredTiger reuses freed space by itself);
         ``"full"`` runs ``compact`` on every non-system collection of the store
-        database. ``compact`` needs exclusive use of the collection on older
-        servers and may be refused by some deployments; server errors propagate.
+        database, with ``force`` set because a replica-set primary otherwise
+        refuses it; it slows other operations while it runs, and some
+        deployments refuse it anyway, in which case the server error propagates.
 
         :param effort: ``"light"`` or ``"full"``, as for ``SqlStore.reclaim_space``.
         :return: Always None; MongoDB reports no file size to shrink.
@@ -3039,7 +3042,7 @@ class MongoStore:
             database = self._database.database
             for name in sorted(database.list_collection_names()):
                 if not name.startswith("system."):
-                    database.command("compact", name)
+                    database.command("compact", name, force=True)
         return None
 
     def link(self, source: Any, name: str, target: Any) -> None:

@@ -137,6 +137,14 @@ Record validation runs at this storage boundary through `__httk_validate__`.
 Optional child fields use presence columns, so `None` remains distinct from an
 empty child value.
 
+A store that declares entry families refuses, with `ValueError` and before any
+table is created, a top-level save in two cases: the object's entry type names
+a declared family whose records do not include the record, or the record is
+registered for a family the store does not declare. Plain classes and
+unregistered records are unaffected. Fix it with `as_record=<a declared
+record>`, or declare the record (or its family) and reopen with
+`upgrade=True`.
+
 Repeated default fetches of one live `(class, sid)` return the same object (see
 [Lazy records](#lazy-records) for the full identity contract). Join-objects
 pointing at a stored instance are found with

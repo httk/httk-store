@@ -9,7 +9,7 @@ In order, the script:
 1. builds rock-salt NaCl and CsCl as exact `UnitcellStructure` values;
 2. saves both with `as_record=SitesStructureRecord`;
 3. validates the served properties with `store.stored_property_plan`;
-4. searches the site table for chlorine sites;
+4. searches for structures with a chlorine site, and with one near the origin;
 5. prints the physical tables and their columns with plain `duckdb`;
 6. reopens the store and fetches a record back.
 
@@ -22,7 +22,7 @@ from pathlib import Path
 
 import duckdb
 from httk.atomistic import StructureEntry, UnitcellStructure
-from sites_layout import SiteRecord, SitesStructureRecord
+from sites_layout import SitesStructureRecord
 
 from httk.store import DuckdbStore, EntryIdScheme
 
@@ -46,6 +46,11 @@ NACL = UnitcellStructure(
 )
 CSCL = UnitcellStructure(cell=cubic("4.12"), sites=[[0, 0, 0], [HALF, HALF, HALF]], species_at_sites=["Cs", "Cl"])
 # [/structures]
+
+
+def elements(record: SitesStructureRecord) -> list[str]:
+    """The sorted element symbols of a fetched record."""
+    return sorted({site.symbol for site in record.sites})
 
 
 def show_layout(path: Path) -> dict[str, int]:
@@ -87,12 +92,20 @@ def main() -> None:
 
             # [search]
             search = store.searcher()
-            site = search.variable(SiteRecord)
-            search.add(site.symbol == "Cl")
-            chlorine = search.results(site=site)
-            print(f"{len(chlorine)} chlorine sites:", [(row.site.x, row.site.y, row.site.z) for row in chlorine])
+            s = search.variable(SitesStructureRecord)
+            search.add(s.sites.symbol == "Cl")  # some site is chlorine
+            with_chlorine = [elements(row.structure) for row in search.results(structure=s)]
+            print("structures with a Cl site:", with_chlorine)
+
+            search = store.searcher()
+            s = search.variable(SitesStructureRecord)
+            site = s.sites  # one traversal: both conditions hold on the same site
+            search.add((site.symbol == "Cl") & (site.x < 0.1))
+            cl_near_origin = [elements(row.structure) for row in search.results(structure=s)]
+            print("structures with a Cl site at x < 0.1:", cl_near_origin)
             # [/search]
-            assert len(chlorine) == 5
+            assert sorted(with_chlorine) == [["Cl", "Cs"], ["Cl", "Na"]]
+            assert cl_near_origin == [["Cl", "Na"]]  # CsCl has Cl only at x = 1/2
 
         print("physical tables:")
         counts = show_layout(path)

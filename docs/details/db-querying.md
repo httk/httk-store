@@ -11,7 +11,9 @@ query into the user-facing lazy result set with `results()`. The query runs
 when the result set is first consumed (iteration, `len()`, `first()`,
 `one()`), not when `results()` is called, and the frozen set does not see
 conditions added afterwards. Variables of the
-same class self-join; reference fields chain (`v.reference.name`); weak and
+same class self-join; reference fields chain (`v.reference.name`); a field
+holding a tuple of stored records chains into their fields (`v.sites.symbol`,
+see [Chaining into child records](#chaining-into-child-records)); weak and
 strong links join through `v.links.<name>` (see
 [Relationships](db-relationships.md), e.g. `record.links.product_of == structure`);
 variable-length fields support the set operations (`has_any`, `has_only`), and
@@ -52,6 +54,46 @@ as_vector = energies.to_fracvector()
 `.to_fracvector()` rejects floats, surds, strings, datetimes, and other
 non-rational projections. Variable-length CHILD-role projections are rejected
 when `results()` is declared; reference-path projections are supported.
+
+### Chaining into child records
+
+On the SQL and MongoDB backends, a field such as
+`sites: tuple[SiteRecord, ...]`, whose elements are stored records, chains into
+the element fields, with the same correlation rule on both. The condition holds
+when some element matches it:
+
+```python
+search = store.searcher()
+s = search.variable(SitesStructureRecord)
+search.add(s.sites.symbol == "Cl")  # some site is chlorine
+site = s.sites
+search.add((site.symbol == "Na") & (site.x > 0.4))  # one site is Na with x > 0.4
+search.add(~(s.sites.symbol == "Fe"))  # no site is iron
+```
+
+Conditions taken from one `s.sites` object apply to the same element. Each
+new `s.sites` access matches its own element, so
+`(s.sites.symbol == "Na") & (s.sites.x > 0.4)` can be met by two different
+sites. `~` negates over the whole set: a record without sites matches
+`~(s.sites.symbol == "Fe")`. The set operations work on element fields too,
+for example `s.sites.symbol.has_only("Na", "Cl")`. Only scalar and encoded
+element fields chain. Reference, child and tensor element fields raise
+`UnsupportedQueryError`, and so does using an element field as an output or a
+sort key.
+
+Both backends refuse three more forms with `UnsupportedQueryError`:
+
+- One `s.sites` object used both in a selecting element condition and in
+  another conjunct that is negated, a `has_only`, an `|` with a root
+  condition, or an element-sid condition such as `site.has_any(sid)`. An
+  example is `(site.symbol == "Na") & ~(site.x > 0.4)`. Use a fresh `s.sites`
+  for the other part: `(s.sites.symbol == "Na") & ~(s.sites.x > 0.4)`.
+- Comparing an element field with `None`.
+- Comparing an element field with another field.
+
+A root condition beside element conditions stays three-valued under `~`. If
+`s.n` is unknown, `~((s.sites.symbol == "Cl") & (s.n == 1))` is unknown for a
+record with a chlorine site, so the record does not match.
 
 ### Pandas-style slicer indexing
 

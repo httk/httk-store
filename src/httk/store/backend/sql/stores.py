@@ -17,6 +17,7 @@ import os
 from typing import Any
 
 import sqlalchemy
+from sqlalchemy.exc import OperationalError
 
 from httk.store.backend.sql.engine import Backend
 from httk.store.backend.sql.store import SqlStore
@@ -36,9 +37,18 @@ def _init_owning(store: SqlStore, backend: Backend, store_options: dict[str, Any
     :param backend: The backend this store built and will own.
     :param store_options: The :class:`~httk.store.backend.sql.store.SqlStore` keyword options to forward.
     :return: None.
+    :raises OSError: If another process holds the DuckDB file lock.
     """
     try:
         SqlStore.__init__(store, backend, **store_options)
+    except OperationalError as exc:
+        backend.dispose()
+        message = str(getattr(exc, "orig", None) or "")
+        if "Could not set lock" not in message:
+            raise
+        reason = message.removeprefix("IO Error: ").splitlines()[0]
+        database = backend.engine.url.database
+        raise OSError(f"cannot open {database}: the DuckDB file is in use by another process ({reason})") from exc
     except BaseException:
         backend.dispose()
         raise

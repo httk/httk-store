@@ -115,7 +115,10 @@ search.add(~r.links.projects.has_any(p1))        # set-wise negation
 
 Each `v.links.<name>` access mints a *fresh* alias, so ANDed conditions express
 HAS ALL: `(r.links.projects.name == "A") & (r.links.projects.name == "B")`
-matches a source linked to both. Field chaining reaches scalar and encoded
+matches a source linked to both. Conditions taken from one link set object
+instead hold on the same target (see
+[One search object, one element](db-querying.md#one-search-object-one-element)).
+Field chaining reaches scalar and encoded
 fields of the target only; chaining deeper — into the target's references,
 children, or its own links — raises `UnsupportedQueryError`. An identity RHS is a
 stored object or a target search variable; a bare string raises `TypeError`

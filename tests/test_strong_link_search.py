@@ -171,6 +171,33 @@ def test_run_edges_are_searchable_both_ways(store_factory):
     assert free.formula == "O"
 
 
+def test_one_strong_link_object_constrains_one_edge(store_factory):
+    # Conditions taken from one strong-link object hold on the same edge; fresh accesses stay independent.
+    store = _sql(store_factory)
+    ca, _ti, _e_ca, _e_ti, _orphan, _run_ca, _run_ti = _populate(store)
+
+    def runs(build):
+        search = store.searcher()
+        run = search.variable(Run)
+        search.add(build(run))
+        return sorted(search.results(source=run.source_id).scalars())
+
+    def same_edge(run):
+        output = run.links.has_output
+        return (output == ca) & (output.label == "energy")
+
+    assert runs(same_edge) == []  # ca is output as "relaxed", not as "energy"
+    assert runs(lambda run: (run.links.has_output == ca) & (run.links.has_output.label == "energy")) == ["ws:ca"]
+    assert runs(lambda run: ~same_edge(run)) == ["ws:ca", "ws:ti"]
+
+    def mixed(run):
+        output = run.links.has_output
+        return (output == ca) & ~(output.label == "energy")
+
+    with pytest.raises(UnsupportedQueryError, match=r"Run\.links\.has_output is used through one search object"):
+        runs(mixed)
+
+
 def test_unknown_names_and_unsupported_forms(store_factory):
     store = _sql(store_factory)
     _populate(store)

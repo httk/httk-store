@@ -17,11 +17,10 @@ see [Chaining into child records](#chaining-into-child-records)); weak and
 strong links join through `v.links.<name>` (see
 [Relationships](db-relationships.md), e.g. `record.links.product_of == structure`);
 variable-length fields support the set operations (`has_any`, `has_only`), and
-`~` negates them as sets. Each access to a list field is a separate set, and
-reusing one list-field object (`t = v.symbols`) in several conditions raises
-`UnsupportedQueryError`, so write `v.symbols` afresh in each condition. String
-matching (`contains`, `startswith`, `endswith`) always takes **literal** text —
-`%` and `_` match themselves:
+`~` negates them as sets (see
+[One search object, one element](#one-search-object-one-element) for reusing
+one such object). String matching (`contains`, `startswith`, `endswith`) always
+takes **literal** text — `%` and `_` match themselves:
 
 ```python
 search = store.searcher()
@@ -84,19 +83,51 @@ element fields chain. Reference, child and tensor element fields raise
 `UnsupportedQueryError`, and so does using an element field as an output or a
 sort key.
 
-Both backends refuse three more forms with `UnsupportedQueryError`:
+Both backends refuse with `UnsupportedQueryError` comparing an element field
+with `None` or with another field, and the mixed uses described in the next
+section. An element-sid condition such as `site.has_any(sid)` cannot share an
+element with a field condition on the same `s.sites` object, so that
+combination is refused too.
 
-- One `s.sites` object used both in a selecting element condition and in
-  another conjunct that is negated, a `has_only`, an `|` with a root
-  condition, or an element-sid condition such as `site.has_any(sid)`. An
-  example is `(site.symbol == "Na") & ~(site.x > 0.4)`. Use a fresh `s.sites`
-  for the other part: `(s.sites.symbol == "Na") & ~(s.sites.x > 0.4)`.
-- Comparing an element field with `None`.
-- Comparing an element field with another field.
+### One search object, one element
 
-A root condition beside element conditions stays three-valued under `~`. If
-`s.n` is unknown, `~((s.sites.symbol == "Cl") & (s.n == 1))` is unknown for a
-record with a chlorine site, so the record does not match.
+Every collection-valued search object follows one rule, on SQL and on MongoDB.
+These objects are a plain list field (`v.symbols`, `v.counts`), a child-record
+traversal (`v.sites`), and a link set (`v.links.projects`; strong links on SQL
+only):
+
+- Conditions taken from one object hold on the same element. Its `&` and `|`
+  combinations form one test per element, also across separate `add()` calls.
+- `~` of such a test means that no element satisfies it. A record with no
+  elements matches.
+- A root condition beside the test stays three-valued under `~`.
+- A fresh access (`v.counts` written again) is an independent set.
+- Using one object both in a selecting condition and in a negated, `has_only`
+  or root-`|` condition raises `UnsupportedQueryError`, which names the field
+  and the fresh-access rewrite.
+
+Each `search.add` below is an alternative query on its own searcher, since the
+conditions of one object also correlate across `add()` calls:
+
+```python
+t = v.counts
+search.add((t > 2) & (t < 5))  # some entry lies in (2, 5)
+# or: search.add(~((t > 2) & (t < 5)))  # no entry lies in (2, 5)
+# or: search.add(t.has_any(1, 2))  # one condition
+# or: search.add((v.counts > 2) & (v.counts < 5))  # fresh: one entry above 2, one below 5
+
+lk = v.links.projects
+search.add((lk.name == "P1") & (lk.note == "m"))  # one linked project has both
+# or: search.add(~((lk.name == "P1") & (lk.note == "m")))  # no linked project has both
+# or: search.add((lk == project) & (lk.note == "m"))  # identity and field on one target
+
+# Refused: s = v.symbols; s.has_any("O") & ~s.has_any("Ca") (a selecting and a negated use of one object).
+# With fresh accesses it is valid:
+# or: search.add(v.symbols.has_any("O") & ~v.symbols.has_any("Ca"))
+```
+
+The same expression object may be added more than once. With `e = v.tags ==
+"x"`, `search.add(e & e)` is the same as `search.add(e)`.
 
 ### Pandas-style slicer indexing
 

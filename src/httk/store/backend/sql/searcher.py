@@ -133,26 +133,25 @@ def _escape_like(text: str) -> str:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _Shape:
-    """How an expression uses child-record traversals, classified as MongoDB's ``_correlate`` does.
+    """How an expression uses collection-valued search objects, classified as MongoDB's ``_correlate`` does.
 
-    A ``"use"`` leaf names the traversal (:class:`SqlChildRecords`) one
-    condition reads, and whether it *selects* element rows (a positive
-    existential condition) or reads the whole element set (``has_only``,
-    child ``is_in``). A selecting condition on an element field is an
-    *element* condition: the element conditions of one traversal merge into
-    one row-wise group (MongoDB's single ``$elemMatch``), while an element-sid
-    condition on the traversal itself does not. A leaf on a plain list field
-    names that field's column object instead (``list_field``), so reusing one
-    object in several conditions can be refused. ``"&"``, ``"|"`` and ``"~"``
-    mirror the combinators.
+    A collection-valued search object is a plain list field (``v.tags``), a
+    child-record traversal (``v.sites``), or a weak- or strong-link set
+    (``v.links.projects``). A ``"use"`` leaf names the object one condition
+    reads (``key``), and whether it *selects* elements (a positive existential
+    condition) or reads the whole set (a for-all form). The selecting
+    conditions of one object that can hold on one element share a merge key
+    (``merge``), and ``&``/``|`` count them together, so they hold on the same
+    element. A child-record traversal's element-sid conditions have a merge key
+    of their own: they cannot share an element with its field conditions on
+    MongoDB. ``"&"``, ``"|"`` and ``"~"`` mirror the combinators.
     """
 
     op: Literal["use", "&", "|", "~"]
     parts: tuple["_Shape", ...] = ()
-    traversal: "SqlChildRecords | None" = None
+    key: Any = None
     selects: bool = False
-    element: bool = False
-    list_field: "SqlColumn | None" = None
+    merge: Any = None
 
 
 _NO_USE = _Shape("use")
@@ -165,44 +164,41 @@ def _combine(op: Literal["&", "|"], left: _Shape | None, right: _Shape | None) -
 
 
 def _shape_of(expression: object) -> _Shape | None:
-    # Duck-typed expressions (the stored-property _SqlPredicate) read no child-record traversal.
+    # Duck-typed expressions (the stored-property _SqlPredicate) read no collection-valued object.
     return getattr(expression, "_shape", None)
 
 
 def _shaped(
     expression: "SqlExpression", shape: _Shape | None, and_parts: "tuple[SqlExpression, ...]" = ()
 ) -> "SqlExpression":
-    """Attach the private traversal classification to a freshly built expression."""
+    """Attach the private collection classification to a freshly built expression."""
     expression._shape = shape
     expression._and_parts = and_parts
     return expression
 
 
-def _traversal_uses(shape: _Shape, positive: bool = True) -> "dict[SqlChildRecords, bool]":
-    """Map each chained traversal ``shape`` reads to whether it selects that traversal's element rows."""
+def _uses(shape: _Shape, positive: bool = True) -> dict[Any, bool]:
+    """Map each collection-valued object ``shape`` reads to whether it selects that object's elements."""
     if shape.op == "use":
-        traversal = shape.traversal
-        if traversal is None or traversal._target_alias is None:
-            return {}
-        return {traversal: positive and shape.selects}
+        return {} if shape.key is None else {shape.key: positive and shape.selects}
     if shape.op == "~":
-        return _traversal_uses(shape.parts[0], False)
-    uses: dict[SqlChildRecords, bool] = {}
+        return _uses(shape.parts[0], False)
+    uses: dict[Any, bool] = {}
     for part in shape.parts:
-        for traversal, selects in _traversal_uses(part, positive).items():
-            uses[traversal] = uses.get(traversal, False) or selects
+        for key, selects in _uses(part, positive).items():
+            uses[key] = uses.get(key, False) or selects
     return uses
 
 
-def _selected_traversal(shape: _Shape | None) -> "SqlChildRecords | None":
-    """The traversal whose element conditions ``shape`` consists of (one row-wise group), if it is such a group."""
+def _merge_key(shape: _Shape | None) -> Any:
+    """The merge key shared by all of ``shape``'s per-element conditions, if it consists of nothing else."""
     if shape is None:
         return None
     if shape.op == "use":
-        return shape.traversal if shape.element else None
+        return shape.merge
     if shape.op == "~":
         return None
-    found = {_selected_traversal(part) for part in shape.parts}
+    found = {_merge_key(part) for part in shape.parts}
     return found.pop() if len(found) == 1 else None
 
 
@@ -215,69 +211,53 @@ def _conjuncts(shape: _Shape) -> list[_Shape]:
     return [item for part in shape.parts for item in _conjuncts(part)] if shape.op == "&" else [shape]
 
 
-def _check_list_field_reuse(shape: _Shape, seen: set[int] | None = None) -> None:
-    """Refuse a plain list-field column object that appears in more than one condition.
-
-    Each access to a list field joins its own set of child rows, so a reused
-    object would silently constrain one joined row where MongoDB constrains
-    the whole set; neither is what independent access promises.
-
-    :param shape: The classified predicate tree.
-    :param seen: The ids of the list-field columns already met in this query.
-    :return: None.
-    :raises httk.store.query.UnsupportedQueryError: If one list-field column object is used twice.
-    """
-    seen = set() if seen is None else seen
-    column = shape.list_field
-    if column is not None:
-        if id(column) in seen:
-            owner = cast("SqlVariable", column._variable)._cls.__name__
-            field = cast(FieldSpec, column._spec).field
-            raise UnsupportedQueryError(
-                f"{owner}.{field} was used in several conditions through one search object; each access to a list "
-                f"field is a separate set, so write v.{field} afresh in each condition (for example "
-                f"v.{field}.has_any(a) & ~v.{field}.has_any(b))"
-            )
-        seen.add(id(column))
-    for part in shape.parts:
-        _check_list_field_reuse(part, seen)
+def _reuse_error(key: Any) -> UnsupportedQueryError:
+    """The refusal for one collection-valued search object used in an uncorrelatable combination."""
+    if isinstance(key, SqlColumn):
+        access = f"v.{cast(FieldSpec, key._spec).field}"
+    else:
+        access = f"v.links.{key._name if isinstance(key, SqlStrongLinkSet) else key._spec.name}"
+    return UnsupportedQueryError(
+        f"{cast(SqlVariable, key._variable)._cls.__name__}.{access[2:]} is used through one search object in several conditions that "
+        f"SQL cannot evaluate on one element; combine its conditions with & and | only, or write {access} afresh "
+        f"in each condition, as in {access}.has_any(a) & ~{access}.has_any(b)"
+    )
 
 
 def _check_correlation(shape: _Shape) -> None:
-    """Refuse a traversal used by several conjuncts when one selects its element rows.
+    """Refuse a collection-valued object used by several conjuncts when one of them selects its elements.
 
-    Element conditions of one traversal combined with ``&``/``|`` hold on one
-    joined element row. Mixing such a selecting condition with another use of
-    the same traversal object (a negation, a for-all form, or an ``|`` with a
-    root condition) would let the WHERE selection narrow the rows the other
-    condition reads, which matches neither reading; MongoDB refuses the same
-    combinations. A fresh traversal per condition stays supported.
+    Conditions taken from one collection-valued object constrain the same
+    element: its per-element conditions combined with ``&``/``|`` are counted
+    together (see :meth:`SqlExpression.__and__`). Mixing such a selecting
+    condition with another use of the same object (a negation, a for-all form,
+    an ``|`` with a root condition, or a condition that cannot share its
+    element) would let the WHERE selection narrow the rows the other condition
+    reads, which matches neither reading; MongoDB refuses the same
+    combinations. A fresh access per condition stays supported.
 
     :param shape: The classified predicate tree.
     :return: None.
-    :raises httk.store.query.UnsupportedQueryError: If a traversal is used in such a combination.
+    :raises httk.store.query.UnsupportedQueryError: If an object is used in such a combination.
     """
     if shape.op != "&":
         for part in shape.parts:
             _check_correlation(part)
         return
-    groups: list[dict[SqlChildRecords, bool]] = []
-    merged: set[SqlChildRecords] = set()
+    groups: list[dict[Any, bool]] = []
+    merged: set[Any] = set()
     for conjunct in _conjuncts(shape):
         _check_correlation(conjunct)
-        traversal = _selected_traversal(conjunct)
-        if traversal is not None:
-            if traversal in merged:
+        merge = _merge_key(conjunct)
+        if merge is not None:
+            if merge in merged:
                 continue
-            merged.add(traversal)
-        groups.append(_traversal_uses(conjunct))
-    for traversal in {traversal for uses in groups for traversal in uses}:
-        selects = [uses[traversal] for uses in groups if traversal in uses]
+            merged.add(merge)
+        groups.append(_uses(conjunct))
+    for key in {key for uses in groups for key in uses}:
+        selects = [uses[key] for uses in groups if key in uses]
         if len(selects) > 1 and any(selects):
-            raise UnsupportedQueryError(
-                "a child-record traversal is constrained by several conditions that SQL cannot evaluate on one "
-                "element; combine its element conditions with & and | only, or use a fresh traversal for each"
-            )
+            raise _reuse_error(key)
 
 
 class SqlExpression:
@@ -368,14 +348,14 @@ class SqlExpression:
         parts: tuple[SqlExpression, ...] = ()
         if shape is not None:
             parts = (self._and_parts or (self,)) + (getattr(other, "_and_parts", ()) or (other,))
-            groups: dict[SqlChildRecords, list[sqlalchemy.ColumnElement[bool]]] = {}
+            groups: dict[Any, list[sqlalchemy.ColumnElement[bool]]] = {}
             rest: list[sqlalchemy.ColumnElement[bool]] = []
             for part in parts:
-                traversal = _selected_traversal(_shape_of(part))
-                if traversal is None:
+                merge = _merge_key(_shape_of(part))
+                if merge is None:
                     rest.append(part.having_clause)
                 else:
-                    groups.setdefault(traversal, []).append(part.where_clause)
+                    groups.setdefault(merge, []).append(part.where_clause)
             if any(len(wheres) > 1 for wheres in groups.values()):
                 having = sqlalchemy.and_(*rest, *(_exists(sqlalchemy.and_(*wheres)) for wheres in groups.values()))
         return _shaped(
@@ -394,12 +374,12 @@ class SqlExpression:
     def __or__(self, other: "SqlExpression") -> "SqlExpression":
         """Disjoin; two element-condition groups of one traversal count as one, as in :meth:`__and__`."""
         where = sqlalchemy.or_(self.where_clause, other.where_clause)
-        traversal = _selected_traversal(self._shape)
+        merge = _merge_key(self._shape)
         return _shaped(
             SqlExpression(
                 where,
                 _exists(where)
-                if traversal is not None and traversal is _selected_traversal(_shape_of(other))
+                if merge is not None and merge is _merge_key(_shape_of(other))
                 else sqlalchemy.or_(self.having_clause, other.having_clause),
                 post=self.post or other.post,
                 set_derived=self.set_derived or other.set_derived,
@@ -475,6 +455,10 @@ class SqlColumn:
 
     _traversal: "SqlChildRecords | None" = None
     """The child-record traversal this column reads, when it is one or one of its element fields."""
+    _collection: Any = None
+    """The collection-valued search object this column reads one element of, if any (see ``_Shape``)."""
+    _merge: Any = None
+    """The merge key of this column's selecting conditions (see ``_Shape``)."""
 
     def __init__(
         self,
@@ -502,13 +486,15 @@ class SqlColumn:
         self._presentation_converter = presentation_converter
 
     def _use(self, selects: bool) -> _Shape | None:
-        if self._traversal is None:
-            spec = self._spec
-            if self._from_child and not self._link_path and spec is not None and spec.role == "child":
-                return _Shape("use", list_field=self) if spec.target is None else None
+        if self._collection is None:
             return None
-        element = selects and self._traversal is not self
-        return _Shape("use", traversal=self._traversal, selects=selects, element=element)
+        return _Shape("use", key=self._collection, selects=selects, merge=self._merge if selects else None)
+
+    def _of(self, collection: Any, merge: Any = None) -> "SqlColumn":
+        """Mark this column as reading one element of ``collection``; return it."""
+        self._collection = collection
+        self._merge = collection if merge is None else merge
+        return self
 
     def _encode(self, value: Any) -> Any:
         if _is_child_record_field(self) and (value is None or isinstance(value, SqlColumn)):
@@ -803,6 +789,9 @@ class SqlChildRecords(SqlColumn):
         super().__init__(searcher, element, variable=variable, spec=spec, from_child=True)
         self._target_alias: sqlalchemy.FromClause | None = None
         self._traversal = self
+        # Element-sid conditions share an element with each other, not with field conditions (MongoDB reads
+        # them from different arrays), so they get a merge key of their own.
+        self._of(self, object())
 
     def __getattr__(self, name: str) -> SqlColumn:  # type: ignore[override]
         if name.startswith("_"):
@@ -849,7 +838,7 @@ class SqlChildRecords(SqlColumn):
                 from_child=True,
             )
         column._traversal = self
-        return column
+        return column._of(self)
 
 
 def _is_child_record_field(column: SqlColumn) -> bool:
@@ -1154,7 +1143,7 @@ class SqlStrongLinkSet:
             element: sqlalchemy.ColumnElement[Any] = self._owner_alias.c["id"]
         else:
             element = _typed_endpoint(edge.c["entry_type"], edge.c["entry_id"])
-        return SqlColumn(self._searcher, element, from_child=True, link_path=True)
+        return SqlColumn(self._searcher, element, from_child=True, link_path=True)._of(self)
 
     def _operand(self, value: Any) -> Any:
         """Resolve an identity operand: a target/owner search variable or a stored object."""
@@ -1243,7 +1232,8 @@ class SqlStrongLinkSet:
         if spec.role != "scalar":
             raise UnsupportedQueryError(f"strong-link edge field {name!r} is not a scalar column")
         edge = self._join()
-        return SqlColumn(self._searcher, edge.c[spec.columns[0].name], from_child=True, link_path=True, spec=spec)
+        column = SqlColumn(self._searcher, edge.c[spec.columns[0].name], from_child=True, link_path=True, spec=spec)
+        return column._of(self)
 
 
 def _typed_endpoint(entry_type: Any, entry_id: Any) -> sqlalchemy.ColumnElement[Any]:
@@ -1316,7 +1306,7 @@ class SqlLinkSet:
     @property
     def _target_column(self) -> "SqlColumn":
         alias = self._join()
-        return SqlColumn(self._searcher, alias.c[TARGET_LID_COLUMN], from_child=True, link_path=True)
+        return SqlColumn(self._searcher, alias.c[TARGET_LID_COLUMN], from_child=True, link_path=True)._of(self)
 
     def _append_as_of(self, conds: list[sqlalchemy.ColumnElement[bool]], alias: sqlalchemy.FromClause) -> None:
         """Add the candidate-row ``store_timestamp <= as_of`` cutoff to a join onclause, if set."""
@@ -1428,7 +1418,10 @@ class SqlLinkSet:
         # Rebuilt child-style (from_child, empty group_columns): a multi-row link
         # join must negate set-wise and must not push target columns into GROUP BY.
         if spec.role == "scalar":
-            return SqlColumn(searcher, target_alias.c[spec.columns[0].name], from_child=True, link_path=True, spec=spec)
+            column = SqlColumn(
+                searcher, target_alias.c[spec.columns[0].name], from_child=True, link_path=True, spec=spec
+            )
+            return column._of(self)
         assert spec.codec_name is not None
         codec = codec_named(spec.codec_name)
         return SqlColumn(
@@ -1439,7 +1432,7 @@ class SqlLinkSet:
             spec=spec,
             codec=codec,
             query_index=_query_index(codec),
-        )
+        )._of(self)
 
 
 class SqlVariable:
@@ -1578,7 +1571,7 @@ class SqlVariable:
             column_name = spec.child.element_columns[0].name
         if spec.target is not None:
             return SqlChildRecords(self._searcher, alias.c[column_name], variable=self, spec=spec)
-        return SqlColumn(
+        column = SqlColumn(
             self._searcher,
             alias.c[column_name],
             variable=self,
@@ -1587,6 +1580,7 @@ class SqlVariable:
             query_index=_query_index(codec) if codec is not None else 0,
             from_child=True,
         )
+        return column._of(column)
 
     def _reference_variable(self, spec: FieldSpec) -> "SqlVariable":
         sub = self._reference_variables.get(spec.field)
@@ -1987,9 +1981,7 @@ class SqlSearcher:
             raise ValueError("this searcher has no query variables; call variable() first")
         shapes = [shape for shape in map(_shape_of, self._where) if shape is not None]
         if shapes:
-            shape = shapes[0] if len(shapes) == 1 else _Shape("&", tuple(shapes))
-            _check_list_field_reuse(shape)
-            _check_correlation(shape)
+            _check_correlation(shapes[0] if len(shapes) == 1 else _Shape("&", tuple(shapes)))
         statement = sqlalchemy.select(*columns).select_from(*[self._joined(v) for v in self._variables])
         if self._where:
             statement = statement.where(*[expression.where_clause for expression in self._where])

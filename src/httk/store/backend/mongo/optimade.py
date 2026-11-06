@@ -7,7 +7,7 @@ filters through a nested Mongo searcher.
 """
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from httk.core import EntryTypeDefinition
 from httk.core.optimade import FilterAst
@@ -88,9 +88,10 @@ def _related_id_has_handlers(
                 return query_field.is_in(None, *sids)
         elif role == "child":
             if has_type == "HAS_ALL":
+                # A fresh field per id: conditions on one child object would have to hold on one element.
                 expression = query_field.has_any(sids[0])
                 for sid in sids[1:]:
-                    expression = expression & query_field.has_any(sid)
+                    expression = expression & cast(MongoField, getattr(search_variable, field)).has_any(sid)
                 return expression
             if has_type == "HAS_ANY":
                 return query_field.has_any(*sids)
@@ -142,9 +143,10 @@ def _weak_link_id_has_handlers(store: MongoStore, related_cls: type, name: str) 
         # already-resolved lineage ids, and register the lookup once per access.
         link_set = getattr(search_variable.links, name)
         if has_type == "HAS_ALL":
+            # A fresh link set per id: conditions on one link set object would have to hold on one target.
             expression = link_set._has_any_lids([lids[0]])
             for lid in lids[1:]:
-                expression = expression & link_set._has_any_lids([lid])
+                expression = expression & getattr(search_variable.links, name)._has_any_lids([lid])
             return expression
         if has_type == "HAS_ANY":
             return link_set._has_any_lids(lids)

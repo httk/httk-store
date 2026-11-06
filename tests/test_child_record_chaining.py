@@ -288,7 +288,7 @@ def test_link_field_comparisons_are_not_child_record_fields():
         assert linked_names(lambda v: v.links.projects.name == v.name) == ["P1"]
 
 
-REUSE = r"Parent\.labels was used in several conditions through one search object"
+REUSE = r"Parent\.labels is used through one search object in several conditions"
 
 
 def list_reuse_mixed(s: Any) -> Any:
@@ -301,17 +301,17 @@ def list_reuse_positive(s: Any) -> Any:
     return (labels == "x") & (labels == "y")
 
 
-def test_list_field_object_reuse_is_refused(store):
-    for build in (list_reuse_mixed, list_reuse_positive):
-        with pytest.raises(UnsupportedQueryError, match=REUSE):
-            names(store, build)
+def test_list_field_object_reuse_constrains_one_entry(store):
+    # One list-field object: its conditions hold on one entry (see test_collection_reuse); a mixed use is refused.
+    with pytest.raises(UnsupportedQueryError, match=REUSE):
+        names(store, list_reuse_mixed)
+    assert names(store, list_reuse_positive) == []  # no single label is both "x" and "y"
     search = store.searcher()
     s = search.variable(Parent)
     labels = s.labels
     search.add(labels.has_any("x"))
     search.add(labels.contains("y"))
-    with pytest.raises(UnsupportedQueryError, match=REUSE):
-        search.count()
+    assert search.count() == 0
 
 
 def test_list_field_single_condition_and_fresh_accesses(store):

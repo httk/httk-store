@@ -6,8 +6,8 @@ matches", not MongoDB's row-like ``$ne`` interpretation.
 """
 
 import re
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, replace
 from functools import reduce
 from itertools import islice
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -146,6 +146,25 @@ class ChildRecordNode:
     predicate: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class ElementNode:
+    """Merged per-element conditions on one collection-valued search object: one ``$elemMatch`` body.
+
+    Built by :func:`_correlate` from two or more positive conditions taken from
+    one object (a plain list field, a child-record traversal, a weak-link set),
+    so they hold on the same element; ``~`` is set-wise ("no element satisfies
+    them"). ``guarded`` marks an embedded child array, whose null and missing
+    states are rendered as the empty set; a ``$lookup`` array is always present.
+    """
+
+    key: Any
+    use: Any
+    label: str
+    path: str
+    predicate: dict[str, Any]
+    guarded: bool
+
+
 @dataclass(frozen=True, slots=True)
 class StringMatchNode:
     """Match literal text in a scalar string field."""
@@ -197,6 +216,7 @@ Node = (
     | ReferenceEqualityNode
     | LinkPredicateNode
     | ChildRecordNode
+    | ElementNode
     | StringMatchNode
     | AndNode
     | OrNode
@@ -402,6 +422,11 @@ def _render_child_predicate(field: "MongoField", predicate: dict[str, Any]) -> t
 def _render_child_comparison(
     node: ChildComparisonNode,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    return _render_child_predicate(node.field, _child_comparison_predicate(node))
+
+
+def _child_comparison_predicate(node: ChildComparisonNode) -> dict[str, Any]:
+    """Return the ``$elemMatch`` body of one child-element comparison."""
     key = _child_value_key(node.field)
     operators = {"lt": "$lt", "le": "$lte", "gt": "$gt", "ge": "$gte"}
     predicate: dict[str, Any]
@@ -413,12 +438,17 @@ def _render_child_comparison(
         # The explicit null guard makes a null element unknown rather than a
         # witness for a rich comparison.
         predicate = {key: {"$ne": None, operators[node.op]: node.value}}
-    return _render_child_predicate(node.field, predicate)
+    return predicate
 
 
 def _render_child_string(
     node: ChildStringNode,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    return _render_child_predicate(node.field, _child_string_predicate(node))
+
+
+def _child_string_predicate(node: ChildStringNode) -> dict[str, Any]:
+    """Return the ``$elemMatch`` body of one child-element literal string match."""
     key = _child_value_key(node.field)
     escaped = re.escape(node.text)
     pattern = {
@@ -426,7 +456,7 @@ def _render_child_string(
         "startswith": f"^{escaped}",
         "endswith": f"{escaped}$",
     }[node.mode]
-    return _render_child_predicate(node.field, {key: {"$regex": pattern}})
+    return {key: {"$regex": pattern}}
 
 
 def _reject_link_output(value: Any) -> None:
@@ -490,6 +520,11 @@ def render_node(node: Node) -> tuple[dict[str, Any], dict[str, Any]]:
     if isinstance(node, ChildRecordNode):
         # The lookup array is always present, exactly as for a weak link.
         return _render_link(LinkPredicateNode(node.path, node.predicate, False))
+    if isinstance(node, ElementNode):
+        truth, false = _render_link(LinkPredicateNode(node.path, node.predicate, False))
+        if node.guarded:
+            return _and(_type_in(node.path, ["array"]), truth), _and(_array_domain(node.path), false)
+        return truth, false
     if isinstance(node, StringMatchNode):
         return _render_string(node)
     if isinstance(node, AndNode):
@@ -517,105 +552,122 @@ def _conjuncts(node: Node) -> list[Node]:
     return [node]
 
 
-def _traversal_uses(node: Node, positive: bool = True) -> dict[str, bool]:
-    """Map each child-record traversal ``node`` reaches to whether it filters that traversal's elements.
+def _field_use(field: Any) -> tuple[Any, str] | None:
+    """The use key and label of the collection-valued object a field-based condition reads, if any."""
+    if not isinstance(field, MongoField) or not field._child_keys:
+        return None
+    label = f"{field._variable._cls.__name__}.{field._spec.field}"
+    if isinstance(field, MongoChildRecords) and field._lookup_path is not None:
+        # An element-sid condition on a chained traversal reads the same object as its field conditions.
+        return field._lookup_path, label
+    return id(field), label
 
-    A reference filters (selects witness elements, as a SQL WHERE condition on
+
+def _element(node: Node, labels: Mapping[str, str]) -> ElementNode | None:
+    """Describe ``node`` as a positive per-element condition on one collection-valued object, if it is one."""
+    if isinstance(node, ElementNode):
+        return node
+    if isinstance(node, ChildRecordNode) or (isinstance(node, LinkPredicateNode) and not node.universal):
+        return ElementNode(node.path, node.path, labels.get(node.path, node.path), node.path, node.predicate, False)
+    field = getattr(node, "field", None)
+    use = _field_use(field)
+    if use is None:
+        return None
+    field = cast(MongoField, field)
+    if isinstance(node, ChildSetNode) and node.operation == "has_any":
+        predicate = _child_element_condition(field, node.values, outside=False)
+    elif isinstance(node, ChildComparisonNode) and not isinstance(node.value, _FieldReference):
+        predicate = _child_comparison_predicate(node)
+    elif isinstance(node, ChildStringNode):
+        predicate = _child_string_predicate(node)
+    else:
+        return None
+    # A child-record traversal's element-sid array is not its element lookup: its own merge key.
+    key = ("sid", id(field)) if isinstance(field, MongoChildRecords) else id(field)
+    return ElementNode(key, use[0], use[1], field._path, predicate, True)
+
+
+def _uses(node: Node, labels: Mapping[str, str], positive: bool = True) -> dict[Any, tuple[bool, str]]:
+    """Map each collection-valued object ``node`` reads to whether it selects that object's elements.
+
+    A condition selects (picks witness elements, as a SQL WHERE condition on
     the joined element row does) unless it sits below ``NOT`` or is a for-all
-    ``has_only``; those read the whole element set instead.
+    form (``has_only``/``is_in``); those read the whole set instead.
     """
     if isinstance(node, (AndNode, OrNode)):
-        uses = _traversal_uses(node.left, positive)
-        for path, filters in _traversal_uses(node.right, positive).items():
-            uses[path] = uses.get(path, False) or filters
+        uses = _uses(node.left, labels, positive)
+        for key, (selects, label) in _uses(node.right, labels, positive).items():
+            uses[key] = (uses.get(key, (False, label))[0] or selects, label)
         return uses
     if isinstance(node, NotNode):
-        return _traversal_uses(node.child, False)
-    if isinstance(node, ChildRecordNode):
-        return {node.path: positive}
-    if (
-        isinstance(node, (ChildSetNode, ChildComparisonNode, ChildStringNode))
-        and isinstance(node.field, MongoChildRecords)
-        and node.field._lookup_path is not None
-    ):
-        # An element-sid condition on a traversal object that is also chained.
-        return {node.field._lookup_path: positive and getattr(node, "operation", None) != "has_only"}
-    return {}
+        return _uses(node.child, labels, False)
+    if isinstance(node, ElementNode):
+        return {node.use: (positive, node.label)}
+    if isinstance(node, (ChildRecordNode, LinkPredicateNode)):
+        universal = isinstance(node, LinkPredicateNode) and node.universal
+        return {node.path: (positive and not universal, labels.get(node.path, node.path))}
+    use = _field_use(getattr(node, "field", None))
+    if use is None:
+        return {}
+    return {use[0]: (positive and getattr(node, "operation", None) != "has_only", use[1])}
 
 
-def _check_list_field_reuse(node: Node, seen: set[int] | None = None) -> None:
-    """Refuse a plain list-field object that appears in more than one condition, as the SQL backend does.
-
-    Each access to a list field is a separate set; a reused object would
-    silently read as independent here but as one joined row on SQL.
-
-    :param node: The predicate tree.
-    :param seen: The ids of the list-field objects already met in this query.
-    :return: None.
-    :raises httk.store.query.UnsupportedQueryError: If one list-field object is used twice.
-    """
-    seen = set() if seen is None else seen
-    if isinstance(node, (AndNode, OrNode)):
-        _check_list_field_reuse(node.left, seen)
-        _check_list_field_reuse(node.right, seen)
-        return
-    if isinstance(node, NotNode):
-        _check_list_field_reuse(node.child, seen)
-        return
-    field = getattr(node, "field", None)
-    if not isinstance(field, MongoField) or not field._child_keys or isinstance(field, MongoChildRecords):
-        return
-    if id(field) in seen:
-        name = field._spec.field
-        raise UnsupportedQueryError(
-            f"{field._variable._cls.__name__}.{name} was used in several conditions through one search object; "
-            f"each access to a list field is a separate set, so write v.{name} afresh in each condition (for "
-            f"example v.{name}.has_any(a) & ~v.{name}.has_any(b))"
-        )
-    seen.add(id(field))
+def _reuse_error(label: str) -> UnsupportedQueryError:
+    access = "v." + label.split(".", 1)[1]
+    return UnsupportedQueryError(
+        f"{label} is used through one search object in several conditions that MongoDB cannot evaluate on one "
+        f"element; combine its conditions with & and | only, or write {access} afresh in each condition, as in "
+        f"{access}.has_any(a) & ~{access}.has_any(b)"
+    )
 
 
-def _correlate(node: Node) -> Node:
-    """Merge the conditions on one child-record traversal into one ``$elemMatch``, as SQL shares one joined row.
+def _correlate(node: Node, labels: Mapping[str, str]) -> Node:
+    """Merge the conditions on one collection-valued object into one ``$elemMatch``, as SQL shares one joined row.
 
-    Within an ``AND`` chain (and within an ``OR``), the :class:`ChildRecordNode`
-    conditions of one traversal merge into a single node, so they must hold on
+    Within an ``AND`` chain (and within an ``OR``), the positive per-element
+    conditions of one object (a plain list field, a child-record traversal, a
+    weak-link set) merge into one :class:`ElementNode`, so they must hold on
     one element. Any other mix that SQL evaluates on one joined element row,
-    i.e. a traversal used by several conjuncts of which one selects elements
-    while not being a plain element condition, has no faithful per-array
+    i.e. an object used by several conjuncts of which one selects elements
+    while not being merged with the others, has no faithful per-array
     rendering and is refused.
 
     :param node: The predicate tree to rewrite.
+    :param labels: ``Class.field`` labels of the ``$lookup`` array paths, for error messages.
     :return: The rewritten tree.
-    :raises httk.store.query.UnsupportedQueryError: If a traversal is used in a combination that cannot be correlated.
+    :raises httk.store.query.UnsupportedQueryError: If an object is used in a combination that cannot be correlated.
     """
     if isinstance(node, OrNode):
-        left, right = _correlate(node.left), _correlate(node.right)
-        if isinstance(left, ChildRecordNode) and isinstance(right, ChildRecordNode) and left.path == right.path:
-            return ChildRecordNode(left.path, {"$or": [left.predicate, right.predicate]})
+        left, right = _correlate(node.left, labels), _correlate(node.right, labels)
+        left_element, right_element = _element(left, labels), _element(right, labels)
+        if left_element is not None and right_element is not None and left_element.key == right_element.key:
+            predicate = {"$or": [left_element.predicate, right_element.predicate]}
+            return replace(left_element, predicate=predicate)
         return OrNode(left, right)
     if isinstance(node, NotNode):
-        return NotNode(_correlate(node.child))
+        return NotNode(_correlate(node.child, labels))
     if not isinstance(node, AndNode):
         return node
     conjuncts: list[Node] = []
-    bodies: dict[str, list[dict[str, Any]]] = {}
-    for conjunct in map(_correlate, _conjuncts(node)):
-        if isinstance(conjunct, ChildRecordNode):
-            bodies.setdefault(conjunct.path, []).append(conjunct.predicate)
-        else:
+    groups: dict[Any, tuple[int, list[ElementNode]]] = {}
+    for conjunct in (_correlate(item, labels) for item in _conjuncts(node)):
+        element = _element(conjunct, labels)
+        if element is None:
             conjuncts.append(conjunct)
-    conjuncts.extend(
-        ChildRecordNode(path, body[0] if len(body) == 1 else {"$and": body}) for path, body in bodies.items()
-    )
-    uses = [_traversal_uses(conjunct) for conjunct in conjuncts]
-    for path in {path for use in uses for path in use}:
-        filters = [use[path] for use in uses if path in use]
-        if len(filters) > 1 and any(filters):
-            raise UnsupportedQueryError(
-                "a child-record traversal is constrained by several conditions that MongoDB cannot evaluate on one "
-                "element; combine its element conditions with & and | only, or use a fresh traversal for each"
-            )
+        elif element.key in groups:
+            groups[element.key][1].append(element)
+        else:
+            groups[element.key] = (len(conjuncts), [element])
+            conjuncts.append(conjunct)
+    for index, members in groups.values():
+        if len(members) > 1:
+            predicate = {"$and": [member.predicate for member in members]}
+            conjuncts[index] = replace(members[0], predicate=predicate)
+    uses = [_uses(conjunct, labels) for conjunct in conjuncts]
+    for key in {key for use in uses for key in use}:
+        selects = [use[key] for use in uses if key in use]
+        if len(selects) > 1 and any(flag for flag, _label in selects):
+            raise _reuse_error(selects[0][1])
     return reduce(AndNode, conjuncts)
 
 
@@ -836,6 +888,7 @@ class MongoChildRecords(MongoField):
             # No as_of filter: element documents are stored with or before their parent document.
             searcher = self._variable._searcher
             self._lookup_path = f"_httk_child_{len(searcher._child_lookups)}"
+            searcher._collection_labels[self._lookup_path] = f"{self._variable._cls.__name__}.{self._spec.field}"
             searcher._child_lookups.append(
                 {
                     "$lookup": {
@@ -993,6 +1046,7 @@ class MongoLinkSet:
         searcher = variable._searcher
         self._searcher = searcher
         self._path = f"_httk_link_{searcher._next_link_index()}"
+        searcher._collection_labels[self._path] = f"{variable._cls.__name__}.links.{spec.name}"
         self._registered = False
 
     def _register(self) -> None:
@@ -1274,6 +1328,43 @@ class MongoLinkField:
         """Match a live-linked target whose field ends with ``suffix``."""
         return self._string_match("endswith", suffix)
 
+    def _members(self, values: tuple[Any, ...]) -> list[Any]:
+        if any(value is None for value in values):
+            raise ValueError("None is not a valid member of a child-field set operation")
+        return [self._encode(value) for value in values]
+
+    def has(self, value: Any) -> MongoExpression:
+        """Match a source with an element (live-linked target or child record) whose field equals ``value``.
+
+        :param value: The element value to find.
+        :return: The matching expression.
+        """
+        return self.has_any(value)
+
+    def has_any(self, *values: Any) -> MongoExpression:
+        """Match a source with an element whose field is among ``values``.
+
+        :param \\*values: The values of which at least one element must match.
+        :return: The matching expression.
+        """
+        return self._node({self._value_key: {"$in": self._members(values)}})
+
+    def has_only(self, *values: Any) -> MongoExpression:
+        """Match a source none of whose elements has a known field value outside ``values``.
+
+        :param \\*values: The complete set of allowed element values.
+        :return: The condition; a source without elements matches.
+        """
+        return ~self._node({self._value_key: {"$nin": [*self._members(values), None]}})
+
+    def is_in(self, *values: Any) -> MongoExpression:
+        """Universally constrain the element values, exactly as :meth:`has_only`.
+
+        :param \\*values: The complete set of allowed element values.
+        :return: The condition; a source without elements matches.
+        """
+        return self.has_only(*values)
+
 
 class MongoChildRecordField(MongoLinkField):
     """A scalar or encoded element field of a child-record traversal (``v.sites.symbol``), compared existentially.
@@ -1301,43 +1392,6 @@ class MongoChildRecordField(MongoLinkField):
                 f"a child-record element field ({self._spec.field}) compares only with literal values on MongoDB"
             )
         return super()._comparison(op, value)
-
-    def _members(self, values: tuple[Any, ...]) -> list[Any]:
-        if any(value is None for value in values):
-            raise ValueError("None is not a valid member of a child-field set operation")
-        return [self._encode(value) for value in values]
-
-    def has(self, value: Any) -> MongoExpression:
-        """Match a record with an element whose field equals ``value``.
-
-        :param value: The element value to find.
-        :return: The matching expression.
-        """
-        return self.has_any(value)
-
-    def has_any(self, *values: Any) -> MongoExpression:
-        """Match a record with an element whose field is among ``values``.
-
-        :param \\*values: The values of which at least one element must match.
-        :return: The matching expression.
-        """
-        return self._node({self._value_key: {"$in": self._members(values)}})
-
-    def has_only(self, *values: Any) -> MongoExpression:
-        """Match a record none of whose elements has a known field value outside ``values``.
-
-        :param \\*values: The complete set of allowed element values.
-        :return: The condition; a record without elements matches.
-        """
-        return ~self._node({self._value_key: {"$nin": [*self._members(values), None]}})
-
-    def is_in(self, *values: Any) -> MongoExpression:
-        """Universally constrain the element values, exactly as :meth:`has_only`.
-
-        :param \\*values: The complete set of allowed element values.
-        :return: The condition; a record without elements matches.
-        """
-        return self.has_only(*values)
 
 
 class MongoVariable:
@@ -1495,6 +1549,8 @@ class MongoSearcher:
         # Child-record element ``$lookup`` stages (one per chained traversal object), emitted after the
         # reference lookups by _lookup_stages() and unset after the truth ``$match``.
         self._child_lookups: list[dict[str, Any]] = []
+        # ``Class.field`` labels of the child-record and weak-link ``$lookup`` array paths, for error messages.
+        self._collection_labels: dict[str, str] = {}
         # Phase 5 attaches its client-authoritative predicate evaluator here.
         # MongoResultSet owns the single candidate iterator that applies it.
         self._row_verifier: Callable[[dict[str, Any]], bool] | None = None
@@ -1741,8 +1797,7 @@ class MongoSearcher:
             return {}
         # One tree, so conditions on one child-record traversal correlate across add() calls too.
         tree = reduce(AndNode, (expression.node for expression in self._expressions))
-        _check_list_field_reuse(tree)
-        return render_node(_correlate(tree))[0]
+        return render_node(_correlate(tree, self._collection_labels))[0]
 
     def _unset_child_lookups(self) -> list[dict[str, Any]]:
         """Return the stage dropping the child-record element arrays after the truth ``$match``, if any."""

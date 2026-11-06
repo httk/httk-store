@@ -1,0 +1,342 @@
+httk.store.id_ledger
+====================
+
+.. py:module:: httk.store.id_ledger
+
+.. autoapi-nested-parse::
+
+   A signed, append-only id ledger mapping stable source keys to entry ids.
+
+   The ledger is an *allocator*: it maps a stable, opaque **source key** to a
+   recommended entry id (``httk.core.entry_ids``) and hands the same id back for
+   that key forever, so a database rebuilt from the same sources keeps its ids and
+   content changes become revisions rather than fresh entries.
+
+   The on-disk container is a single stdlib-``sqlite3`` database file (not one of
+   httk-store's own store engines). Its ``meta`` table records the container format
+   and the id series; its ``records`` table holds the ordered ledger records, each a
+   ``{key, family, id}`` assignment or a ``{key, alias_of}`` alias, either optionally
+   carrying ``supersedes`` (see below), keyed by a 1-based append sequence; and its
+   ``segments`` table records, one row per append, the contiguous range of records
+   that append added together with the canonical seal-body signature over exactly
+   that segment (``httk.core.project.sealing``: ``kind="httk-idledger-segment"``,
+   its ``subject`` carrying the format version, this ledger's uuid, the id series,
+   the full per-family id bases at that point, and the segment's number and record
+   range). The uuid binds every segment to this ledger, so a segment cannot be
+   grafted from another ledger that happens to share a series and bases. Each close
+   that appends signs only the segment it added, so old segments are never rewritten.
+
+   Signatures attest to the bytes, never to their meaning, so :meth:`IdLedger.open`
+   validates the container's structure and every entry invariant itself. A segment
+   signature is an *audit record*, not a build gate: it is logged (naming the
+   signers) and inspected manually alongside git history, never demanded. The
+   integrity self-check is always on — an INVALID signature (content that no longer
+   matches its own segment: tamper, corruption, a hand-edit) always raises. Trust
+   enforcement is opt-in: with ``trusted_keys`` every segment's signer must be one
+   of them; without them a valid signature is accepted and the signers merely noted.
+   The segments partition the records exactly, so a middle-record deletion,
+   renumbering, or any record/segment range mismatch is caught in-file by the
+   partition check even without verification. What no in-file check can attest is
+   the *tip*: removing the newest segment(s) together with exactly the records they
+   cover leaves a state indistinguishable from an older valid ledger (as with any
+   whole-file rollback), so that class of loss is witnessed by git history alone.
+   The recovery for a corrupted ledger is to restore it from git; the errors say so.
+
+   No record is ever edited or removed. An entry for a source that later disappears
+   simply persists and keeps its number. A key is re-bound only by *supersession*:
+   appending a fresh record that carries ``supersedes=<the id the key resolved to>``.
+   Supersession exists to track source-data **regrouping** — when the store's
+   content deduplication splits one shared-content group into several, or merges
+   several into one — and is driven deliberately by build scripts. It is never a
+   recovery path for a lost or corrupted ledger; that is restore-from-git. The
+   newest record for a key wins; a superseded id stays reserved (counters only
+   grow) and stays resolvable through whatever key still points at it, becoming a
+   harmless orphan when none does.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.id_ledger.IdLedgerError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.id_ledger.LedgerBinding
+   httk.store.id_ledger.IdLedger
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.id_ledger.check_ledger_key
+
+
+Module Contents
+---------------
+
+.. py:exception:: IdLedgerError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   An id ledger cannot be opened, verified, locked, or extended.
+
+   This covers both the *cannot proceed* cases — a held lock, a signature or
+   invariant that does not verify — and the API-misuse cases — assigning an
+   aliased key without superseding, or aliasing a key to an id absent from the
+   ledger.
+
+
+.. py:class:: LedgerBinding
+
+   Bases: :py:obj:`NamedTuple`
+
+
+   One key's current live binding, as returned by :meth:`IdLedger.bindings`.
+
+   A plain, immutable tuple: enough to group by family and to tell an intrinsic
+   assignment from a binding alias, without exposing the underlying record shape.
+
+   :param id: The id this key currently resolves to (an alias's target, exactly
+       as :meth:`IdLedger.lookup` would return).
+   :param family: The id family the resolved id belongs to.
+   :param is_alias: Whether this key is an alias of another key's id, as opposed
+       to the assignment that established the id.
+
+
+   .. py:attribute:: id
+      :type:  str
+
+
+   .. py:attribute:: family
+      :type:  str
+
+
+   .. py:attribute:: is_alias
+      :type:  bool
+
+
+.. py:function:: check_ledger_key(key)
+
+   Check a ledger source key, warning for deviations but never rejecting.
+
+   Ledger keys are opaque to the allocator: the standardized grammar is a
+   convention enforced only by the workflow helpers, so this mirrors
+   ``httk.core.entry_ids.check_entry_id`` in stance but, unlike it, never
+   raises — it only warns on leading/trailing whitespace or non-URL-safe
+   characters.
+
+   :param key: The source key to check.
+   :return: The unchanged key.
+
+
+.. py:class:: IdLedger(path, *, bases, series, ledger_uuid, keys, records, live, persisted, segments, read_only = False)
+
+   A signed, append-only allocator of stable entry ids for source keys.
+
+   Open one with :meth:`create` or :meth:`open` and use it as a context
+   manager; the enclosing ``with`` holds an exclusive lock and, on exit, appends
+   and signs one new segment only when something was assigned or aliased.
+   Callers use those constructors rather than the initializer, which binds an
+   already-validated state to its file and lock.
+
+   :param path: The ledger sqlite database path.
+   :param bases: The per-family id bases, keyed by family name.
+   :param series: The id series every minted id carries.
+   :param ledger_uuid: This ledger's identity, stamped into every segment subject.
+   :param keys: The signing keys used to sign the next segment on close, each a
+       ``(role, seed)`` pair.
+   :param records: The ordered ledger records, each a ``{key, ...}`` mapping.
+   :param live: The newest record per key, the key's live binding.
+   :param persisted: How many records are already stored on disk.
+   :param segments: How many segments are already stored on disk.
+   :param read_only: Whether this ledger was opened read-only: mutators raise
+       and :meth:`close` is a no-op that never writes and takes no lock.
+
+
+   .. py:method:: create(path, *, bases, series, keys)
+      :classmethod:
+
+
+      Create and sign a fresh, empty ledger, then hold it open and locked.
+
+      The fresh database carries segment 1: an empty segment (no records) whose
+      signed subject stamps the initial bases, so the ledger is signed from
+      birth.
+
+      :param path: Where to write the ledger database; it must not exist.
+      :param bases: The explicit per-family id bases, e.g.
+          ``{"structures": "anyt.am.structure"}``.
+      :param series: The id series token every minted id carries.
+      :param keys: The signing keys, each a ``(role, seed)`` pair.
+      :return: The open, locked ledger.
+      :raises IdLedgerError: If the ledger already exists or the lock is held.
+      :raises ValueError: If a base or the series is malformed.
+
+
+
+   .. py:method:: open(path, *, keys = (), trusted_keys = (), verify = True, bases = None, series = None, read_only = False)
+      :classmethod:
+
+
+      Open an existing ledger, verifying its signatures and invariants.
+
+      With *verify*, every segment's signature is checked: an INVALID signature
+      (content that no longer matches its own segment) always raises, while a
+      valid one is treated as an audit record — *trusted_keys* demand a trusted
+      signer on every segment, and without them the valid signers are logged.
+      The structure and every entry invariant are validated regardless (segment
+      ranges must partition the records exactly, bases must grow monotonically,
+      ids must conform, supersession must be sound), because a signature
+      attests only to the bytes, not to their meaning. None of this is weakened
+      by *read_only*.
+
+      When *series* is given it must equal the stored series. When *bases* is
+      given it is reconciled as a SUPERSET of the stored map: every stored
+      family must appear in it with the same base (removing, renaming, or
+      re-basing a stored family is an error), while families present only in the
+      expectation are ADDED and stamped into the next segment's subject at close
+      (so a build that assigns nothing but grows the scheme still writes on
+      close). The merged map is revalidated for id shape and base uniqueness.
+      With *read_only*, stamping that growth is impossible (there is no write),
+      so an expectation that would add a family is refused outright rather than
+      silently appearing to have taken effect; a stored map that is a subset of
+      the expectation with no addition needed (i.e. an exact match) still opens.
+
+      With *read_only*, no lock is taken or required — this succeeds even while
+      another process holds the write lock, so the caller may observe a snapshot
+      that a concurrent writer is about to extend — and the returned ledger
+      permits no mutation: :meth:`assign`, :meth:`alias`, and any other mutator
+      raise, and :meth:`close` is a no-op that neither writes nor requires a
+      signing key.
+
+      :param path: The ledger database to open.
+      :param keys: The signing keys used to sign the next segment on close.
+      :param trusted_keys: Trust anchors as ``ed25519:`` keys or ``sha256:``
+          fingerprints; when given, every segment's signer must be one of them.
+      :param verify: Whether to verify the segment signatures.
+      :param bases: The per-family bases the caller expects, asserted when given.
+      :param series: The id series the caller expects, asserted when given.
+      :param read_only: Whether to open without a lock and without permitting
+          mutation, for a concurrent-safe read path.
+      :return: The open ledger, locked unless *read_only*.
+      :raises IdLedgerError: If the ledger is missing, the lock is held (and
+          *read_only* is false), verification fails, an invariant is violated,
+          the expected bases/series disagree, or *read_only* is true and the
+          expected bases would require growing the stored map.
+
+
+
+   .. py:method:: assign(key, family, *, supersede = False)
+
+      Return the id for a source key, minting one on first sight.
+
+      The call is idempotent: a key already assigned in this family returns
+      its existing id. A key assigned in another family is an error, and an
+      aliased key is an error unless *supersede* re-binds it.
+
+      With ``supersede=True`` on a currently-**aliased** key, a fresh
+      assignment is appended carrying ``supersedes=<the alias target>`` and a
+      newly minted id — the split half of source regrouping. ``supersede=True``
+      on an already-assigned key is an error: an assignment is never re-bound
+      to another assignment.
+
+      :param key: The stable source key.
+      :param family: The id family the key belongs to.
+      :param supersede: Whether to re-bind an aliased key to a fresh assignment.
+      :return: The assigned entry id.
+      :raises IdLedgerError: If the ledger is read-only, the key is aliased and
+          *supersede* is false, its family disagrees, the family has no base, or
+          *supersede* is passed outside its one transition (a new key, or an
+          already-assigned key).
+
+
+
+   .. py:method:: alias(key, existing_id, *, supersede = False)
+
+      Record a source key pointing at an id already in the ledger.
+
+      Aliases exist because the store deduplicates content-identical rows
+      family-wide: several keys can reach one row, which must keep one id. The
+      call is idempotent for an identical ``(key, existing_id)`` pair; a
+      conflicting re-alias, or targeting an id absent from the ledger, is an
+      error, and so is aliasing an already-assigned key unless *supersede*
+      re-binds it.
+
+      With ``supersede=True`` on a currently-**assigned** key, an alias record
+      is appended carrying ``supersedes=<its old id>`` — the merge half of
+      source regrouping. The old id stays reserved and stays resolvable while
+      any other key points at it, otherwise becoming a harmless orphan.
+
+      :param key: The stable source key to record.
+      :param existing_id: An id already assigned in the ledger.
+      :param supersede: Whether to re-bind an assigned key to an alias.
+      :raises IdLedgerError: If the ledger is read-only, on a conflict, an
+          unknown target, an assigned key when *supersede* is false, or
+          *supersede* passed for a new key.
+
+
+
+   .. py:method:: lookup(key)
+
+      Return the id a source key resolves to, following an alias.
+
+      Resolution is to the key's newest record, so a superseded binding is
+      never returned for the key that moved on from it.
+
+      :param key: The source key to resolve.
+      :return: The assigned id, or ``None`` when the key is unknown.
+
+
+
+   .. py:method:: bindings()
+
+      Return every key's current live binding, aliases resolved to their target id.
+
+      Only live bindings appear here: a superseded record is as invisible to
+      this as it is to :meth:`lookup` for the key that moved on from it. Each
+      binding names the family its id belongs to (an alias's family is that of
+      the id it resolves to, since a bare alias record carries no family of its
+      own) and whether the key is an alias or the assignment that established
+      the id — enough for a caller to group by family and separate intrinsic
+      identity from binding, without exposing the record shape itself.
+
+      The result is a snapshot, independent of the ledger's internals: it is a
+      fresh mapping of immutable values, so neither mutating it nor a later
+      :meth:`assign`/:meth:`alias` on this ledger can affect it, in either
+      direction. Works the same whether the ledger was opened for write or
+      *read_only*.
+
+      :return: The live bindings, keyed by source key, in ascending key order
+          (a fixed, deterministic order independent of append order).
+
+
+
+   .. py:method:: close()
+
+      Append and sign a new segment when the ledger changed, then unlock.
+
+      A ledger untouched since it was opened is left byte-identical: no
+      connection is opened and nothing is written, so an idempotent rebuild
+      produces no git churn. A dirty close with no signing key available raises
+      from the sealing layer before anything is written; a failed close leaves
+      the ledger unclosed and its lock held, so a retried close reattempts the
+      write instead of silently skipping it (the manual remedy for an abandoned
+      session is to delete the lock).
+
+      A read-only ledger never took the lock, so this is purely a no-op: it
+      neither writes nor touches any lock file (removing one here could delete
+      a concurrent writer's *own* lock, since a read-only open may coexist with
+      one).
+
+
+

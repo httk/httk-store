@@ -1,0 +1,89 @@
+httk.store.backend.mongo.database
+=================================
+
+.. py:module:: httk.store.backend.mongo.database
+
+.. autoapi-nested-parse::
+
+   MongoDB client lifecycle and transaction-mode probing.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.database.TransactionsUnavailableError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.database.MongoDatabase
+
+
+Module Contents
+---------------
+
+.. py:exception:: TransactionsUnavailableError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   An explicit transaction was requested without replica-set support.
+
+
+.. py:class:: MongoDatabase(client, database, *, transactions = 'auto')
+
+   A named MongoDB database reached through a wrapped PyMongo client.
+
+   The wrapper performs one ``hello`` probe when it is constructed.  A
+   replica-set name in that reply enables transaction mode unless the caller
+   explicitly pins degraded mode.
+
+   :param client: The PyMongo client that owns the connection pool.
+   :param database: The database name.
+   :param transactions: ``"auto"``, ``"require"``, or ``"never"``.
+   :raises ValueError: If ``transactions`` is invalid or required transactions
+       are unavailable.
+
+
+   .. py:property:: client
+      :type: pymongo.MongoClient
+
+
+      Return the wrapped PyMongo client.
+
+      :return: The client that owns this database connection pool.
+
+
+   .. py:property:: database
+      :type: Any
+
+
+      Return the selected PyMongo database handle.
+
+      :return: The PyMongo database handle.
+
+
+   .. py:property:: supports_transactions
+      :type: bool
+
+
+      Whether this wrapper is configured to use MongoDB transactions.
+
+      :return: ``True`` when the mode probe found a replica set and the mode
+          was not pinned to ``"never"``.
+
+
+   .. py:method:: dispose()
+
+      Close the client and its connection pool.
+
+      :return: None.
+
+
+

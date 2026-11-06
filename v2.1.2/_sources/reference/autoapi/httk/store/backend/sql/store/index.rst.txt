@@ -1,0 +1,626 @@
+httk.store.backend.sql.store
+============================
+
+.. py:module:: httk.store.backend.sql.store
+
+.. autoapi-nested-parse::
+
+   The SQL store: save and fetch storable frozen dataclasses through a :class:`~httk.store.backend.sql.engine.Backend`.
+
+   :class:`SqlStore` is the object-level storage API on top of the schema IR
+   (:mod:`httk.store.backend.schema`), the value codecs (:mod:`httk.store.backend.codecs`),
+   the content identity (:mod:`httk.core.storage`), and the SQLAlchemy table
+   mapping (:mod:`httk.store.backend.sql.mapping`):
+
+   - :meth:`SqlStore.save` writes an instance (recursing into referenced and
+     child-element storables) and returns its integer ``sid``, deduplicating per
+     the class's :attr:`~httk.core.storage.StorageInfo.dedup` policy;
+   - :meth:`SqlStore.fetch` reconstructs the instance stored under a ``sid`` —
+     exactly, via the ``*_exact`` companion columns for rationals — as a lazy row
+     by default (fields decode on first access) or, with ``eager=True``, fully
+     materialized; repeated live default fetches of one sid return the same
+     object, with a materialized instance taking precedence over a proxy;
+   - :meth:`SqlStore.transaction` scopes several operations into one database
+     transaction (commit on exit, roll back on exception); outside of it every
+     operation autocommits;
+   - :meth:`SqlStore.referring` finds join-objects (tags, references) pointing at
+     a stored instance, replacing v1's implicit codependent-data machinery;
+   - :meth:`SqlStore.searcher` starts a query through the search DSL
+     (:mod:`httk.store.backend.sql.searcher`), implementing the :mod:`httk.store.query`
+     protocols.
+
+   Deduplication semantics (ported from v1): under ``"content_id"`` an equal
+   instance maps to the existing row (children are not re-inserted); under
+   ``"by_value"`` a row matching **all parent-table columns** is reused — child
+   table contents are *not* part of the match, mirroring v1 which matched key
+   columns only; under ``"none"`` every save inserts a new row.
+
+   Identity caches are best-effort; content-addressed :meth:`SqlStore.sid_of`
+   lookups fall back to the database.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.store.EntryDispatchIntegrityError
+   httk.store.backend.sql.store.EntryIdConflictError
+   httk.store.backend.sql.store.EntryMetadataConflictError
+   httk.store.backend.sql.store.EntryReplacementError
+   httk.store.backend.sql.store.StoreClockRegressionError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.store.SqlStore
+
+
+Module Contents
+---------------
+
+.. py:exception:: EntryDispatchIntegrityError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   A persisted entry dispatch row does not name exactly its expected backing.
+
+
+.. py:exception:: EntryIdConflictError(table_name, entry_id, existing_logical_id, requested_logical_id)
+
+   Bases: :py:obj:`ValueError`
+
+
+   An entry id is already owned by a different lineage or alternative group.
+
+   :param table_name: The table containing the conflicting identifier.
+   :param entry_id: The conflicting entry identifier.
+   :param existing_logical_id: The lineage or group already owning the identifier.
+   :param requested_logical_id: The lineage or group requesting it, when known.
+
+
+   .. py:attribute:: table_name
+
+
+   .. py:attribute:: entry_id
+
+
+   .. py:attribute:: existing_logical_id
+
+
+   .. py:attribute:: requested_logical_id
+
+
+.. py:exception:: EntryMetadataConflictError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Stored identity-excluded metadata differs from a repeated save.
+
+
+.. py:exception:: EntryReplacementError(table_name, predecessor_logical_id, conflicting_logical_id)
+
+   Bases: :py:obj:`ValueError`
+
+
+   A replacement deduplicated onto a row from a different lineage.
+
+   :param table_name: The table (or collection) whose replacement failed.
+   :param predecessor_logical_id: The logical_id of the intended predecessor.
+   :param conflicting_logical_id: The logical_id of the row actually hit.
+
+
+   .. py:attribute:: table_name
+
+
+   .. py:attribute:: predecessor_logical_id
+
+
+   .. py:attribute:: conflicting_logical_id
+
+
+.. py:exception:: StoreClockRegressionError(mark_ns, clock_ns)
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   A writable store clock is behind its process-local timestamp mark.
+
+
+.. py:class:: SqlStore(database, *, entry_records = None, entry_families = None, entry_ids = None, store_timestamps = True, store_timestamp_resolution = 1000, allow_clock_regression = False, clock_regression_grace = True, upgrade = False)
+
+   Object storage for storable frozen dataclasses in a relational :class:`~httk.store.backend.sql.engine.Backend`.
+
+   A store starts with an explicit, versioned entry declaration. Ordinary
+   unconfigured frozen-dataclass tables remain on-demand, but only after the
+   layout marker has been initialized on a physically empty database. Schemas
+   edited out-of-band fail at use time with the database's own errors.
+
+   The first open of a database requires ``entry_records`` or
+   ``entry_families``. The store stamps
+   the canonical JSON declaration and protocol version, then trusts that
+   declaration on reopen: a supplied declaration must be byte-identical, and
+   mismatches raise :class:`~httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError`.
+   Reopening does not diff or migrate record schemas. Read paths never issue
+   DDL; missing ordinary tables behave as empty results or missing rows, while
+   table creation happens only through writes or :meth:`ensure_tables`.
+
+   :param database: The database used for storage.
+   :param entry_records: The required entry-family declaration when first opening a database.
+   :param entry_families: Application-owned declarations which bypass global registration.
+   :param entry_ids: Optional scheme used to mint ids for defined entry families.
+   :param store_timestamps: Whether parent rows carry store-managed timestamps.
+   :param store_timestamp_resolution: Nanoseconds represented by one stored unit.
+   :param allow_clock_regression: Whether to disable the process-local clock guard.
+   :param clock_regression_grace: Whether to wait briefly for sub-millisecond regressions.
+   :param upgrade: Whether to apply a purely additive schema-fingerprint change
+       (new nullable columns, new lazily created tables) on reopen instead of
+       raising; non-additive or non-schema differences still raise.
+   :raises TypeError: If the first open omits both declaration forms.
+   :raises httk.store.backend.sql.layout.StorageLayoutUpgradeRequiredError: If the trusted declaration or protocol does not match.
+
+
+   .. py:attribute:: bulk_ingest_finalize_default
+      :type:  Literal['auto', 'parity', 'deferred']
+      :value: 'auto'
+
+
+
+   .. py:property:: layout
+      :type: httk.store.backend.sql.layout.StorageLayout
+
+
+      Return the immutable persisted entry declaration and resolved classes.
+
+      :return: The persisted storage layout.
+
+
+   .. py:property:: backend_facts
+      :type: httk.store.backend.sql.layout.BackendFacts
+
+
+      Return the dialect capabilities resolved when this store was opened.
+
+
+   .. py:property:: write_profile
+      :type: Literal['transactional', 'degraded', 'bulk-fenced']
+
+
+      Return the persisted permanentization write profile.
+
+
+   .. py:property:: store_timestamps
+      :type: bool
+
+
+      Whether parent rows carry store-managed timestamps.
+
+
+   .. py:property:: store_timestamp_resolution
+      :type: int | None
+
+
+      Return nanoseconds per stored timestamp unit, or ``None`` when disabled.
+
+
+   .. py:property:: entry_layout
+      :type: tuple[httk.store.backend.sql.layout.EntryFamilyLayout, ...]
+
+
+      Return configured entry-family layouts in deterministic stable-name order.
+
+      :return: The configured entry-family layouts.
+
+
+   .. py:property:: entry_records
+      :type: collections.abc.Mapping[type, tuple[type, ...]]
+
+
+      Return configured entry-family classes mapped to ordered concrete records.
+
+      :return: The entry-family to concrete-record mapping.
+
+
+   .. py:method:: bulk_ingest(*, chunk_size = 100000, verify_metadata = True, index_strategy = 'auto', on_progress = None, workers = 1, finalize = 'auto', track_sids = True, id_series = None)
+
+      Return a context manager that appends a stream of objects into this store.
+
+      The returned :class:`~httk.store.backend.sql.bulk.BulkIngest` exposes
+      ``save(obj, *, as_record=None, promote=None) -> int`` mirroring :meth:`save`, but
+      buffers encoded rows with pre-assigned sids and appends them in
+      executemany batches. On a physically empty store the record tables are
+      created index-less and their separable indexes are built once the stream
+      completes; on a populated store each flushed chunk is staged and
+      resolved set-wise against the existing rows (content-id anti-join with
+      metadata verification, ``by_value`` whole-column anti-join, and a sid
+      remap of the surviving references) before it is appended. While the
+      context is open the store's ordinary write path is exclusively owned:
+      :meth:`save`, :meth:`ensure_tables` and :meth:`transaction` raise
+      :class:`RuntimeError`.
+
+      A sid returned by ``save`` inside the context is provisional: a record
+      that deduplicates against a pre-existing row is remapped at flush, so its
+      durable sid is obtained from :meth:`~httk.store.backend.sql.bulk.BulkIngest.resolved_sid`
+      once the context has exited cleanly.
+
+      ``save(..., promote=RecordClass)`` additionally makes every nested
+      occurrence of that record class a top-level entry without a second
+      projection or worker transfer. An iterable promotes several classes.
+
+      :param chunk_size: The number of top-level saves buffered before a flush.
+      :param verify_metadata: Whether content-id hits compare identity-excluded metadata.
+      :param index_strategy: How an existing table's separable indexes are handled during the append —
+          ``"keep"`` appends through them, ``"rebuild"`` drops and recreates them, and ``"auto"`` picks
+          per table by the staged-to-existing row ratio. On DuckDB, which reserves a dropped index's name
+          until commit, ``"rebuild"`` instead keeps the indexes and verifies content-id uniqueness with a
+          duplicate scan; the final indexes are the same either way.
+      :param on_progress: An optional ``(records_buffered_total, rows_flushed_total)`` callback invoked after each flush.
+      :param workers: The number of worker processes. ``1`` (the default) is the serial path with byte-for-byte
+          unchanged semantics; ``>1`` encodes the stream in forked worker processes and merges their per-table
+          shards set-wise. Parallel mode requires a physically empty target store (the offline-build use case) and,
+          on DuckDB, the ``httk-store[parallel]`` extra (pyarrow); incremental appends stay on the serial path.
+      :param finalize: ``"parity"`` selects the historical in-database ingest; ``"deferred"`` stages a physically
+          empty ingest outside the store and finalizes it at context exit; ``"auto"`` selects deferred only for a
+          physically empty, supported serial ingest and otherwise selects parity (including ``workers>1``). A
+          subclass may override :attr:`bulk_ingest_finalize_default` for ``"auto"`` calls.
+      :param track_sids: Whether to retain provisional-to-durable sid mappings.
+      :param id_series: Override the configured entry-id series for minted bulk rows.
+      :return: A bulk-ingest context manager bound to this store.
+
+
+
+   .. py:method:: ensure_tables(*classes)
+
+      Create the requested tables as an explicit write operation.
+
+      :param \*classes: The storable classes whose tables should exist.
+      :return: None.
+      :raises RuntimeError: If a :meth:`bulk_ingest` context is currently open.
+
+
+
+   .. py:method:: transaction()
+
+      Return a context manager for one database transaction.
+
+      :return: A transaction context manager that commits on normal exit and rolls back on failure.
+
+
+
+   .. py:method:: steal_lease()
+
+      Conditionally replace the current degraded-store writer lease.
+
+      The compare-and-swap includes the complete observed value so a stale
+      caller can never overwrite a newer owner.
+
+
+
+   .. py:method:: save(obj, *, as_record = None, id_series = None, alternative_of = None, alternative_kind = None, links = None)
+
+      Store ``obj`` (deduplicating per its class's policy) and return its integer sid.
+
+      An opted-in domain object is projected through its exact
+      ``__httk_storage_record__``; ``as_record`` selects an alternate record
+      representation explicitly. Referenced records and record-valued child
+      elements are saved recursively without constructing intermediate
+      record instances.
+
+      A content-id deduplication hit compares metadata marked with
+      :class:`~httk.core.storage.markers.IdentitySkip` in schema order.
+      Nested plans are cached per record type, and a mismatch raises
+      :class:`~httk.store.backend.sql.store.EntryMetadataConflictError` without replacing the row.
+
+      Passing ``alternative_of`` (a stored main entry's id) with
+      ``alternative_kind`` saves ``obj`` as a named ALTERNATIVE representation
+      of that main: it copies the main's public ``id``, joins the main's
+      alternative group, and hashes with the group identity folded in so its
+      content never dedups onto the main. The main must live in ``obj``'s own
+      backing table and must itself be a main (not another alternative).
+
+      :param obj: The object to store.
+      :param as_record: The alternate record representation to use, if any.
+      :param id_series: Override the configured entry-id series for minted ids.
+      :param alternative_of: The stored main entry's id this record is an alternative of, if any.
+      :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
+      :param links: Weak links to add after saving, mapping each declared link name to a target or iterable of targets; the save and every link are applied in one atomic transaction.
+      :return: The stored row's sid.
+      :raises TypeError: If ``obj`` is a cursor row that must be materialized first.
+      :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing table, or itself an alternative.
+      :raises httk.store.backend.sql.store.EntryMetadataConflictError: If a deduplication hit has conflicting metadata.
+      :raises httk.core.storage.identity.StorageProjectionCycleError: If projection reaches a reference cycle.
+      :raises RuntimeError: If a :meth:`bulk_ingest` context is currently open.
+
+
+
+   .. py:method:: fetch[T](cls, sid, *, eager = False)
+
+      Reconstruct the ``cls`` instance stored under ``sid``.
+
+      By default a lazy row is returned: the parent row is loaded now, but
+      every child, reference and derived field decodes only when first
+      accessed (recursively, so a lazy record's children are lazy too). Pass
+      ``eager=True`` to fully materialize the base dataclass up front — the
+      behaviour required for records that must outlive the fetching
+      transaction, connection or engine.
+
+      Repeated default fetches of a live ``(class, sid)`` return the same
+      object; a live materialized instance takes precedence over creating a
+      new proxy. Mixing eager and lazy access may hand out two distinct but
+      equal objects when a caller still holds the older one, and internal
+      cache maintenance (a failed write, dedup compensation) may
+      re-materialize a later fetch — strict ``is`` identity across arbitrary
+      call sequences is not promised.
+
+      Raises :class:`KeyError` (carrying the class and sid) when no such
+      parent row exists. A missing table therefore has the same result as a
+      missing row. Under the lazy default, abnormal external deletion of a
+      *referenced* row surfaces at attribute access as
+      :class:`~httk.store.backend.sql.rows.StaleResultError`; abnormally deleted
+      *child* rows are indistinguishable from an empty sequence.
+
+      :param cls: The storable class to reconstruct.
+      :param sid: The stored row identifier.
+      :param eager: Whether to fully materialize the record instead of returning a lazy row.
+      :return: The reconstructed instance.
+      :raises KeyError: If no row exists for ``cls`` and ``sid``.
+
+
+
+   .. py:method:: fetch_many[T](cls, sids, *, eager = False)
+
+      Reconstruct every ``cls`` instance stored under ``sids`` in one batch.
+
+      The batched counterpart of :meth:`fetch`: child-element and reference
+      reads are shared across the requested rows instead of re-queried per
+      sid.  By default lazy rows are returned; they share one
+      :class:`~httk.store.backend.sql.rows.RowHydrator`, so a deferred child or
+      reference read stays chunk-batched (one SELECT per child table per
+      500-row chunk on first touch) exactly as the eager path batches it,
+      merely deferred. Pass ``eager=True`` to fully materialize every record
+      up front.
+
+      Mirroring :meth:`fetch`, a live cached object (proxy or materialized)
+      is returned for any ``(class, sid)`` still alive without touching the
+      database (so a fully cached call issues no SQL); the remaining rows
+      share one connection. Memory is O(``len(sids)``) — every chunk stays
+      pinned for the batch — so callers pass bounded pages.
+
+      :param cls: The storable class to reconstruct.
+      :param sids: The stored row identifiers to reconstruct.
+      :param eager: Whether to fully materialize each record instead of returning lazy rows.
+      :return: The reconstructed instances in ``sids`` order.
+      :raises KeyError: If any requested row does not exist.
+
+
+
+   .. py:method:: fetch_by_content_id[T](cls, key, *, eager = False)
+
+      Return the ``cls`` instance whose content identity is ``key``, or None if not stored.
+
+      Only classes with the ``"content_id"`` dedup policy carry a content
+      identity column; :class:`~httk.store.backend.schema.SchemaError` is raised
+      for any other class. A lazy row is returned by default; pass
+      ``eager=True`` to fully materialize it.
+
+      :param cls: The storable class to search.
+      :param key: The content identity to find.
+      :param eager: Whether to fully materialize the record instead of returning a lazy row.
+      :return: The stored instance, or ``None`` when no row matches.
+      :raises httk.store.backend.schema.SchemaError: If the class does not use content-id deduplication.
+
+
+
+   .. py:method:: fetch_entry(family_cls, content_id, *, eager = False)
+
+      Return the concrete configured record for an entry-family content identity.
+
+      The result is the actual frozen record class, not the family protocol.
+      A single-record family can query that record directly; only
+      multi-record families use their reserved one-of-many dispatch table,
+      whose constraint permits exactly one backing sid per content identity.
+      A lazy row is returned by default; pass ``eager=True`` to fully
+      materialize it.
+
+      :param family_cls: The configured entry-family class.
+      :param content_id: The entry content identity to find.
+      :param eager: Whether to fully materialize the record instead of returning a lazy row.
+      :return: The concrete stored record, or ``None`` when no row matches.
+      :raises ValueError: If ``family_cls`` is not configured for this store.
+      :raises EntryDispatchIntegrityError: If a dispatch row is inconsistent with its backing row.
+
+
+
+   .. py:method:: sid_of(obj, *, as_record = None)
+
+      Return this store's sid for ``obj``'s record identity, if present.
+
+      :param obj: The object whose stored identity should be looked up.
+      :param as_record: The alternate record representation to use, if any.
+      :return: The stored sid, or ``None`` when no matching row is known.
+
+
+
+   .. py:method:: searcher(*, as_of = None, only_latest = False, only_main_alt = True)
+
+      Return a new :class:`~httk.store.backend.sql.searcher.SqlSearcher` querying this store.
+
+      The searcher runs on this store's read path — inside an open
+      :meth:`transaction` block it sees uncommitted writes — and
+      reconstructs matched objects as lazy rows, decoding each field on first
+      access exactly as the lazy default of :meth:`fetch` does.
+
+      :param as_of: Optional historic cutoff in canonical timestamp form.
+      :param only_latest: Whether root variables are restricted to the latest row of each
+          ``logical_id`` lineage by sid (bounded by ``as_of`` when given). Reference/child
+          variables stay unfiltered. Does not require ``store_timestamps=True``.
+      :param only_main_alt: Whether root variables are restricted to mains (``alt_kind IS NULL``),
+          hiding named alternatives. Defaults to ``True``; pass ``False`` to reveal alternatives.
+      :return: A new SQL searcher bound to this store.
+
+
+
+   .. py:method:: fsck(*, repair = True, collect_garbage = True, repair_conflicts = False, clamp_future_timestamps = False, known_types = (), exclusive = False)
+
+      Repair dispatches and reclaim permanentization residue.
+
+      Only tables attributable to the persisted layout or ``known_types``
+      are swept; unrelated application tables make collection refuse.
+
+
+
+   .. py:method:: stored_property_plan(family)
+
+      Return the wire-form SQL stored-property plan for one configured entry family.
+
+      This method is a serving edge: like the entry providers, it serves the
+      family's definition in OPTIMADE wire form (``served_form()``), so a
+      prefixed family whose ``__httk_stored_properties__`` keys are served
+      names plans correctly. ``served_form()`` is idempotent for standard
+      (unprefixed) families, so their plans are byte-identical.
+
+      :param family: The logical entry-family class to plan.
+      :return: The validated SQL stored-property plan.
+
+
+
+   .. py:method:: referring(cls, *, field, to, eager = False)
+
+      Return all stored ``cls`` instances whose reference field ``field`` points at ``to``.
+
+      ``field`` must be a reference field of ``cls`` targeting ``to``'s class
+      (:class:`~httk.store.backend.schema.SchemaError` otherwise), and ``to`` must
+      be known to this store — saved or fetched through it — else
+      :class:`ValueError` is raised. Results are ordered by sid. Lazy rows are
+      returned by default (batched over the matched sids); pass ``eager=True``
+      to fully materialize them.
+
+      :param cls: The storable class whose references should be searched.
+      :param field: The reference field to match.
+      :param to: The stored target instance.
+      :param eager: Whether to fully materialize the records instead of returning lazy rows.
+      :return: The referring stored instances ordered by sid.
+      :raises httk.store.backend.schema.SchemaError: If ``field`` is not a compatible reference field.
+      :raises ValueError: If ``to`` is not known to this store.
+
+
+
+   .. py:method:: replace(predecessor, obj, *, id_series = None, links = None)
+
+      Store ``obj`` as a logical replacement of ``predecessor`` and return its sid.
+
+      The saved row copies ``predecessor``'s ``logical_id`` (its lineage
+      identity) instead of starting a fresh one, so both rows share the
+      lineage :meth:`history` walks. Nothing is updated or deleted: plain
+      :meth:`fetch` and :meth:`searcher` queries keep returning both rows, and
+      the lineage's latest row is simply the one with the highest sid.
+      ``predecessor`` need not itself be the latest row of its lineage —
+      replacing an already-replaced row is allowed and extends the same
+      lineage. ``obj`` is saved through the ordinary :meth:`save` path, so its
+      dedup policy, timestamp capture, identity caching and entry-family
+      dispatch all behave exactly as they do there.
+
+      If ``obj``'s content deduplicates onto an existing row (under the
+      ``"content_id"`` or ``"by_value"`` policies), that row's lineage is
+      compared with ``predecessor``'s: an equal lineage (including ``obj``
+      equalling ``predecessor`` itself) is an idempotent no-op returning the
+      existing sid, while a different lineage raises
+      :class:`EntryReplacementError`.
+
+      ``links`` optionally adds weak links to the replacement's lineage, as in
+      :meth:`save`; the replace and every link are applied in one atomic
+      transaction.
+
+      :param predecessor: The stored instance or lazy proxy being replaced; it must have been stored or fetched through this store.
+      :param obj: The replacement object to store.
+      :param id_series: Override the configured entry-id series when an id must be minted.
+      :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
+      :return: The stored replacement row's sid.
+      :raises ValueError: If ``predecessor`` is not known to this store, or ``obj``'s record table differs from ``predecessor``'s.
+      :raises EntryReplacementError: If ``obj`` deduplicates onto a row from a different lineage.
+
+
+
+   .. py:method:: link(source, name, target)
+
+      Assert a weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+      Weak links live in a dedicated append-only link table and bind
+      *lineages*: both endpoints always resolve to their latest revision. The
+      operation is idempotent per the pair ``(source lineage, target
+      lineage)`` — a live pair is a no-op, a retracted pair is revived, an
+      absent pair founds a fresh link lineage — and duplicate pair lineages
+      (from concurrent writers) are tolerated: the pair is live if any lineage
+      is live.
+
+      :param source: The stored source instance or lazy proxy declaring the link.
+      :param name: The declared weak-link name.
+      :param target: The stored target instance whose type matches the link declaration.
+      :return: None.
+      :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+      :raises TypeError: If ``target``'s type does not match the link's declared target.
+      :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+      :raises RuntimeError: If the store uses the degraded write profile or a bulk-ingest context is open.
+
+
+
+   .. py:method:: unlink(source, name, target)
+
+      Retract the weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+      Retracts every live lineage of the pair (duplicate-tolerant); an absent
+      or already-retracted pair is a no-op. Retraction appends a revision — no
+      row is deleted, and history/``as_of`` still see the earlier live rows.
+
+      :param source: The stored source instance or lazy proxy declaring the link.
+      :param name: The declared weak-link name.
+      :param target: The stored target instance whose type matches the link declaration.
+      :return: None.
+      :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+      :raises TypeError: If ``target``'s type does not match the link's declared target.
+      :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+      :raises RuntimeError: If the store uses the degraded write profile or a bulk-ingest context is open.
+
+
+
+   .. py:method:: linked(source, name, *, eager = False)
+
+      Return the latest revisions of the targets currently linked from ``source`` under ``name``.
+
+      Targets are deduplicated by lineage and ordered by first-link order (the
+      link lineage's root ``logical_id``, ascending; stable across
+      retract+relink). Each returned object is the latest revision of its
+      target lineage, hydrated through the ordinary fetch machinery (a lazy row
+      by default, fully materialized when ``eager`` is true).
+
+      :param source: The stored source instance or lazy proxy declaring the link.
+      :param name: The declared weak-link name.
+      :param eager: Whether to fully materialize each target instead of returning a lazy row.
+      :return: The linked targets' latest revisions, deduplicated and ordered by first-link order.
+      :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+      :raises ValueError: If ``source`` is not stored in this store.
+
+
+
+   .. py:method:: history(obj)
+
+      Return every record in ``obj``'s replacement lineage, oldest first.
+
+      The lineage is the set of rows sharing ``obj``'s ``logical_id`` — the
+      fresh record that started it and every :meth:`replace` of it — ordered
+      by sid ascending (the fresh record first, the latest replacement last).
+      Records are reconstructed through the same machinery as :meth:`fetch`,
+      lazily by default.
+
+      :param obj: A stored instance or lazy proxy whose lineage to walk; it must have been stored or fetched through this store.
+      :return: The lineage's records ordered by ascending sid.
+      :raises ValueError: If ``obj`` is not known to this store.
+
+
+

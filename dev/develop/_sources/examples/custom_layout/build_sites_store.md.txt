@@ -1,0 +1,21 @@
+# Building and checking a store with a custom sites table
+
+This driver uses the record module {doc}`sites_layout` to build a DuckDB store
+whose structures keep their sites in a table of their own. It is the runnable
+counterpart of the guide {doc}`../../details/db-redefine-format`.
+
+In order, the script:
+
+1. builds rock-salt NaCl and CsCl as exact `UnitcellStructure` values;
+2. saves both with `as_record=SitesStructureRecord`;
+3. validates the served properties with `store.stored_property_plan`;
+4. searches for structures with a chlorine site, and with one near the origin;
+5. prints the physical tables and their columns with plain `duckdb`;
+6. reopens the store and fetches a record back.
+
+The assertions pin the layout, so the example fails if it changes.
+
+```{literalinclude} ../../../examples/custom_layout/build_sites_store.py
+:language: python
+:lines: 18-
+```

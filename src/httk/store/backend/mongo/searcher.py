@@ -543,6 +543,38 @@ def _traversal_uses(node: Node, positive: bool = True) -> dict[str, bool]:
     return {}
 
 
+def _check_list_field_reuse(node: Node, seen: set[int] | None = None) -> None:
+    """Refuse a plain list-field object that appears in more than one condition, as the SQL backend does.
+
+    Each access to a list field is a separate set; a reused object would
+    silently read as independent here but as one joined row on SQL.
+
+    :param node: The predicate tree.
+    :param seen: The ids of the list-field objects already met in this query.
+    :return: None.
+    :raises httk.store.query.UnsupportedQueryError: If one list-field object is used twice.
+    """
+    seen = set() if seen is None else seen
+    if isinstance(node, (AndNode, OrNode)):
+        _check_list_field_reuse(node.left, seen)
+        _check_list_field_reuse(node.right, seen)
+        return
+    if isinstance(node, NotNode):
+        _check_list_field_reuse(node.child, seen)
+        return
+    field = getattr(node, "field", None)
+    if not isinstance(field, MongoField) or not field._child_keys or isinstance(field, MongoChildRecords):
+        return
+    if id(field) in seen:
+        name = field._spec.field
+        raise UnsupportedQueryError(
+            f"{field._variable._cls.__name__}.{name} was used in several conditions through one search object; "
+            f"each access to a list field is a separate set, so write v.{name} afresh in each condition (for "
+            f"example v.{name}.has_any(a) & ~v.{name}.has_any(b))"
+        )
+    seen.add(id(field))
+
+
 def _correlate(node: Node) -> Node:
     """Merge the conditions on one child-record traversal into one ``$elemMatch``, as SQL shares one joined row.
 
@@ -1708,7 +1740,9 @@ class MongoSearcher:
         if not self._expressions:
             return {}
         # One tree, so conditions on one child-record traversal correlate across add() calls too.
-        return render_node(_correlate(reduce(AndNode, (expression.node for expression in self._expressions))))[0]
+        tree = reduce(AndNode, (expression.node for expression in self._expressions))
+        _check_list_field_reuse(tree)
+        return render_node(_correlate(tree))[0]
 
     def _unset_child_lookups(self) -> list[dict[str, Any]]:
         """Return the stage dropping the child-record element arrays after the truth ``$match``, if any."""

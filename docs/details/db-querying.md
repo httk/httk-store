@@ -17,8 +17,11 @@ see [Chaining into child records](#chaining-into-child-records)); weak and
 strong links join through `v.links.<name>` (see
 [Relationships](db-relationships.md), e.g. `record.links.product_of == structure`);
 variable-length fields support the set operations (`has_any`, `has_only`), and
-`~` negates them as sets. String matching (`contains`, `startswith`,
-`endswith`) always takes **literal** text — `%` and `_` match themselves:
+`~` negates them as sets. Each access to a list field is a separate set, and
+reusing one list-field object (`t = v.symbols`) in several conditions raises
+`UnsupportedQueryError`, so write `v.symbols` afresh in each condition. String
+matching (`contains`, `startswith`, `endswith`) always takes **literal** text —
+`%` and `_` match themselves:
 
 ```python
 search = store.searcher()

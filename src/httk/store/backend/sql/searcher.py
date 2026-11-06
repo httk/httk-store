@@ -141,7 +141,9 @@ class _Shape:
     child ``is_in``). A selecting condition on an element field is an
     *element* condition: the element conditions of one traversal merge into
     one row-wise group (MongoDB's single ``$elemMatch``), while an element-sid
-    condition on the traversal itself does not. ``"&"``, ``"|"`` and ``"~"``
+    condition on the traversal itself does not. A leaf on a plain list field
+    names that field's column object instead (``list_field``), so reusing one
+    object in several conditions can be refused. ``"&"``, ``"|"`` and ``"~"``
     mirror the combinators.
     """
 
@@ -150,6 +152,7 @@ class _Shape:
     traversal: "SqlChildRecords | None" = None
     selects: bool = False
     element: bool = False
+    list_field: "SqlColumn | None" = None
 
 
 _NO_USE = _Shape("use")
@@ -210,6 +213,34 @@ def _exists(clause: Any) -> sqlalchemy.ColumnElement[bool]:
 
 def _conjuncts(shape: _Shape) -> list[_Shape]:
     return [item for part in shape.parts for item in _conjuncts(part)] if shape.op == "&" else [shape]
+
+
+def _check_list_field_reuse(shape: _Shape, seen: set[int] | None = None) -> None:
+    """Refuse a plain list-field column object that appears in more than one condition.
+
+    Each access to a list field joins its own set of child rows, so a reused
+    object would silently constrain one joined row where MongoDB constrains
+    the whole set; neither is what independent access promises.
+
+    :param shape: The classified predicate tree.
+    :param seen: The ids of the list-field columns already met in this query.
+    :return: None.
+    :raises httk.store.query.UnsupportedQueryError: If one list-field column object is used twice.
+    """
+    seen = set() if seen is None else seen
+    column = shape.list_field
+    if column is not None:
+        if id(column) in seen:
+            owner = cast("SqlVariable", column._variable)._cls.__name__
+            field = cast(FieldSpec, column._spec).field
+            raise UnsupportedQueryError(
+                f"{owner}.{field} was used in several conditions through one search object; each access to a list "
+                f"field is a separate set, so write v.{field} afresh in each condition (for example "
+                f"v.{field}.has_any(a) & ~v.{field}.has_any(b))"
+            )
+        seen.add(id(column))
+    for part in shape.parts:
+        _check_list_field_reuse(part, seen)
 
 
 def _check_correlation(shape: _Shape) -> None:
@@ -472,6 +503,9 @@ class SqlColumn:
 
     def _use(self, selects: bool) -> _Shape | None:
         if self._traversal is None:
+            spec = self._spec
+            if self._from_child and not self._link_path and spec is not None and spec.role == "child":
+                return _Shape("use", list_field=self) if spec.target is None else None
             return None
         element = selects and self._traversal is not self
         return _Shape("use", traversal=self._traversal, selects=selects, element=element)
@@ -1953,7 +1987,9 @@ class SqlSearcher:
             raise ValueError("this searcher has no query variables; call variable() first")
         shapes = [shape for shape in map(_shape_of, self._where) if shape is not None]
         if shapes:
-            _check_correlation(shapes[0] if len(shapes) == 1 else _Shape("&", tuple(shapes)))
+            shape = shapes[0] if len(shapes) == 1 else _Shape("&", tuple(shapes))
+            _check_list_field_reuse(shape)
+            _check_correlation(shape)
         statement = sqlalchemy.select(*columns).select_from(*[self._joined(v) for v in self._variables])
         if self._where:
             statement = statement.where(*[expression.where_clause for expression in self._where])

@@ -3,6 +3,7 @@
 One spec for every backend: the SQL dialects and, live, MongoDB (gated on ``HTTK_TEST_MONGODB_URI``).
 """
 
+import re
 import uuid
 from dataclasses import dataclass
 from fractions import Fraction
@@ -38,13 +39,14 @@ class Parent:
     name: str
     sites: tuple[SiteRow, ...]
     n: int | None = None
+    labels: tuple[str, ...] = ()
 
 
 PARENTS = [
-    Parent("A", (SiteRow(0.1, "Cl"), SiteRow(0.5, "Na")), 1),
-    Parent("B", (SiteRow(0.5, "Cl", Fraction(1, 2)),)),
+    Parent("A", (SiteRow(0.1, "Cl"), SiteRow(0.5, "Na")), 1, ("x", "y")),
+    Parent("B", (SiteRow(0.5, "Cl", Fraction(1, 2)),), labels=("x",)),
     Parent("C", (), 2),
-    Parent("D", (SiteRow(0.2, "Na", tag=SiteTag("t")),)),
+    Parent("D", (SiteRow(0.2, "Na", tag=SiteTag("t")),), labels=("y",)),
 ]
 
 
@@ -214,6 +216,12 @@ def test_federated_chain(request, first_backend):
         search.add(site.x > 0.4)
         assert [row.parent.name for row in search.results(parent=s)] == ["B"]
 
+        # Fresh list-field accesses replay as fresh backend objects; a reused one is refused.
+        assert names(federation, lambda s: s.labels.has_any("x") & ~s.labels.has_any("y")) == ["B"]
+        with pytest.raises(UnsupportedQueryError) as refused:  # the source's refusal, with source context
+            names(federation, list_reuse_mixed)
+        assert re.search(REUSE, str(refused.value.__cause__))
+
 
 def mixed_negation(s: Any) -> Any:
     site = s.sites
@@ -278,3 +286,39 @@ def test_link_field_comparisons_are_not_child_record_fields():
 
         assert linked_names(lambda v: v.links.projects.name != None) == ["P1", "x"]
         assert linked_names(lambda v: v.links.projects.name == v.name) == ["P1"]
+
+
+REUSE = r"Parent\.labels was used in several conditions through one search object"
+
+
+def list_reuse_mixed(s: Any) -> Any:
+    labels = s.labels
+    return labels.has_any("x") & ~labels.has_any("y")
+
+
+def list_reuse_positive(s: Any) -> Any:
+    labels = s.labels
+    return (labels == "x") & (labels == "y")
+
+
+def test_list_field_object_reuse_is_refused(store):
+    for build in (list_reuse_mixed, list_reuse_positive):
+        with pytest.raises(UnsupportedQueryError, match=REUSE):
+            names(store, build)
+    search = store.searcher()
+    s = search.variable(Parent)
+    labels = s.labels
+    search.add(labels.has_any("x"))
+    search.add(labels.contains("y"))
+    with pytest.raises(UnsupportedQueryError, match=REUSE):
+        search.count()
+
+
+def test_list_field_single_condition_and_fresh_accesses(store):
+    def single(s):
+        labels = s.labels
+        return labels.has_any("x", "y")
+
+    assert names(store, single) == ["A", "B", "D"]
+    assert names(store, lambda s: s.labels.has_any("x") & ~s.labels.has_any("y")) == ["B"]
+    assert names(store, lambda s: (s.labels == "x") & (s.labels == "y")) == ["A"]

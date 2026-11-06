@@ -64,6 +64,8 @@ fresh-store profile), the permanentization role model with `store.fsck()`
 recovery, OPTIMADE serving, and store-layout versioning.
 
 To query or serve an existing SQL database in place, see {doc}`details/db-tables`.
+To store structures in a table layout of your own, such as a separate sites table, see
+{doc}`details/db-redefine-format`.
 
 `store.reclaim_space("full")` shrinks a store after deletions or a long build of
 small saves; see [Reclaiming space](details/db-recovery.md#reclaiming-space).

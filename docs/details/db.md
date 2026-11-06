@@ -104,6 +104,7 @@ db-bulk-ingestion
 db-querying
 db-serving
 db-tables
+db-redefine-format
 db-optimade-client
 ```
 

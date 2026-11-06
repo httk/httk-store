@@ -139,7 +139,7 @@ reportMissingImports = true
 [tool.mypy]
 python_version = "3.12"
 files = ["src", "examples"]
-mypy_path = ["src"]
+mypy_path = ["src", "examples/custom_layout"]
 namespace_packages = true
 explicit_package_bases = true
 warn_unused_ignores = true

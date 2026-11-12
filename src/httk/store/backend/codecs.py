@@ -32,6 +32,14 @@ round-trip source of truth. The canonical text formats are:
   its stored float companion (``0.25`` for the float ``0.25``), so the text
   would be redundant.
 
+The CIF decimals ``DecimalScalar`` and ``DecimalVector`` (:mod:`httk.core`)
+are stored as their tokens in one text column, with no float companion (a gap
+has no float, and the token, not the value, is the content): a scalar as its
+token (``"1.2345(6)"``), a vector as the compact JSON of its nested token lists
+(``[["0.50","?"],["007","."]]``; a scalar in a vector field as a JSON
+string). Both are exact-type only, like their content identity, and decoding
+rejects non-canonical text. Only equality filtering is meaningful there.
+
 httk-core is a hard dependency of httk-store, so the httk.core vector types are
 imported unconditionally; nothing in this module needs sqlalchemy.
 """
@@ -39,13 +47,14 @@ imported unconditionally; nothing in this module needs sqlalchemy.
 import datetime
 import decimal
 import fractions
+import json
 import math
 import reprlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
 
-from httk.core import FracScalar, FracVector, SurdScalar, SurdVector
+from httk.core import DecimalScalar, DecimalVector, FracScalar, FracVector, SurdScalar, SurdVector
 from httk.core.exactmath import any_to_fraction
 from httk.core.storage import register_canonical_encoder
 from httk.core.storage.rational_text import fraction_to_text
@@ -131,6 +140,8 @@ _CORE_CANONICAL_TYPES = frozenset(
         datetime.date,
         datetime.datetime,
         decimal.Decimal,
+        DecimalScalar,
+        DecimalVector,
         float,
         fractions.Fraction,
         FracScalar,
@@ -141,6 +152,8 @@ _CORE_CANONICAL_TYPES = frozenset(
         SurdVector,
     }
 )
+# Core-canonical types whose content identity is exact-type: subclasses are not storable.
+_EXACT_TYPE_ONLY = frozenset({DecimalScalar, DecimalVector})
 
 
 def register_value_codec(codec: ValueCodec) -> None:
@@ -187,7 +200,7 @@ def codec_for(python_type: Any) -> ValueCodec | None:
     """Return the codec for ``python_type``, or None if no codec covers it.
 
     An exact type match wins. Subclasses reuse only codecs for core-native
-    canonical types; custom codec registrations are exact-type only so SQL
+    canonical types other than the exact-type CIF decimals; custom codec registrations are exact-type only so SQL
     encoding and content identity cannot disagree.
 
     :param python_type: The Python type to look up.
@@ -199,7 +212,7 @@ def codec_for(python_type: Any) -> ValueCodec | None:
     if exact is not None:
         return exact
     for codec in _codecs_by_name.values():
-        if codec.python_type in _CORE_CANONICAL_TYPES and issubclass(python_type, codec.python_type):
+        if codec.python_type in _CORE_CANONICAL_TYPES - _EXACT_TYPE_ONLY and issubclass(python_type, codec.python_type):
             return codec
     return None
 
@@ -452,6 +465,29 @@ def _decode_datetime(values: tuple[Any, ...]) -> Any:
     return datetime.datetime.fromisoformat(values[0])
 
 
+def _encode_decimalvector(value: Any) -> tuple[Any, ...]:
+    return (json.dumps(value.tokens, separators=(",", ":")),)
+
+
+def _decode_decimalvector(values: tuple[Any, ...]) -> Any:
+    # A JSON string is a DecimalScalar stored in a DecimalVector field (identity is by runtime type).
+    tokens = json.loads(values[0])
+    try:
+        value = DecimalScalar(tokens) if isinstance(tokens, str) else DecimalVector(tokens)
+    except TypeError as exc:
+        raise ValueError(f"invalid stored DecimalVector text {reprlib.repr(values[0])}") from exc
+    if _encode_decimalvector(value) != (values[0],):
+        raise ValueError(f"non-canonical stored DecimalVector text {reprlib.repr(values[0])}")
+    return value
+
+
+def _decode_decimalscalar(values: tuple[Any, ...]) -> Any:
+    value = DecimalScalar(values[0])
+    if value.token != values[0]:
+        raise ValueError(f"non-canonical stored DecimalScalar text {reprlib.repr(values[0])}")
+    return value
+
+
 _EXACT_COLUMNS: Final[tuple[tuple[str, ScalarKind], ...]] = (("", "float"), ("_exact", "str"))
 
 register_value_codec(
@@ -497,5 +533,23 @@ register_value_codec(
         columns=(("", "str"),),
         encode=_encode_datetime,
         decode=_decode_datetime,
+    )
+)
+register_value_codec(
+    ValueCodec(
+        name="decimal_scalar",
+        python_type=DecimalScalar,
+        columns=(("", "str"),),
+        encode=lambda value: (value.token,),
+        decode=_decode_decimalscalar,
+    )
+)
+register_value_codec(
+    ValueCodec(
+        name="decimal_vector",
+        python_type=DecimalVector,
+        columns=(("", "str"),),
+        encode=_encode_decimalvector,
+        decode=_decode_decimalvector,
     )
 )

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 import pytest
-from httk.core import FracScalar, FracVector, SurdScalar, SurdVector
+from httk.core import DecimalScalar, DecimalVector, FracScalar, FracVector, SurdScalar, SurdVector
 from httk.core.storage import content_id, register_canonical_encoder
 
 from httk.store.backend.codecs import (
@@ -280,3 +280,69 @@ def test_custom_codec_does_not_apply_to_subclasses():
     assert codec_for(CustomSubclass) is None
     with Backend.sqlite() as database, pytest.raises(SchemaError, match="CustomSubclass.*not storable"):
         SqlStore(database, entry_records={}).save(CustomSubclassRecord(CustomSubclass("value")))
+
+
+@dataclass(frozen=True)
+class CIFDecimalsRecord:
+    scalar: DecimalScalar
+    vector: DecimalVector
+
+
+def test_decimal_codecs_round_trip_tokens_through_a_store():
+    assert codec_for(DecimalScalar) is codec_named("decimal_scalar")
+    assert codec_for(DecimalVector) is codec_named("decimal_vector")
+    assert codec_named("decimal_vector").encode(DecimalVector([["0.50", "?"]])) == ('[["0.50","?"]]',)
+    vector = DecimalVector([["0.50", "1.2345(6)", "?"], ["007", ".", "1.5E-3(2)"]])
+    records = [CIFDecimalsRecord(DecimalScalar(token), vector) for token in ("0.50", "1.2345(6)", "007", "?", ".")]
+    with Backend.sqlite() as database:
+        sids = [SqlStore(database, entry_records={}).save(record) for record in records]
+        store = SqlStore(database)  # a reopened store: no identity cache involved
+        for sid, record in zip(sids, records, strict=True):
+            fetched = store.fetch(CIFDecimalsRecord, sid)
+            assert fetched is not record
+            assert fetched == record
+            assert fetched.vector.dim == (2, 3)
+            assert content_id(fetched) == content_id(record)
+    assert DecimalScalar("0.50") != DecimalScalar("0.5")
+    assert content_id(records[0]) != content_id(CIFDecimalsRecord(DecimalScalar("0.5"), vector))
+
+
+def test_decimal_vector_field_stores_scalars_and_empty_vectors():
+    records = [
+        CIFDecimalsRecord(DecimalScalar("1"), DecimalScalar("0.50")),  # a scalar in a vector field
+        CIFDecimalsRecord(DecimalScalar("?"), DecimalVector([[], []])),
+    ]
+    assert records[1].vector.dim == (2, 0)
+    with Backend.sqlite() as database:
+        sids = [SqlStore(database, entry_records={}).save(record) for record in records]
+        store = SqlStore(database)
+        fetched = [store.fetch(CIFDecimalsRecord, sid) for sid in sids]
+    assert fetched == records
+    assert type(fetched[0].vector) is DecimalScalar
+    assert fetched[1].vector.dim == (2, 0)
+    assert [content_id(record) for record in fetched] == [content_id(record) for record in records]
+
+
+def test_decimal_codecs_reject_non_canonical_text():
+    vector, scalar = codec_named("decimal_vector"), codec_named("decimal_scalar")
+    for text in ("[1]", '[ "1" ]', "1", '["1",2]', '["x"]', "{}"):
+        with pytest.raises(ValueError):
+            vector.decode((text,))
+    for stored in ("x", "", " 1", 1):  # tokens keep their spelling; only a non-token or non-text fails
+        with pytest.raises(ValueError):
+            scalar.decode((stored,))
+    assert scalar.decode(("+1",)) == DecimalScalar("+1")
+    assert vector.decode(('"0.50"',)) == DecimalScalar("0.50")
+
+
+def test_decimal_codecs_do_not_apply_to_subclasses():
+    class MyDecimalVector(DecimalVector):
+        pass
+
+    @dataclass(frozen=True)
+    class SubclassRecord:
+        value: MyDecimalVector
+
+    assert codec_for(MyDecimalVector) is None
+    with Backend.sqlite() as database, pytest.raises(SchemaError, match="MyDecimalVector.*not storable"):
+        SqlStore(database, entry_records={}).save(SubclassRecord(MyDecimalVector(["1"])))

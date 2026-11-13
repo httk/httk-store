@@ -173,7 +173,9 @@ def test_decorated_only_records_layout_is_unchanged() -> None:
         # SpeciesConstituentRecord.mass. Restoring the old float codec columns alone
         # reproduces the previous eb908fc1a6719b56 / 6f112d9b5ed9c225 / 1329a570deae655b;
         # NumericUnitcellStructureRecord is not part of these layouts.
-        (ResultWithStructure,): "d8452526aefbdae0",
+        # Re-pinned November 13, 2026 (FU7): the unit-cell structure gained its bond network
+        # reference and two bond-source references (additive: new nullable columns and tables).
+        (ResultWithStructure,): "4ab72ae883b05698",
         (Result,): "84a01b57df46e5e0",
         (Alpha, Beta): "0e5c3dbfcf40770e",
     }

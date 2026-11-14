@@ -1,0 +1,21 @@
+# A structures record with its own sites table
+
+This module declares a user-defined `structures` record whose sites live in a
+table of their own, one row per site with the columns `x`, `y`, `z` and
+`symbol`. It is the record module of the guide
+{doc}`../../details/db-redefine-format`, which explains each part.
+
+`SiteRecord` is one row of the site table. `SitesStructureRecord` holds the
+lattice basis and the ordered sites, projects itself from any httk
+`UnitcellStructure`, and declares the OPTIMADE properties it serves. The call
+at the bottom registers it as the `structures` record
+`example-sites-structure`.
+
+Run on its own, the script prints the registration and the served
+properties. The driver {doc}`build_sites_store` builds, queries and reopens a
+store of these records.
+
+```{literalinclude} ../../../examples/custom_layout/sites_layout.py
+:language: python
+:lines: 18-
+```

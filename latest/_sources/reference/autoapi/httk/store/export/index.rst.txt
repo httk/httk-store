@@ -1,0 +1,32 @@
+httk.store.export
+=================
+
+.. py:module:: httk.store.export
+
+.. autoapi-nested-parse::
+
+   Export a snapshot-consistent SQLite store with its definitions.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.export.export_dataset
+
+
+Module Contents
+---------------
+
+.. py:function:: export_dataset(store_path, out_path)
+
+   Export a snapshot-consistent SQLite store and its OPTIMADE definitions.
+
+   :param store_path: SQLite store to copy.
+   :param out_path: Destination zip file.
+   :return: The destination path.
+   :raises ValueError: If the store declaration has no resolvable definitions.
+
+

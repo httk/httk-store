@@ -1,0 +1,261 @@
+httk.store.optimade.remote_query
+================================
+
+.. py:module:: httk.store.optimade.remote_query
+
+.. autoapi-nested-parse::
+
+   Neutral synchronous query/result protocols over a remote OPTIMADE service.
+
+   Attribute access on a bound query variable (``variable.some_field``) resolves
+   against the endpoint's declared field map, including OPTIMADE provider-prefixed
+   properties such as ``variable._anyterial_max_spin_splitting`` -- on a generic,
+   unregistered entry type the local field names are the wire names verbatim, and
+   provider prefixes are the norm there.  A double-leading-underscore name (a
+   dunder, e.g. ``__deepcopy__``) is always rejected with a bare
+   ``AttributeError`` before the field map is even consulted, so interpreter and
+   library introspection stay cheap and can never collide with a field name.  A
+   single-leading-underscore name that is *not* a declared field also raises a
+   bare ``AttributeError`` rather than the descriptive
+   :class:`~httk.store.UnsupportedQueryError` used for other unknown names: this
+   keeps probes shaped like a provider field but not one, such as IPython's
+   ``_ipython_canary_method_should_not_exist_``, indistinguishable from "no such
+   attribute" instead of surfacing as a backend failure.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.optimade.remote_query.OptimadeResponseError
+   httk.store.optimade.remote_query.OptimadePaginationError
+   httk.store.optimade.remote_query.CountUnavailableError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.optimade.remote_query.RemoteSearcher
+   httk.store.optimade.remote_query.RemoteResultColumn
+   httk.store.optimade.remote_query.RemoteResultSet
+
+
+Module Contents
+---------------
+
+.. py:exception:: OptimadeResponseError
+
+   Bases: :py:obj:`httk.store.optimade.client.OptimadeClientError`
+
+
+   A successful HTTP response was not a usable OPTIMADE entry document.
+
+
+.. py:exception:: OptimadePaginationError
+
+   Bases: :py:obj:`OptimadeResponseError`
+
+
+   A remote continuation was unsafe, malformed, or non-terminating.
+
+
+.. py:exception:: CountUnavailableError
+
+   Bases: :py:obj:`OptimadeResponseError`, :py:obj:`httk.store.query.protocols.CountUnavailableError`
+
+
+   The client could not obtain an exact filtered result count.
+
+
+.. py:class:: RemoteSearcher(store, *, response_fields = None)
+
+   Build one portable single-root OPTIMADE query.
+
+   :param store: Remote OPTIMADE store used for discovery and requests.
+   :param response_fields: Optional field-selection policy for this search.
+
+
+   .. py:attribute:: offset
+      :value: 0
+
+
+
+   .. py:method:: variable(target)
+
+      Bind the query to one discovered remote entry type.
+
+      :param target: Discovered entry descriptor or registered backend class.
+      :return: Query variable exposing portable fields.
+      :raises httk.store.query.protocols.UnsupportedQueryError: If the target is not recognized or a root variable is already bound.
+
+
+
+   .. py:method:: add(expression)
+
+      Add a filter expression to the query.
+
+      :param expression: Expression created by this searcher.
+      :raises ValueError: If no query variable is bound.
+      :raises httk.store.UnsupportedQueryError: If the expression belongs elsewhere.
+
+
+
+   .. py:method:: output(variable, name)
+
+      Declare a whole-record, scalar, or set-valued relationship output.
+
+      A relationship namespace (``variable.links.<name>``) is a set-valued
+      output: it yields a tuple of bound related records per row, resolved
+      from the response's ``included`` array or one lazy fetch per missing
+      identifier -- the same resolution a returned record's own
+      ``.links.<name>`` performs. Served-entry-type relationship names are
+      also added to the request's ``include=`` parameter automatically.
+
+      :param variable: Root variable, portable scalar field, or relationship namespace to project.
+      :param name: Output name.
+      :raises ValueError: If the name is empty or duplicated.
+      :raises httk.store.UnsupportedQueryError: If the output belongs elsewhere.
+
+
+
+   .. py:method:: add_sort(field, descending = False)
+
+      Append a sortable field to the remote query.
+
+      :param field: Field exposed by this searcher's variable.
+      :param descending: Sort in descending order when true.
+      :raises httk.store.UnsupportedQueryError: If the field is not portable or sortable.
+
+
+
+   .. py:method:: set_limit(limit)
+
+      Set the query result limit.
+
+      :param limit: Nonnegative limit, or a negative value for no bound.
+
+
+
+   .. py:method:: add_offset(offset)
+
+      Advance the query offset.
+
+      :param offset: Nonnegative number of matching rows to skip.
+
+
+
+   .. py:method:: count()
+
+      Return the filtered remote count.
+
+      A valid optional ``meta.data_returned`` is the fast path. If it is
+      absent or ``null``, counting raises unless the store enables ID
+      pagination explicitly.
+
+      :return: Exact number of filtered remote results.
+      :raises CountUnavailableError: If no valid count is reported and ID pagination is disabled.
+
+
+
+   .. py:method:: results(**outputs)
+
+      Freeze the query as a lazy, re-iterable result set.
+
+      :param \*\*outputs: Optional output names mapped to this searcher's projections.
+      :return: Frozen remote result plan.
+      :raises ValueError: If no outputs are declared.
+
+
+
+   .. py:method:: slicer(target)
+
+      A pandas-style ``[]`` indexing view over one discovered entry endpoint.
+
+      Each terminal indexing operation runs against a fresh searcher minted
+      with this searcher's ``response_fields`` policy, so slicer operations
+      never share filter state. No sorting is offered here -- use
+      :meth:`~httk.store.optimade.client.OptimadeStore.searcher` and :meth:`add_sort` directly for a
+      sorted or relationship query.
+
+      :param target: The discovered remote entry endpoint to index.
+      :return: A slicer over ``target``.
+
+
+
+.. py:class:: RemoteResultColumn(result, index)
+
+   Expose one named scalar projection from a lazy result set.
+
+   :param result: Result set owning the projection.
+   :param index: Zero-based projection index.
+
+
+   .. py:attribute:: name
+
+
+.. py:class:: RemoteResultSet(searcher, outputs = None)
+
+   Represent a frozen, lazy, and re-iterable remote result plan.
+
+   :param searcher: Search plan to clone.
+   :param outputs: Optional output names mapped to the searcher's projections.
+
+
+   .. py:attribute:: names
+
+
+   .. py:method:: first()
+
+      Return the first result, if present.
+
+      :return: First row or ``None``.
+
+
+
+   .. py:method:: one()
+
+      Return the only result.
+
+      :return: Sole result row.
+      :raises httk.store.NoResultError: If no result exists.
+      :raises httk.store.MultipleResultsError: If more than one result exists.
+
+
+
+   .. py:method:: scalars(name = None)
+
+      Iterate one named scalar output from each result.
+
+      :param name: Output name, or ``None`` when exactly one exists.
+      :return: Iterator over scalar values.
+      :raises KeyError: If the named output is unknown.
+      :raises ValueError: If no name is given and multiple outputs exist.
+
+
+
+   .. py:method:: column(name)
+
+      Return a lazy column for a scalar output.
+
+      :param name: Scalar output name.
+      :return: Lazy result column.
+      :raises KeyError: If the output is unknown.
+      :raises TypeError: If the output is a whole-record projection.
+
+
+
+   .. py:method:: cursor()
+      :abstractmethod:
+
+
+      Reject unsupported cursor access.
+
+      :return: Never; remote OPTIMADE cursors are unsupported.
+      :raises NotImplementedError: Remote OPTIMADE cursors are unavailable.
+
+
+

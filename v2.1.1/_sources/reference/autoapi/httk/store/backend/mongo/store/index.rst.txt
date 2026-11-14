@@ -1,0 +1,425 @@
+httk.store.backend.mongo.store
+==============================
+
+.. py:module:: httk.store.backend.mongo.store
+
+.. autoapi-nested-parse::
+
+   MongoDB store layout initialization and collection preparation.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.store.StoreClockRegressionError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.mongo.store.MongoStore
+
+
+Module Contents
+---------------
+
+.. py:exception:: StoreClockRegressionError(mark_ns, clock_ns)
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   A writable store clock is behind its process-local timestamp mark.
+
+
+.. py:class:: MongoStore(database, *, entry_records = None, entry_families = None, entry_ids = None, store_timestamps = True, store_timestamp_resolution = 1000, allow_clock_regression = False, clock_regression_grace = True, upgrade = False)
+
+   Object store foundation for MongoDB-backed storable records.
+
+   Construction stamps a new empty database or validates the existing layout
+   declaration.  Record collections are deliberately created only by the
+   explicit :meth:`ensure_collections` operation; save and fetch belong to a
+   later phase.
+
+   :param database: The MongoDB database wrapper.
+   :param entry_records: The required entry-family declaration on first open.
+   :param entry_families: Application-owned declarations which bypass global registration.
+   :param entry_ids: Optional scheme used to mint ids for defined entry families.
+   :param store_timestamps: Whether saved parent documents receive timestamps.
+   :param store_timestamp_resolution: Nanoseconds represented by one stored unit.
+   :param allow_clock_regression: Whether to disable the process-local clock guard.
+   :param clock_regression_grace: Whether to wait briefly for sub-millisecond regressions.
+   :param upgrade: Whether to apply a purely additive schema-fingerprint change
+       on reopen instead of raising.  Documents are schemaless, so the physical
+       apply is a no-op and only the stored fingerprint is re-stamped;
+       non-additive or non-schema differences still raise.
+   :raises TypeError: If the first open omits both declaration forms.
+   :raises ~httk.store.storage_layout.StorageLayoutUpgradeRequiredError: If the
+       persisted layout is not trusted by this implementation.
+
+
+   .. py:attribute:: supports_page
+      :value: True
+
+
+      Whether this backend implements keyset result paging.
+
+
+   .. py:property:: layout
+      :type: httk.store.storage_layout.StorageLayout
+
+
+      Return the immutable persisted entry declaration.
+
+      :return: The normalized storage layout.
+
+
+   .. py:property:: entry_layout
+      :type: tuple[httk.store.storage_layout.EntryFamilyLayout, ...]
+
+
+      Return configured entry-family layouts in stable order.
+
+      :return: The configured entry-family layouts.
+
+
+   .. py:property:: entry_records
+      :type: collections.abc.Mapping[type, tuple[type, ...]]
+
+
+      Return configured family classes mapped to backing classes.
+
+      :return: The normalized entry declaration keyed by family class.
+
+
+   .. py:property:: store_timestamps
+      :type: bool
+
+
+      Whether parent documents carry store-managed timestamps.
+
+
+   .. py:property:: store_timestamp_resolution
+      :type: int | None
+
+
+      Return nanoseconds per stored timestamp unit, or ``None`` when disabled.
+
+
+   .. py:method:: ensure_collections(*classes)
+
+      Synchronously create or update record collections and their indexes.
+
+      :param \*classes: Storable record classes whose collections should be
+          prepared.  A configured multi-record family also prepares its
+          dispatch collection.
+      :return: None.
+      :raises ValueError: If a requested physical name is reserved.
+
+
+
+   .. py:method:: transaction()
+
+      Return a flat explicit MongoDB transaction context manager.
+
+      :return: A context that commits on normal exit and aborts on exception.
+      :raises TransactionsUnavailableError: If this store is in degraded mode.
+
+
+
+   .. py:method:: clear_stale_lock()
+
+      Clear a stale fsck lease after verifying its owner is dead.
+
+      This is an administrative operation. Clearing a merely slow fsck can
+      corrupt the store because the lease protocol intentionally has no
+      fencing token.
+
+      :return: None.
+      :raises StoreLockedError: If the fsck lease is still fresh.
+
+
+
+   .. py:method:: fsck(*, repair = True, collect_garbage = True, repair_conflicts = False, force = False, clamp_future_timestamps = False, known_types = ())
+
+      Exclusively repair dispatch integrity and collect orphan dependencies.
+
+      Main-role records and dispatch-addressed records are roots. Only
+      dependency-role documents are eligible for collection; fsck never
+      creates a dispatch for a dependency-role backing.
+
+      :param repair: Insert missing dispatches for main multi-family backings.
+      :param collect_garbage: Delete unmarked dependency documents.
+      :param repair_conflicts: Delete invalid dispatch documents after reporting them.
+      :param force: Administrative stale-lease override for the fsck handshake.
+      :param clamp_future_timestamps: Clamp timestamps beyond the allowed future slack when repairing.
+      :param known_types: Record classes that attribute ordinary collections
+          from earlier store sessions, allowing a safe sweep after reopen.
+      :return: An immutable :class:`~httk.store.backend.mongo.fsck.FsckSummary`.
+
+
+
+   .. py:method:: save(obj, *, as_record = None, id_series = None, alternative_of = None, alternative_kind = None, links = None)
+
+      Store an object graph and return its integer sid.
+
+      Passing ``alternative_of`` (a stored main entry's id) with
+      ``alternative_kind`` saves ``obj`` as a named ALTERNATIVE representation
+      of that main: it copies the main's public ``id``, joins the main's
+      alternative group, and hashes with the group identity folded in so its
+      content never dedups onto the main. The main must live in ``obj``'s own
+      backing collection and must itself be a main (not another alternative).
+
+      :param obj: The object or projected domain object to store.
+      :param as_record: An explicit alternate storage-record class.
+      :param id_series: Override the configured entry-id series when an id must be minted.
+      :param alternative_of: The stored main entry's id this record is an alternative of, if any.
+      :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
+      :param links: Weak links to add after saving, mapping each declared link name to a target or iterable of targets; the save and every link are applied in one atomic transaction.
+      :return: The stored sid.
+      :raises TypeError: If ``obj`` is a cursor proxy.
+      :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing collection, or itself an alternative.
+      :raises ~httk.core.storage.StorageProjectionCycleError: If the projected graph cycles.
+      :raises ~httk.store.store_common.EntryMetadataConflictError: If identity-excluded metadata conflicts.
+
+
+
+   .. py:method:: fetch[T](cls, sid, *, eager = False)
+
+      Fetch and hydrate ``cls`` at ``sid``.
+
+      The ``eager`` flag is accepted for backend transparency with
+      :class:`~httk.store.backend.sql.store.SqlStore`; the Mongo document is fully in
+      memory at read, so the returned record is always materialized and its
+      values and semantics are identical either way.
+
+      :param cls: The storable record class.
+      :param sid: The integer sid.
+      :param eager: Accepted for interface parity; a materialized record is always returned.
+      :return: The hydrated record.
+      :raises KeyError: If the record does not exist.
+
+
+
+   .. py:method:: fetch_many[T](cls, sids, *, eager = False)
+
+      Fetch and hydrate ``cls`` at each sid in ``sids``.
+
+      The ``eager`` flag is accepted for backend transparency; Mongo always
+      returns materialized records (see :meth:`fetch`).
+
+      :param cls: The storable record class.
+      :param sids: The integer sids to fetch.
+      :param eager: Accepted for interface parity; materialized records are always returned.
+      :return: The hydrated records in ``sids`` order.
+      :raises KeyError: If any record does not exist.
+
+
+
+   .. py:method:: fetch_by_content_id[T](cls, key, *, eager = False)
+
+      Fetch a content-addressed record, or return ``None``.
+
+      The ``eager`` flag is accepted for backend transparency; Mongo always
+      returns a materialized record (see :meth:`fetch`).
+
+      :param cls: The storable record class.
+      :param key: The content identity.
+      :param eager: Accepted for interface parity; a materialized record is always returned.
+      :return: The hydrated record or ``None``.
+      :raises ~httk.store.backend.schema.SchemaError: If ``cls`` is not content-id deduplicated.
+
+
+
+   .. py:method:: fetch_entry(family_cls, content_id, *, eager = False)
+
+      Fetch the concrete backing record for an entry-family identity.
+
+      The ``eager`` flag is accepted for backend transparency; Mongo always
+      returns a materialized record (see :meth:`fetch`).
+
+      :param family_cls: The configured entry-family class.
+      :param content_id: The entry content identity.
+      :param eager: Accepted for interface parity; a materialized record is always returned.
+      :return: The backing record or ``None``.
+      :raises ValueError: If the family is not configured.
+      :raises ~httk.store.store_common.EntryDispatchIntegrityError: If dispatch and backing disagree.
+
+
+
+   .. py:method:: sid_of(obj, *, as_record = None)
+
+      Return the sid known for ``obj``, using content lookup when allowed.
+
+      :param obj: The object whose sid is requested.
+      :param as_record: An explicit alternate record class.
+      :return: The sid, or ``None``.
+
+
+
+   .. py:method:: replace(predecessor, obj, *, id_series = None, links = None)
+
+      Store ``obj`` as a logical replacement of ``predecessor`` and return its sid.
+
+      The saved document copies ``predecessor``'s ``logical_id`` (its lineage
+      identity) instead of starting a fresh one, so both documents share the
+      lineage :meth:`history` walks. Nothing is updated or deleted: plain
+      :meth:`fetch` and :meth:`searcher` queries keep returning both documents,
+      and the lineage's latest document is simply the one with the highest sid.
+      ``predecessor`` need not itself be the latest document of its lineage —
+      replacing an already-replaced document is allowed and extends the same
+      lineage. ``obj`` is saved through the ordinary :meth:`save` path, so its
+      dedup policy, timestamp capture, identity caching and entry-family
+      dispatch all behave exactly as they do there.
+
+      If ``obj``'s content deduplicates onto an existing document (under the
+      ``"content_id"`` or ``"by_value"`` policies), that document's lineage is
+      compared with ``predecessor``'s: an equal lineage (including ``obj``
+      equalling ``predecessor`` itself) is an idempotent no-op returning the
+      existing sid, while a different lineage raises
+      :class:`~httk.store.store_common.EntryReplacementError`.
+
+      ``links`` optionally adds weak links to the replacement's lineage, as in
+      :meth:`save`; the replace and every link are applied in one atomic
+      transaction.
+
+      :param predecessor: The stored instance being replaced; it must have been stored or fetched through this store.
+      :param obj: The replacement object to store.
+      :param id_series: Override the configured entry-id series when an id must be minted.
+      :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
+      :return: The stored replacement document's sid.
+      :raises ValueError: If ``predecessor`` is not known to this store, or ``obj``'s record collection differs from ``predecessor``'s.
+      :raises ~httk.store.store_common.EntryReplacementError: If ``obj`` deduplicates onto a document from a different lineage.
+
+
+
+   .. py:method:: link(source, name, target)
+
+      Assert a weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+      Weak links live in a dedicated append-only link collection and bind
+      *lineages*: both endpoints always resolve to their latest revision. The
+      operation is idempotent per the pair ``(source lineage, target
+      lineage)`` — a live pair is a no-op, a retracted pair is revived, an
+      absent pair founds a fresh link lineage — and duplicate pair lineages
+      (from concurrent writers, which Mongo transactions do not exclude) are
+      tolerated: the pair is live if any lineage is live.
+
+      :param source: The stored source instance declaring the link.
+      :param name: The declared weak-link name.
+      :param target: The stored target instance whose type matches the link declaration.
+      :return: None.
+      :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+      :raises TypeError: If ``target``'s type does not match the link's declared target.
+      :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+      :raises TransactionsUnavailableError: If this store is in degraded mode.
+
+
+
+   .. py:method:: unlink(source, name, target)
+
+      Retract the weak link named ``name`` from ``source``'s lineage to ``target``'s lineage.
+
+      Retracts every live lineage of the pair (duplicate-tolerant); an absent
+      or already-retracted pair is a no-op. Retraction appends a revision — no
+      document is deleted, and history/``as_of`` still see the earlier live rows.
+
+      :param source: The stored source instance declaring the link.
+      :param name: The declared weak-link name.
+      :param target: The stored target instance whose type matches the link declaration.
+      :return: None.
+      :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+      :raises TypeError: If ``target``'s type does not match the link's declared target.
+      :raises ValueError: If ``source`` or ``target`` is not stored in this store.
+      :raises TransactionsUnavailableError: If this store is in degraded mode.
+
+
+
+   .. py:method:: linked(source, name, *, eager = False)
+
+      Return the latest revisions of the targets currently linked from ``source`` under ``name``.
+
+      Targets are deduplicated by lineage and ordered by first-link order (the
+      link lineage's root ``logical_id``, ascending; stable across
+      retract+relink). Each returned object is the latest revision of its
+      target lineage. ``eager`` is accepted for interface parity with the SQL
+      store; a Mongo fetch is always fully materialized.
+
+      :param source: The stored source instance declaring the link.
+      :param name: The declared weak-link name.
+      :param eager: Accepted for interface parity; a materialized record is always returned.
+      :return: The linked targets' latest revisions, deduplicated and ordered by first-link order.
+      :raises httk.store.backend.schema.SchemaError: If ``source``'s class declares no link named ``name``.
+      :raises ValueError: If ``source`` is not stored in this store.
+
+
+
+   .. py:method:: history(obj)
+
+      Return every record in ``obj``'s replacement lineage, oldest first.
+
+      The lineage is the set of documents sharing ``obj``'s ``logical_id`` — the
+      fresh record that started it and every :meth:`replace` of it — ordered by
+      sid ascending (the fresh record first, the latest replacement last).
+      Records are reconstructed through the same machinery as :meth:`fetch`.
+
+      :param obj: A stored instance whose lineage to walk; it must have been stored or fetched through this store.
+      :return: The lineage's records ordered by ascending sid.
+      :raises ValueError: If ``obj`` is not known to this store.
+
+
+
+   .. py:method:: searcher(*, as_of = None, only_latest = False, only_main_alt = True)
+
+      Return a Mongo searcher bound to this store's read path.
+
+      Queries use the active transaction session when one is open, so they
+      see that transaction's uncommitted writes, and object outputs hydrate
+      through :meth:`fetch`, preserving the identity-cache contract.
+
+      :param as_of: Optional historic cutoff in canonical timestamp form.
+      :param only_latest: Whether root variables are restricted to the latest document of each
+          ``logical_id`` lineage by sid (bounded by ``as_of`` when given). Reference/child
+          scopes stay unfiltered so pinned references may still resolve replaced documents.
+      :param only_main_alt: Whether root variables are restricted to mains (``alt_kind`` absent),
+          hiding named alternatives. Defaults to ``True``; pass ``False`` to reveal alternatives.
+      :return: A new MongoDB searcher bound to this store.
+
+
+
+   .. py:method:: stored_property_plan(family)
+
+      Return the wire-form Mongo stored-property plan for one configured entry family.
+
+      This method is a serving edge: like the entry providers, it serves the
+      family's definition in OPTIMADE wire form (``served_form()``), so a
+      prefixed family whose ``__httk_stored_properties__`` keys are served
+      names plans correctly. ``served_form()`` is idempotent for standard
+      (unprefixed) families, so their plans are byte-identical.
+
+      :param family: The logical entry-family class to plan.
+      :return: The validated Mongo stored-property plan.
+
+
+
+   .. py:method:: referring(cls, *, field, to, eager = False)
+
+      Return records whose reference field points at ``to``, ordered by sid.
+
+      The ``eager`` flag is accepted for backend transparency; Mongo always
+      returns materialized records (see :meth:`fetch`).
+
+      :param cls: The referring record class.
+      :param field: The reference field.
+      :param to: The stored target instance.
+      :param eager: Accepted for interface parity; materialized records are always returned.
+      :return: Matching records ordered by sid.
+      :raises ~httk.store.backend.schema.SchemaError: If the field or target class is incompatible.
+      :raises ValueError: If ``to`` is not stored or fetched here.
+
+
+

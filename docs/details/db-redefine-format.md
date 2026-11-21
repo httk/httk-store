@@ -317,16 +317,16 @@ A reopened store finds the record class through its registration:
 ## 9. Serve it
 
 *httk-serve* serves the store as an OPTIMADE API. With a registration package
-on the import path, no extra option is needed. For a one-off, `--records`
+on the import path, no extra option is needed. For a one-off, `--record-class`
 imports the record module, and with it the module-level registration, from the
 working directory:
 
 ```console
-$ httk serve optimade check sites.duckdb --records sites_layout:SitesStructureRecord
-$ httk serve optimade serve sites.duckdb --records sites_layout:SitesStructureRecord
+$ httk serve sites.duckdb --no-site --check --record-class sites_layout:SitesStructureRecord
+$ httk serve sites.duckdb --no-site --record-class sites_layout:SitesStructureRecord
 ```
 
-`check` opens the store and tests every endpoint without serving. Filters
+`--check` opens the store and tests every endpoint without serving. Filters
 then work on the queried properties:
 
 ```text
@@ -337,7 +337,7 @@ then work on the queried properties:
 
 The *httk-serve* page
 [Deploying a store as an OPTIMADE service](https://docs.httk.org/httk-serve/dev/main/optimade/deployment.html#application-record-classes)
-describes `--records` and the other options.
+describes `--record-class` and the other options.
 
 ## 10. Collect into it from workflows
 
@@ -377,7 +377,7 @@ table. Without it, such a job reports a `storage_error` that names the missing
   multi-column child rows without a link table are not supported.
 - A filter on a response-only property answers 501 "not implemented".
 - Every reopen needs the registration, whether from the module-level call,
-  `--records` or a registration package.
+  `httk serve --record-class` or a registration package.
 - Numeric structures are refused unless your projection accepts them through
   its canonical source.
 - The structure row's content identity is that of your record. The same

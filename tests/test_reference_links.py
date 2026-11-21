@@ -96,7 +96,7 @@ def test_references_link_serves_and_filters(store_factory) -> None:
         assert link.table_name in store._database.database.list_collection_names()  # type: ignore[attr-defined]
         pytest.skip("stored-federation serving, filtering and the sequence/reopen checks are SQL-only")
 
-    # Served relationships (the `httk serve optimade` stored federation path).
+    # Served relationships (the `httk serve --no-site` stored federation path).
     for family, citing in ((RunEntry, run), (FileEntry, file), (DataRecordEntry, energy)):
         page = _query(store, family, f'id = "{citing.id}"')
         (relationships,) = page.relationships  # type: ignore[attr-defined]

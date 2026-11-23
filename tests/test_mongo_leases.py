@@ -84,8 +84,10 @@ def test_force_cannot_replace_fresh_fsck_and_displaced_owner_detects_loss(mongo_
     MongoStore(mongo_test_database, entry_records={})
     fsck = acquire_fsck(database, timing=_FAST)
     try:
+        # Judged fresh by a 10 s staleness window: _FAST's 80 ms one could lapse under load before the attempt.
+        patient = LeaseTiming(refresh_interval=5, stale_multiplier=2, poll_initial=0.005, poll_max=0.01)
         with pytest.raises(StoreLockedError, match="fresh"):
-            acquire_fsck(database, force=True, timing=_FAST)
+            acquire_fsck(database, force=True, timing=patient)
         database[METADATA_COLLECTION].update_one({"_id": "lease/fsck"}, {"$set": {"owner": "replacement"}})
         with pytest.raises(LeaseLostError, match="lost"):
             fsck.refresh_heartbeat(force=True)

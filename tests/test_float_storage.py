@@ -1,5 +1,6 @@
 """Plain floats are one DOUBLE column (storage protocol "3"): no ``*_exact`` text, signed zero stored as 0.0, NaN."""
 
+import gc
 import math
 import pathlib
 from dataclasses import dataclass
@@ -157,3 +158,28 @@ def test_duckdb_stores_nan(mode: str) -> None:
     _save(store, mode, Series("s", (1.0, math.nan)))
     first, second = _only(store, Series).values
     assert first == 1.0 and math.isnan(second)
+
+
+def test_parallel_workers_never_finalize_inherited_garbage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forked worker's collector must not finalize the parent's unreferenced DuckDB connection (segfault)."""
+    duckdb = pytest.importorskip("duckdb")
+    from httk.store.backend.sql import bulk_parallel
+
+    original = bulk_parallel._worker_main
+
+    def collecting_worker(*args: Any) -> None:
+        gc.collect()  # what any worker allocation may trigger
+        original(*args)
+
+    monkeypatch.setattr(bulk_parallel, "_worker_main", collecting_worker)
+    gc.disable()  # keep the cycle uncollected in the parent until the fork
+    try:
+        garbage: list[Any] = [duckdb.connect()]
+        garbage.append(garbage)
+        del garbage
+        store = _store("sqlite")
+        _save(store, "parallel", Noted("a", 1.0), Noted("b", 2.0))
+        assert len(_rows(store, Noted)) == 2
+    finally:
+        gc.enable()
+        gc.collect()

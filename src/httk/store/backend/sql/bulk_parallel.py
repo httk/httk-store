@@ -938,11 +938,18 @@ class ParallelController:
         self._closed = False
 
     def start(self) -> None:
+        import gc
         import warnings
 
         global _PARENT_STORE, _PARENT_CONFIG
         _PARENT_STORE = self._store
         _PARENT_CONFIG = self._config
+        # Freeze the heap across fork(): a child's collector must never finalize
+        # inherited garbage (e.g. an unreferenced DuckDB connection), whose native
+        # destructor touches threads that do not exist in the child and segfaults.
+        # An application's own earlier freeze is left in place.
+        application_frozen = gc.get_freeze_count() > 0
+        gc.freeze()
         try:
             for index in range(self._workers):
                 process = self._context.Process(
@@ -959,6 +966,8 @@ class ParallelController:
                 self._processes.append(process)
         finally:
             # The children have forked; the parent no longer needs the globals.
+            if not application_frozen:
+                gc.unfreeze()
             _PARENT_STORE = None
             _PARENT_CONFIG = None
 

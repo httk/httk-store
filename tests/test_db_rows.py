@@ -3,6 +3,7 @@
 import copy
 import gc
 import pickle
+import weakref
 from dataclasses import asdict, dataclass, field, replace
 from typing import Annotated, ClassVar
 
@@ -588,15 +589,16 @@ def test_dead_proxy_is_rehydrated_on_next_default_fetch(database):
     sid = store.save(ParityRecord("A", 1))
     store._clear_identity_caches()
     first = store.fetch(ParityRecord, sid)
-    first_id = id(first)
+    # Not id(): CPython may give the re-hydrated proxy the dead one's address.
+    dead = weakref.ref(first)
     # Proxies sit in a reference cycle with their pinned chunk; only the cyclic
     # GC reclaims them, so force a collection before asserting re-hydration.
     del first
     gc.collect()
+    assert dead() is None
     second = store.fetch(ParityRecord, sid)
     assert is_lazy_row(second)
     assert second == ParityRecord("A", 1)
-    assert id(second) != first_id
 
 
 def test_materialized_wins_eager_then_lazy_returns_instance(database):

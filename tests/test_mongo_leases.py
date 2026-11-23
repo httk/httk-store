@@ -18,6 +18,8 @@ class LeaseRecord:
 
 
 _FAST = LeaseTiming(refresh_interval=0.04, stale_multiplier=2, poll_initial=0.005, poll_max=0.01)
+#: Polls as fast, but a lease stays fresh for 10 s: for tests whose leases must not lapse under load.
+_PATIENT = LeaseTiming(refresh_interval=5, stale_multiplier=2, poll_initial=0.005, poll_max=0.01)
 
 
 def test_writer_is_blocked_by_fresh_and_stale_fsck_leases(mongo_test_database) -> None:
@@ -35,13 +37,15 @@ def test_writer_is_blocked_by_fresh_and_stale_fsck_leases(mongo_test_database) -
 def test_fsck_waits_for_registered_writer_and_is_singleton(mongo_test_database) -> None:
     database = mongo_test_database.database
     MongoStore(mongo_test_database, entry_records={})
-    writer = acquire_writer(database, timing=_FAST)
+    # _PATIENT: an unrefreshed _FAST writer lease could go stale under load before its release, which fsck
+    # (correctly) refuses to pass without force.
+    writer = acquire_writer(database, timing=_PATIENT)
     acquired = threading.Event()
     result: list[object] = []
 
     def acquire() -> None:
         try:
-            result.append(acquire_fsck(database, timing=_FAST))
+            result.append(acquire_fsck(database, timing=_PATIENT))
             acquired.set()
         except BaseException as error:  # pragma: no cover - assertion below reports it.
             result.append(error)
@@ -57,9 +61,9 @@ def test_fsck_waits_for_registered_writer_and_is_singleton(mongo_test_database) 
     assert not isinstance(fsck, BaseException)
     try:
         with pytest.raises(StoreLockedError):
-            acquire_fsck(database, timing=_FAST)
+            acquire_fsck(database, timing=_PATIENT)
         with pytest.raises(StoreLockedError):
-            acquire_writer(database, timing=_FAST)
+            acquire_writer(database, timing=_PATIENT)
     finally:
         fsck.release()  # type: ignore[union-attr]
 
@@ -84,10 +88,9 @@ def test_force_cannot_replace_fresh_fsck_and_displaced_owner_detects_loss(mongo_
     MongoStore(mongo_test_database, entry_records={})
     fsck = acquire_fsck(database, timing=_FAST)
     try:
-        # Judged fresh by a 10 s staleness window: _FAST's 80 ms one could lapse under load before the attempt.
-        patient = LeaseTiming(refresh_interval=5, stale_multiplier=2, poll_initial=0.005, poll_max=0.01)
+        # Judged fresh by _PATIENT: _FAST's 80 ms staleness window could lapse under load before the attempt.
         with pytest.raises(StoreLockedError, match="fresh"):
-            acquire_fsck(database, force=True, timing=patient)
+            acquire_fsck(database, force=True, timing=_PATIENT)
         database[METADATA_COLLECTION].update_one({"_id": "lease/fsck"}, {"$set": {"owner": "replacement"}})
         with pytest.raises(LeaseLostError, match="lost"):
             fsck.refresh_heartbeat(force=True)

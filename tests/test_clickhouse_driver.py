@@ -53,7 +53,9 @@ def test_driver_query_formats_preserve_options_and_percent_escaping(monkeypatch,
         statement = sqlalchemy.select(
             sqlalchemy.literal_column("payload", type_=sqlalchemy.LargeBinary() if binary else sqlalchemy.String())
         ).execution_options(query_formats=statement_formats, settings=statement_settings)
-        options = sqlalchemy.util.immutabledict(query_formats=connection_formats, settings=connection_settings)
+        # A positional mapping: SQLAlchemy's pure-Python immutabledict (no compiled extension, e.g. on Python 3.15)
+        # takes no keyword arguments.
+        options = sqlalchemy.util.immutabledict({"query_formats": connection_formats, "settings": connection_settings})
         context = SimpleNamespace(
             invoked_statement=statement,
             execution_options=options,

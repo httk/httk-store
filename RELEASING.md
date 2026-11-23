@@ -41,7 +41,7 @@ change the package version for you.
 Preparation checks the current working tree in an isolated environment. It
 ensures the documentation lock is current, refreshes the committed inventories
 from published documentation, and runs CI, the normal tests on Python 3.12,
-3.13, and 3.14, strict release documentation, distribution checks, a clean
+3.13, 3.14, and 3.15, strict release documentation, distribution checks, a clean
 locked documentation installation, and isolated package checks. Internal
 `httk-*` dependencies and their versioned documentation
 must already be published at the required versions; preparation uses the network

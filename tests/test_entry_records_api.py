@@ -175,7 +175,10 @@ def test_decorated_only_records_layout_is_unchanged() -> None:
         # NumericUnitcellStructureRecord is not part of these layouts.
         # Re-pinned November 13, 2026 (FU7): the unit-cell structure gained its bond network
         # reference and two bond-source references (additive: new nullable columns and tables).
-        (ResultWithStructure,): "4ab72ae883b05698",
+        # Re-pinned November 23, 2026: FileRecord gained the indexed `content_sha256` column
+        # (httk-core da6b815), reached via the structure source_file; dropping that field alone
+        # reproduces the previous 4ab72ae883b05698.
+        (ResultWithStructure,): "b0eae08ce39e930f",
         (Result,): "84a01b57df46e5e0",
         (Alpha, Beta): "0e5c3dbfcf40770e",
     }

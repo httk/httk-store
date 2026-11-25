@@ -178,7 +178,11 @@ def test_decorated_only_records_layout_is_unchanged() -> None:
         # Re-pinned November 23, 2026: FileRecord gained the indexed `content_sha256` column
         # (httk-core da6b815), reached via the structure source_file; dropping that field alone
         # reproduces the previous 4ab72ae883b05698.
-        (ResultWithStructure,): "b0eae08ce39e930f",
+        # Re-pinned November 25, 2026 (additive: a new nullable column and a new table): the unit-cell
+        # structure gained the `bonds_dimensions_mask` column (httk-atomistic 0e4b936, alone
+        # 1f5cf5b9cc629370) and its bond network the nullable `torsions` reference to the new
+        # BondTorsionsRecord table plus a torsions-source reference (httk-atomistic 40d0659).
+        (ResultWithStructure,): "167cf05b3e5f3727",
         (Result,): "84a01b57df46e5e0",
         (Alpha, Beta): "0e5c3dbfcf40770e",
     }

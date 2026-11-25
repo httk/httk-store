@@ -166,7 +166,7 @@ def test_run_links_to_every_curation_record_and_reopens(store_factory) -> None:
     for name in targets:
         assert [linked.id for linked in store.linked(run, name)] == [ids[name]]
     (note,) = store.linked(run, "notes")
-    assert (note.date, note.author, note.text) == (_DATE, "httk-test 1.0", "Removed a stray loop.")
+    assert (note.date, note.source, note.text) == (_DATE, "httk-test 1.0", "Removed a stray loop.")
 
     reopened = store_factory.reopen(store)
     assert dict(reopened.layout.declaration) == {"runs": ("core-run",), **_TARGET_FAMILIES}
@@ -263,7 +263,7 @@ def test_curation_records_serve_and_filter(store_factory) -> None:
     }
 
     (note_row,) = _query(store, NoteEntry).rows
-    assert (note_row["id"], note_row["_httk_author"], note_row["_httk_text"]) == (note.id, "curator", "Checked.")
+    assert (note_row["id"], note_row["_httk_source"], note_row["_httk_text"]) == (note.id, "curator", "Checked.")
     assert note_row["_httk_date"] is not None
     (tag_row,) = _query(store, TagEntry, '_httk_key = "x"').rows
     assert (tag_row["id"], tag_row["_httk_value"]) == (tag.id, "y")

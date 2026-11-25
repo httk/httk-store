@@ -188,7 +188,7 @@ family explicitly. Stores created before the standard links existed carry a
 different link layout and must be rebuilt: opening them with `upgrade=True` is
 refused. Served relationships are keyed `references`, `_httk_notes`,
 `_httk_tags` and `_httk_external_database_entries`, over the entry types of the
-same names (properties `_httk_date`, `_httk_author`, `_httk_text`; `_httk_key`,
+same names (properties `_httk_date`, `_httk_source`, `_httk_text`; `_httk_key`,
 `_httk_value`; `_httk_database`, `_httk_entry_id`, `_httk_url`, `_httk_role`).
 `bulk_ingest` does not support weak links, standard or declared.
 

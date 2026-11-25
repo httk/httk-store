@@ -650,7 +650,7 @@ Run.__httk_stored_properties__ = {  # type: ignore[attr-defined]
 }
 Note.__httk_stored_properties__ = {  # type: ignore[attr-defined]
     "_httk_date": _string_column_projection("date", timestamp=True),
-    "_httk_author": _string_column_projection("author"),
+    "_httk_source": _string_column_projection("source"),
     "_httk_text": _string_column_projection("text"),
 }
 Tag.__httk_stored_properties__ = {  # type: ignore[attr-defined]

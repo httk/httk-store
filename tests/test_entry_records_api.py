@@ -196,9 +196,11 @@ def test_decorated_only_records_layout_is_unchanged() -> None:
         # links (references, notes, tags, external) and the layouts the four link-target families.
         # Resolving only the previously declared `references` links (FileRecord, unit-cell structure)
         # and no target families reproduces 167cf05b3e5f3727 / 84a01b57df46e5e0 / 0e5c3dbfcf40770e.
-        (ResultWithStructure,): "be68932b14a19368",
-        (Result,): "1885909d7e27a4ec",
-        (Alpha, Beta): "ed9cdf0772454f31",
+        # Re-pinned November 25, 2026 (all three): the implicit notes family's `author` column became
+        # `source`; the previous pins were be68932b14a19368 / 1885909d7e27a4ec / ed9cdf0772454f31.
+        (ResultWithStructure,): "73e25798f4f226fe",
+        (Result,): "580468d366fd860d",
+        (Alpha, Beta): "f36d7e38afbc1f7c",
     }
     for records, digest in layouts.items():
         layout = normalize_entry_types(list(records))

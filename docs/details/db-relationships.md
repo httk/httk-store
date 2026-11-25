@@ -190,7 +190,9 @@ refused. Served relationships are keyed `references`, `_httk_notes`,
 `_httk_tags` and `_httk_external_database_entries`, over the entry types of the
 same names (properties `_httk_date`, `_httk_source`, `_httk_text`; `_httk_key`,
 `_httk_value`; `_httk_database`, `_httk_entry_id`, `_httk_url`, `_httk_role`).
-`bulk_ingest` does not support weak links, standard or declared.
+`bulk_ingest` supports weak links, standard or declared, through
+`bulk.save(obj, links=...)` on the serial `finalize="parity"` path only; the
+deferred and parallel paths refuse them for now (see the bulk-ingestion guide).
 
 ## Strong links (provenance edges)
 

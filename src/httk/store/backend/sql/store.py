@@ -2119,7 +2119,7 @@ class SqlStore:
         """Return a context manager that appends a stream of objects into this store.
 
         The returned :class:`~httk.store.backend.sql.bulk.BulkIngest` exposes
-        ``save(obj, *, as_record=None, promote=None) -> int`` mirroring :meth:`save`, but
+        ``save(obj, *, as_record=None, promote=None, links=None) -> int`` mirroring :meth:`save`, but
         buffers encoded rows with pre-assigned sids and appends them in
         executemany batches. On a physically empty store the record tables are
         created index-less and their separable indexes are built once the stream
@@ -2140,14 +2140,21 @@ class SqlStore:
         occurrence of that record class a top-level entry without a second
         projection or worker transfer. An iterable promotes several classes.
 
-        :param chunk_size: The number of top-level saves buffered before a flush.
+        ``save(..., links={name: targets})`` adds weak links as :meth:`save` does, but the targets need not be
+        stored first: each is saved as a deduplicated top-level entry of the ingest and the link rows are resolved
+        with :meth:`link` semantics at flush; each target counts as a save for ``chunk_size`` and ``on_progress``.
+        Only the serial ``finalize="parity"`` path supports a ``links`` mapping with at least one target so far;
+        the deferred and parallel paths validate it and then raise :class:`NotImplementedError`.
+
+        :param chunk_size: The number of top-level saves buffered before a flush; each link target counts as a save.
         :param verify_metadata: Whether content-id hits compare identity-excluded metadata.
         :param index_strategy: How an existing table's separable indexes are handled during the append —
             ``"keep"`` appends through them, ``"rebuild"`` drops and recreates them, and ``"auto"`` picks
             per table by the staged-to-existing row ratio. On DuckDB, which reserves a dropped index's name
             until commit, ``"rebuild"`` instead keeps the indexes and verifies content-id uniqueness with a
             duplicate scan; the final indexes are the same either way.
-        :param on_progress: An optional ``(records_buffered_total, rows_flushed_total)`` callback invoked after each flush.
+        :param on_progress: An optional ``(records_buffered_total, rows_flushed_total)`` callback invoked after each flush;
+            each link target counts as a buffered record.
         :param workers: The number of worker processes. ``1`` (the default) is the serial path with byte-for-byte
             unchanged semantics; ``>1`` encodes the stream in forked worker processes and merges their per-table
             shards set-wise. Parallel mode requires a physically empty target store (the offline-build use case) and,
@@ -4609,13 +4616,18 @@ class SqlStore:
         self, connection: sqlalchemy.Connection, spec: LinkSpec, target: Any, source_cls: type, name: str
     ) -> int:
         """Validate ``target``'s type against ``spec`` and resolve its lineage id."""
+        return self._lid_of(connection, self._link_target_cls(spec, target, source_cls, name), target)
+
+    @staticmethod
+    def _link_target_cls(spec: LinkSpec, target: Any, source_cls: type, name: str) -> type:
+        """Return ``target``'s storage record class, refusing one outside ``spec``'s target table."""
         target_cls = resolve_storage_record(target)
         if resolve_schema(target_cls).table_name != resolve_schema(spec.target).table_name:
             raise TypeError(
                 f"weak link {name!r} on {source_cls.__name__} expects a {spec.target.__name__} target, "
                 f"got {target_cls.__name__}"
             )
-        return self._lid_of(connection, target_cls, target)
+        return target_cls
 
     def _latest_link_by_lineage(
         self, connection: sqlalchemy.Connection, link_table: sqlalchemy.Table, source_lid: int, target_lid: int

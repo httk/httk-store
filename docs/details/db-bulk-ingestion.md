@@ -98,6 +98,41 @@ than one record type. Each class must be reachable from the envelope's stored
 schema; projection, role marking, and entry dispatch all remain inside the same
 worker task.
 
+**Weak links.** `bulk.save(obj, links={"notes": [...], "tags": ...})` adds
+weak links from the saved record's lineage, mapping each declared link name to
+one target or an iterable of targets, like `save(links=...)`. The targets need
+not be stored first: the ingest saves each one as a top-level entry,
+deduplicated like any other save, so an equal target the store already holds
+resolves to its existing row. At each flush the link rows follow `link()`: a
+pair that is already live is left alone, a retracted pair is revived under its
+old lineage, and a new pair founds a fresh one. The same pair given again, in
+the same chunk or a later one, adds no row. Each target counts as one save
+towards `chunk_size` and the `on_progress` record total. An undeclared link name
+raises `httk.store.backend.schema.SchemaError` and a target of the wrong type
+raises `TypeError`, both at the `save()` call and before anything is buffered; a
+failing target save records none of that call's links. Only the serial parity
+finalizer supports links for now: under `finalize="deferred"` (including
+`"auto"` when it selects deferred) or `workers>1`, a `links` mapping with at
+least one target is validated and then raises `NotImplementedError`, so pass
+`finalize="parity"`.
+
+```python
+import datetime
+
+from httk.core import Run, RunEntry
+from httk.core.curation import Note, Tag
+from httk.store import EntryIdScheme
+from httk.store.backend.sql import Backend, SqlStore
+
+store = SqlStore(
+    Backend.sqlite(), entry_records={RunEntry: Run}, entry_ids=EntryIdScheme("example.org", "1")
+)
+note = Note(datetime.datetime(2026, 11, 25, tzinfo=datetime.UTC), "importer 1.0", "Dropped a stray loop.")
+with store.bulk_ingest(finalize="parity") as bulk:
+    bulk.save(Run(source_id="job-1"), links={"notes": note, "tags": Tag("source", "cod")})
+    bulk.save(Run(source_id="job-2"), links={"notes": [note]})  # the same Note row, a second link
+```
+
 **`verify_metadata`** (default `True`, a plain `bool`) controls whether a
 content-id hit compares its identity-excluded metadata against the first
 in-memory occurrence — or against the stored row for a hit against existing
@@ -149,10 +184,12 @@ buffered before a flush. Buffered rows and the in-memory dedup indexes are held
 until the next flush, so peak memory scales with the chunk size and each
 record's fan-out into child and reference rows: lower it for very wide records
 or a tight memory budget, raise it to amortize the staging round-trips over more
-rows. Identity caches are deliberately not populated by bulk ingestion.
+rows. Each weak-link target passed through `links=` counts as one save. Identity
+caches are deliberately not populated by bulk ingestion.
 
 **`on_progress`** is an optional `(records_buffered_total, rows_flushed_total)`
-callback invoked after each flush, for progress reporting over a long build.
+callback invoked after each flush, for progress reporting over a long build;
+each weak-link target counts as a buffered record.
 
 ## Performance
 

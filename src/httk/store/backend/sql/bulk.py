@@ -92,6 +92,7 @@ Two behaviors diverge from the per-record ``save()`` loop:
 """
 
 import contextlib
+import itertools
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -124,9 +125,12 @@ from httk.store.backend.sql.mapping import (
     ENTRY_ID_OWNERS_TABLE_NAME,
     IMMUTABLE_ID_OWNERS_TABLE_NAME,
     LOGICAL_ID_COLUMN,
+    RETRACTED_COLUMN,
     ROLE_COLUMN,
     SID_COLUMN,
+    SOURCE_LID_COLUMN,
     STORE_TIMESTAMP_COLUMN,
+    TARGET_LID_COLUMN,
     backing_dispatch_column_name,
     entry_dispatch_table_name,
 )
@@ -136,6 +140,7 @@ from httk.store.backend.sql.store import (
     _encode_parent_row,
     _encode_promoted_descendants,
     _field_path,
+    _iter_link_targets,
     _metadata_scalar_equal,
     _reject_nan,
 )
@@ -159,6 +164,9 @@ __all__ = ["BulkIngest"]
 # existing rows). This is a placeholder threshold; P4's benchmark phase
 # calibrates it against measured index-build versus keep-and-append costs.
 _AUTO_REBUILD_DIVISOR = 4
+
+# The IN-list size of the weak-link lineage lookups, below every backend's bind-parameter limit.
+_LINK_LOOKUP_BATCH = 10_000
 
 
 class _SerialDeferredStage:
@@ -217,10 +225,11 @@ class BulkIngest:
     loader/finalizer owns the durable ingest path.
 
     :param store: The store to ingest into.
-    :param chunk_size: The number of top-level saves buffered before a flush.
+    :param chunk_size: The number of top-level saves buffered before a flush; each link target counts as a save.
     :param verify_metadata: Whether content-id hits compare identity-excluded metadata.
     :param index_strategy: How existing tables' separable indexes are handled during the append.
-    :param on_progress: An optional ``(records_buffered_total, rows_flushed_total)`` callback invoked after each flush.
+    :param on_progress: An optional ``(records_buffered_total, rows_flushed_total)`` callback invoked after each flush;
+        each link target counts as a buffered record.
     :param workers: The number of worker processes; ``1`` (the default) is the serial path, ``>1`` encodes in parallel and merges shards.
     :param finalize: The finalization profile: ``"auto"`` selects the deferred finalizer on a fresh supported store for serial ingestion and the parity merge otherwise; ``"parity"`` and ``"deferred"`` force the respective profile.
     :param track_sids: Retain the per-save provisional-to-final sid mapping.  Disable it for bounded-memory offline builds when callers do not need :meth:`resolved_sid`.
@@ -320,9 +329,19 @@ class BulkIngest:
         self._dispatch_rows: dict[str, dict[str, dict[str, Any]]] = {}
         self._dispatch_family: dict[str, Any] = {}
 
+        # Weak-link intents of the current chunk, keyed by ``(link table, source
+        # table, target table)``: distinct provisional ``(source sid, target sid)``.
+        self._link_intents: dict[tuple[str, str, str], set[tuple[int, int]]] = {}
+        # Per link table, the ``(source lid, target lid)`` pairs already live in
+        # this stream (found live or appended at an earlier flush).
+        # ponytail: grows with the ingest's distinct links; query the indexed link table instead if memory bites.
+        self._linked_pairs: dict[str, set[tuple[int, int]]] = {}
+
         # Top-level records saved in the current (not-yet-flushed) chunk, keyed
         # by ``(table, sid)``; the garbage collector's roots for orphan sweeping.
         self._chunk_roots: list[tuple[str, int]] = []
+        # Every ``(table, sid)`` this ingest has made main, so a repeat skips the role UPDATE.
+        self._promoted_roots: set[tuple[str, int]] = set()
 
         # Provisional-to-final sid resolution, keyed by ``(table, sid)`` (sids are
         # per table, so a bare int is ambiguous). One entry per remapped hit; all
@@ -904,6 +923,7 @@ class BulkIngest:
         promote: type | Iterable[type] | None = None,
         alternative_of: str | None = None,
         alternative_kind: str | None = None,
+        links: Mapping[str, object] | None = None,
     ) -> int:
         """Encode and buffer ``obj``, returning its assigned or deduplicated sid.
 
@@ -918,16 +938,30 @@ class BulkIngest:
         After the context exits cleanly, :meth:`resolved_sid` maps any returned
         sid — provisional or final — to the durable stored sid.
 
+        ``links`` adds weak links from ``obj``'s lineage, as in
+        :meth:`~httk.store.backend.sql.store.SqlStore.save`, except that the targets need not be stored first:
+        each target is saved as a top-level entry of this ingest, deduplicated like any other save (an equal
+        target the store already holds resolves to its existing row), and the link rows are resolved with the
+        ordinary :meth:`~httk.store.backend.sql.store.SqlStore.link` semantics at flush (a live pair is kept, a
+        retracted pair is revived, an absent pair founds a fresh link lineage). Each target counts as one save
+        towards ``chunk_size`` and ``on_progress``. Only the serial parity finalizer supports a ``links`` mapping
+        with at least one target so far; the others still validate it.
+
         :param obj: The object to store.
         :param as_record: The alternate record representation to use, if any.
         :param promote: A record class, or iterable of record classes, whose nested occurrences are also made
             top-level entries. The classes must be reachable from the selected outer record schema.
         :param alternative_of: Unsupported here; bulk ingest is mains only.
         :param alternative_kind: Unsupported here; bulk ingest is mains only.
+        :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
         :return: The provisional sid (see :meth:`resolved_sid` for the durable one).
         :raises RuntimeError: If the bulk context is not open.
         :raises ValueError: If ``alternative_of`` or ``alternative_kind`` is given (bulk ingest is mains only).
-        :raises TypeError: If ``obj`` is a cursor row that must be materialized first.
+        :raises NotImplementedError: If ``links`` names at least one target in a deferred or parallel
+            (``workers>1``) ingest.
+        :raises httk.store.backend.schema.SchemaError: If ``obj``'s record declares no weak link of a given name.
+        :raises TypeError: If ``obj`` or a link target is a cursor row that must be materialized first, or a
+            target's type does not match its link's declared target.
         :raises httk.store.store_common.EntryMetadataConflictError: If a content-id hit has conflicting metadata.
         :raises httk.store.store_common.EntryDispatchIntegrityError: If a dispatch content id maps to a conflicting backing.
         :raises httk.core.storage.identity.StorageProjectionCycleError: If projection reaches a reference cycle.
@@ -940,10 +974,50 @@ class BulkIngest:
         record_type = resolve_storage_record(obj, as_record=as_record)
         refuse_undeclared_entry(self._store.layout, obj, record_type)
         promoted = self._promoted_types(record_type, promote)
+        link_targets = self._link_targets(record_type, links) if links else []
+        if link_targets and (self._parallel or self._deferred):
+            selected = f"workers={self._workers}" if self._parallel else f"finalize={self._requested_finalize!r}"
+            raise NotImplementedError(
+                f"bulk_ingest({selected}) selected the {'parallel' if self._parallel else 'deferred'} ingest, "
+                'which does not support save(links=...) yet; use bulk_ingest(finalize="parity", workers=1)'
+            )
         if self._parallel:
             return self._parallel_save(obj, as_record, record_type, promoted)
         if self._deferred:
             return self._deferred_serial_save(obj, as_record, record_type, promoted)
+        sid = self._serial_save(obj, record_type, promoted)
+        self._returned_sids.add((resolve_schema(record_type).table_name, sid))
+        # Recorded only once every target saved, so a failing save(links=...) records no link.
+        intents = [(key, (sid, self._serial_save(target, cls, frozenset()))) for key, target, cls in link_targets]
+        for key, pair in intents:
+            self._link_intents.setdefault(key, set()).add(pair)
+        if self._since_flush >= self._chunk_size:
+            self._flush()
+        return sid
+
+    def _link_targets(
+        self, record_type: type, links: Mapping[str, object]
+    ) -> list[tuple[tuple[str, str, str], Any, type]]:
+        """Validate ``links`` before anything is buffered.
+
+        :param record_type: The source's storage record class.
+        :param links: The ``save(links=...)`` mapping.
+        :return: One ``((link table, source table, target table), target, target class)`` per target.
+        """
+        source_table = resolve_schema(record_type).table_name
+        validated: list[tuple[tuple[str, str, str], Any, type]] = []
+        for name, targets in links.items():
+            spec = self._store._link_spec(record_type, name)
+            key = (spec.table_name, source_table, resolve_schema(spec.target).table_name)
+            for target in _iter_link_targets(targets):
+                reject_cursor_proxy(target)
+                target_cls = SqlStore._link_target_cls(spec, target, record_type, name)
+                refuse_undeclared_entry(self._store.layout, target, target_cls)
+                validated.append((key, target, target_cls))
+        return validated
+
+    def _serial_save(self, obj: Any, record_type: type, promoted: frozenset[type]) -> int:
+        """Encode one top-level serial parity save and count it towards the chunk."""
         projection = SaveProjection(store_timestamp=self._store_timestamp)
         occurrences: list[tuple[type, Any, int]] = []
         seen: set[tuple[type, int, int]] = set()
@@ -953,12 +1027,8 @@ class BulkIngest:
             occurrences.append((record_type, obj, sid))
         for occurrence_type, source, occurrence_sid in occurrences:
             self._promote_occurrence(occurrence_type, source, projection, occurrence_sid)
-        table_name = resolve_schema(record_type).table_name
-        self._returned_sids.add((table_name, sid))
         self._records_total += 1
         self._since_flush += 1
-        if self._since_flush >= self._chunk_size:
-            self._flush()
         return sid
 
     def _deferred_serial_save(
@@ -1360,14 +1430,18 @@ class BulkIngest:
     ) -> None:
         """Give one encoded occurrence ordinary top-level role and dispatch semantics."""
         table_name = resolve_schema(record_type).table_name
-        if not self._promote_buffered_role(table_name, sid):
-            assert self._connection is not None
-            table = self._store._table(table_name)
-            self._connection.execute(
-                sqlalchemy.update(table)
-                .where(table.c[SID_COLUMN] == sid, table.c[ROLE_COLUMN] == 0)
-                .values(_httk_role=1)
-            )
+        root = (table_name, sid)
+        # A repeated top-level save (e.g. a shared link target) of a row already made main needs no UPDATE.
+        if root not in self._promoted_roots:
+            if not self._promote_buffered_role(table_name, sid):
+                assert self._connection is not None
+                table = self._store._table(table_name)
+                self._connection.execute(
+                    sqlalchemy.update(table)
+                    .where(table.c[SID_COLUMN] == sid, table.c[ROLE_COLUMN] == 0)
+                    .values(_httk_role=1)
+                )
+            self._promoted_roots.add(root)
         self._chunk_roots.append((table_name, sid))
         family = self._store._family_for_backing(record_type)
         if family is not None and len(family.records) > 1:
@@ -1467,7 +1541,7 @@ class BulkIngest:
         if not self._store.backend_facts.stores_nan:
             for table_name, rows in self._rows.items():
                 _reject_nan(table_name, rows)
-        if any(self._rows.values()):
+        if any(self._rows.values()) or self._link_intents:
             self._resolve_and_insert()
         self._rows_by_sid.clear()
         # Metadata caches (and the chunk's roots) live only for the chunk that
@@ -1509,6 +1583,10 @@ class BulkIngest:
             self._collect_garbage(fk_columns)
         self._refresh_value_index()
         self._verify_entry_id_conflicts()
+        if self._link_intents:
+            # After dedup, remap and the sweep, so endpoints are final and the
+            # link rows (which no graph edge reaches) are not swept.
+            self._buffer_link_rows()
         for name in self._logical_graph().dependency_order(store._metadata.tables):
             table = store._metadata.tables[name]
             name = table.name
@@ -1520,6 +1598,104 @@ class BulkIngest:
             self._inserted_count[name] = self._inserted_count.get(name, 0) + len(rows)
             self._rows_flushed_total += len(rows)
             rows.clear()
+
+    def _buffer_link_rows(self) -> None:
+        """Resolve this chunk's link intents to lineage pairs and buffer the link rows they need.
+
+        Mirrors :meth:`~httk.store.backend.sql.store.SqlStore.link` per distinct pair: a pair with a live
+        lineage is skipped, an all-retracted pair is revived under its largest lineage, and an absent pair
+        founds a fresh lineage whose ``logical_id`` is its own pre-assigned sid.
+        """
+        assert self._connection is not None
+        intents = self._link_intents
+        self._link_intents = {}
+        # Final sids per endpoint table; rows this ingest inserts are their own lineage.
+        final: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+        older: dict[str, set[int]] = {}
+        for key, pairs in intents.items():
+            _link, source_table, target_table = key
+            resolved = final[key] = []
+            for provisional_source, provisional_target in pairs:
+                source_sid = self._resolved_map.get((source_table, provisional_source), provisional_source)
+                target_sid = self._resolved_map.get((target_table, provisional_target), provisional_target)
+                resolved.append((source_sid, target_sid))
+                for endpoint_table, sid in ((source_table, source_sid), (target_table, target_sid)):
+                    if sid < self._initial_next_sid.get(endpoint_table, 1):
+                        older.setdefault(endpoint_table, set()).add(sid)
+        lineage: dict[tuple[str, int], int] = {}
+        for table_name, sids in older.items():
+            table = self._store._table(table_name)
+            for batch in itertools.batched(sorted(sids), _LINK_LOOKUP_BATCH):
+                for sid, logical_id in self._connection.execute(
+                    sqlalchemy.select(table.c[SID_COLUMN], table.c[LOGICAL_ID_COLUMN]).where(
+                        table.c[SID_COLUMN].in_(batch)
+                    )
+                ):
+                    lineage[(table_name, int(sid))] = int(logical_id)
+            missing = sorted(sid for sid in sids if (table_name, sid) not in lineage)
+            if missing:
+                raise RuntimeError(
+                    f"bulk_ingest link endpoint {table_name!r} sid {missing[0]} has no stored row "
+                    "(internal invariant breach)"
+                )
+        for (link_name, source_table, target_table), resolved in final.items():
+            done = self._linked_pairs.setdefault(link_name, set())
+            wanted = {
+                (lineage.get((source_table, source), source), lineage.get((target_table, target), target))
+                for source, target in resolved
+            } - done
+            if not wanted:
+                continue
+            link_table = self._store._table(link_name)
+            latest = self._existing_link_lineages(link_table, wanted) if link_name in self._preexisting else {}
+            next_sid = self._next_sid.setdefault(link_name, 1)
+            for pair in sorted(wanted):
+                lineages = latest.get(pair, {})
+                if any(retracted == 0 for _sid, retracted in lineages.values()):
+                    continue
+                row = {
+                    SID_COLUMN: next_sid,
+                    LOGICAL_ID_COLUMN: max(lineages) if lineages else next_sid,
+                    SOURCE_LID_COLUMN: pair[0],
+                    TARGET_LID_COLUMN: pair[1],
+                    RETRACTED_COLUMN: 0,
+                }
+                if self._store_timestamp is not None and STORE_TIMESTAMP_COLUMN in link_table.c:
+                    row[STORE_TIMESTAMP_COLUMN] = self._store_timestamp
+                self._buffer_row(link_name, row)
+                next_sid += 1
+            self._next_sid[link_name] = next_sid
+            done |= wanted
+
+    def _existing_link_lineages(
+        self, link_table: sqlalchemy.Table, pairs: set[tuple[int, int]]
+    ) -> dict[tuple[int, int], dict[int, tuple[int, int]]]:
+        """Map each of ``pairs`` already in a pre-existing link table to its lineages' latest ``(sid, retracted)``.
+
+        :param link_table: The pre-existing link table.
+        :param pairs: The ``(source lid, target lid)`` pairs to look up.
+        :return: Per present pair, each lineage's latest ``(sid, retracted)``, as ``SqlStore._do_link`` reads it.
+        """
+        assert self._connection is not None
+        latest: dict[tuple[int, int], dict[int, tuple[int, int]]] = {}
+        for batch in itertools.batched(sorted({source for source, _target in pairs}), _LINK_LOOKUP_BATCH):
+            # By source lineage only (the index prefix); the other targets of a source are filtered out here.
+            statement = sqlalchemy.select(
+                link_table.c[SOURCE_LID_COLUMN],
+                link_table.c[TARGET_LID_COLUMN],
+                link_table.c[LOGICAL_ID_COLUMN],
+                link_table.c[SID_COLUMN],
+                link_table.c[RETRACTED_COLUMN],
+            ).where(link_table.c[SOURCE_LID_COLUMN].in_(batch))
+            for source, target, logical_id, sid, retracted in self._connection.execute(statement):
+                pair = (int(source), int(target))
+                if pair not in pairs:
+                    continue
+                lineages = latest.setdefault(pair, {})
+                previous = lineages.get(int(logical_id))
+                if previous is None or int(sid) > previous[0]:
+                    lineages[int(logical_id)] = (int(sid), int(retracted))
+        return latest
 
     def _verify_entry_id_conflicts(self) -> None:
         """Reject buffered explicit or minted ids already owned by any family backing."""

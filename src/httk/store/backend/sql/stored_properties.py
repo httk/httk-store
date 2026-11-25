@@ -710,6 +710,8 @@ class StoredPropertySqlPlan:
         self.definition = definition
         self._backings = backings
         self._fulltypes: dict[tuple[bool, bool], Mapping[str, str]] = {}
+        # Served relationship-type names per target class (the store layout is fixed once opened).
+        self._served_types: dict[type, str | None] = {}
 
     @functools.cached_property
     def _strong_link_families(self) -> list[StrongLinkFamily]:
@@ -1118,6 +1120,18 @@ class StoredPropertySqlPlan:
         relationship_handlers, relationship_targets = self._relationship_handlers(
             backing.backing, alternatives, relationship_source_map
         )
+        # A relationship that only sibling backings of the family serve is empty on this
+        # backing's rows, exactly like a NULL reference: see ``_EMPTY_RELATIONSHIP_HANDLERS``.
+        # Rebuilding the siblings' handlers is cheap with the served types cached on the plan.
+        for other in self._backings:
+            if other is backing:
+                continue
+            other_handlers, other_targets = self._relationship_handlers(
+                other.backing, alternatives, relationship_source_map
+            )
+            for key in other_handlers.keys() - relationship_handlers.keys():
+                relationship_handlers[key] = _EMPTY_RELATIONSHIP_HANDLERS
+            relationship_targets += tuple(item for item in other_targets if item not in relationship_targets)
         handlers.update(relationship_handlers)
         return handlers, relationship_targets
 
@@ -1154,7 +1168,9 @@ class StoredPropertySqlPlan:
         typed: dict[str, list[Mapping[str, Callable[..., Any]]]] = {}
 
         def add_typed(target: type, handler: Mapping[str, Callable[..., Any]]) -> None:
-            rtype = _served_type_for_target(store, target)
+            if target not in self._served_types:
+                self._served_types[target] = _served_type_for_target(store, target)
+            rtype = self._served_types[target]
             if rtype is None:
                 return
             if source_map is not None:
@@ -1509,6 +1525,18 @@ def _id_handlers(
             context.always_false() if operator == "IS_UNKNOWN" else context.always_true()
         ),
     }
+
+
+# The ``.id`` HAS handler of a relationship a backing has no field or link for: its rows
+# carry an empty relationship, so they answer as a row whose reference is NULL does
+# (``HAS ONLY`` matches vacuously, every other ``HAS`` form matches nothing).
+_EMPTY_RELATIONSHIP_HANDLERS: Final[Mapping[str, Callable[..., Any]]] = MappingProxyType(
+    {
+        "HAS": lambda entry, ops, values, variable, has_type: (
+            variable.always_true() if has_type == "HAS_ONLY" else variable.always_false()
+        )
+    }
+)
 
 
 def _type_handlers(entry_type: str) -> Mapping[str, Callable[..., Any]]:

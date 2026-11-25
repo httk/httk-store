@@ -83,6 +83,28 @@ rows = search.results(result=result)
 Use a record-valued field when the target is needed to reconstruct the source
 value, or when the exact target revision matters.
 
+### Import records
+
+Import records (`httk.core.ImportRecord` and the typed
+`httk.atomistic.ASUStructureImportRecord`, `UnitcellStructureImportRecord` and
+`CIFStructureImportRecord`) are served as the `_httk_imports` entry type once a
+store declares the family explicitly, together with the families of what they
+embed: `entry_records={ImportEntry: (ImportRecord, ASUStructureImportRecord, ...),
+StructureEntry: (...), FileEntry: FileRecord}`. Every property is served
+(`_httk_source_uri`, `_httk_importer`, `_httk_status`, `_httk_error`,
+`_httk_repaired`, `_httk_imported_at`, ...; `_httk_reports` is response-only).
+The relationships are the record-valued fields: `structures` (the imported
+structure) and `files` (the source file). To go from an entry to its import
+record, filter `imports` on the relationship, e.g.
+`structures.id HAS "<structure id>"` (or its alias
+`_httk_relationships.structures.id`). A record kind without the field (the
+base `ImportRecord` has no `structure`) answers the `structures.id` filters,
+under either spelling, like a record whose `structure` or `source_file` is
+None answers `structures.id` or `files.id`: `HAS` matches nothing there,
+`HAS ONLY` matches vacuously.
+Relationship filtering is SQL-only; Mongo stored serving has no relationship
+handlers.
+
 ## Strong links: immutable semantic edges
 
 A `StrongLink` field contains edge records rather than target objects. Each

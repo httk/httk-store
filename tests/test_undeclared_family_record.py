@@ -5,8 +5,7 @@ from typing import Annotated, ClassVar
 
 import pytest
 import sqlalchemy
-from httk.core import DataRecord, DataRecordEntry, DerivedDataRecord
-from httk.core.references import ReferenceRecord
+from httk.core import DataRecord, DataRecordEntry, DerivedDataRecord, FileRecord
 from httk.core.storage import IdentitySkip, Indexed, StorageInfo, Unique
 
 from httk.store import EntryIdScheme
@@ -58,8 +57,9 @@ def test_undeclared_record_of_declared_family_refused(make_store) -> None:
 def test_record_of_undeclared_family_refused(make_store) -> None:
     store = make_store(DECLARED)
     before = _tables(store)
-    with pytest.raises(ValueError, match="'files' entry family|'references' entry family"):
-        store.save(ReferenceRecord(title="t"))
+    # The standard-link target families (references, notes, tags, external) are declared implicitly.
+    with pytest.raises(ValueError, match="'files' entry family"):
+        store.save(FileRecord(url=None, name="OUTCAR", sha256="a" * 64))
     assert _tables(store) == before
 
 

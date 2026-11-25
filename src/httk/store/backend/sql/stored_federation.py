@@ -1128,6 +1128,13 @@ class StoredEntryFederation:
         """
         if store._missing_tables_for_read((backing,)):
             return
+        # A target with no table yet (nothing of it saved) has no live links to scan; one
+        # catalog check covers every target.
+        if store._missing_tables_for_read({spec.target for spec in link_specs}):
+            present = store._tables_present | store._pending_table_names()
+            link_specs = [spec for spec in link_specs if resolve_schema(spec.target).table_name in present]
+            if not link_specs:
+                return
         table = store._table(resolve_schema(backing).table_name)
         with store._read_connection() as connection:
             # Each candidate's source-lineage logical_id keys the live link scan.

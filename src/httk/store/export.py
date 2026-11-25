@@ -53,6 +53,9 @@ def _add_definition_candidate(
     document: dict[str, Any],
     source: str,
 ) -> None:
+    if kind == "property":
+        # Requirements are per-entry-type refinements of an embedded property, not part of the property itself.
+        document = {key: value for key, value in document.items() if key != "x-optimade-requirements"}
     canonical = _json_bytes(document)
     variants = candidates.setdefault((kind, definition_id), {})
     variants[canonical] = source

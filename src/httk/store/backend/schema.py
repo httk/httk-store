@@ -80,6 +80,7 @@ import typing
 from typing import Annotated, Any, Final, Literal
 
 from httk.core import FracVector
+from httk.core.curation import standard_links
 from httk.core.storage import (
     STORAGE_INFO_ATTRIBUTE,
     DedupPolicy,
@@ -523,7 +524,11 @@ def _build_schema(cls: type, override: StorageInfo | None) -> TableSchema:
                 f"{cls.__name__}.{spec.field}_present collides with the store-managed presence column "
                 f"for optional child field {spec.field!r}"
             )
-    links = _resolve_links(cls, table_name, info.links, specs)
+    declared_links = {link.name for link in info.links}
+    implicit = tuple(
+        link for link in standard_links(cls) if link.name not in declared_links and link.name not in declared_names
+    )
+    links = _resolve_links(cls, table_name, info.links + implicit, specs)
     return TableSchema(
         cls=cls,
         table_name=table_name,

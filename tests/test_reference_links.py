@@ -23,7 +23,7 @@ from httk.core import (
 )
 
 from httk.store import EntryIdScheme
-from httk.store.backend.schema import _bounded_identifier, resolve_schema
+from httk.store.backend.schema import LinkSpec, _bounded_identifier, resolve_schema
 from httk.store.backend.sql import SqlStore, StoredEntrySource
 from httk.store.backend.sql.stored_federation import StoredEntryFederation
 
@@ -48,11 +48,16 @@ def test_bounded_identifier_keeps_short_names_and_hashes_long_ones() -> None:
     assert bounded.startswith("_httk_link_")
 
 
+def _references_link(cls: type) -> LinkSpec:
+    (link,) = (link for link in resolve_schema(cls).links if link.name == "references")
+    return link
+
+
 def test_long_link_table_name_is_bounded() -> None:
-    (link,) = resolve_schema(AverageTotalEnergyRecord).links
+    link = _references_link(AverageTotalEnergyRecord)
     assert link.table_name == _bounded_identifier("_httk_link_core_average_total_energy__core_reference__references")
     assert len(link.table_name) == 63
-    (short,) = resolve_schema(TotalEnergyRecord).links
+    short = _references_link(TotalEnergyRecord)
     assert short.table_name == "_httk_link_core_total_energy__core_reference__references"
 
 
@@ -92,7 +97,7 @@ def test_references_link_serves_and_filters(store_factory) -> None:
     assert [target.id for target in store.linked(energy, "references")] == [ref.id]
     if not isinstance(store, SqlStore):
         # The bounded link name is the Mongo collection name.
-        (link,) = resolve_schema(AverageTotalEnergyRecord).links
+        link = _references_link(AverageTotalEnergyRecord)
         assert link.table_name in store._database.database.list_collection_names()  # type: ignore[attr-defined]
         pytest.skip("stored-federation serving, filtering and the sequence/reopen checks are SQL-only")
 

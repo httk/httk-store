@@ -9,7 +9,12 @@ import sqlalchemy
 
 from httk.store import EntryIdScheme
 from httk.store.backend.sql import Backend, SqlStore
-from httk.store.backend.sql.layout import actual_index_names, expected_metadata, read_store_metadata
+from httk.store.backend.sql.layout import (
+    actual_index_names,
+    actual_table_names,
+    expected_metadata,
+    read_store_metadata,
+)
 
 atomistic = pytest.importorskip("httk.atomistic")
 pytest.importorskip("duckdb_engine")
@@ -60,10 +65,16 @@ def _close(store: SqlStore) -> None:
 
 
 def _parent_sid_indexes(store: SqlStore) -> set[str]:
-    """Child-table parent-sid index names, found structurally (a single ``<parent>_sid`` column)."""
+    """Child-table parent-sid index names of the created tables, found structurally (a single ``<parent>_sid`` column).
+
+    Tables of a family nothing was saved to yet (e.g. the implicit ``references`` link target) are not created.
+    """
+    with store._database.engine.connect() as connection:
+        created = actual_table_names(connection)
     return {
         str(index.name)
         for table in expected_metadata(store.layout).tables.values()
+        if table.name in created
         for index in table.indexes
         if len(index.columns) == 1 and next(iter(index.columns)).name.endswith("_sid")
     }

@@ -111,7 +111,8 @@ def test_generated_core_and_analyse_kinds_are_bounded():
         *analyse.DERIVED_RECORD_KINDS.values(),
     )
     layout = normalize_entry_records({DataRecordEntry: kinds})
-    (family,) = layout.families
+    # The other families are the implicit standard-link targets.
+    (family,) = (family for family in layout.families if family.family is DataRecordEntry)
     stable = [_stable_identifier("backing", name) for name in family.record_names]
     dispatch_columns = [backing_dispatch_column_name(name) for name in family.record_names]
     assert all(len(name) <= 63 and name.endswith("_sid") for name in dispatch_columns)

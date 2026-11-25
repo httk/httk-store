@@ -12,6 +12,14 @@ from httk.store import EntryIdScheme, SqliteStore
 from httk.store.backend.sql import optimade_filter_searcher
 from httk.store.storage_layout import declaration_json, normalize_entry_types, schema_fingerprint_json
 
+# Every layout declaring an entry record gains the standard-link target families.
+_LINK_TARGETS = {
+    "external_database_entries": ("core-external-database-entry",),
+    "notes": ("core-note",),
+    "references": ("core-reference-record",),
+    "tags": ("core-tag",),
+}
+
 
 @entry_record("test.result")
 class Result(DataEntryRecord):
@@ -75,7 +83,7 @@ def test_records_declaration_saves_reopens_and_discovers_properties(tmp_path) ->
     reopened = SqliteStore(path, records=[Result])
     result = reopened.fetch(Result, sid)
     assert result.formation_energy == -1.25
-    assert reopened.layout.declaration == {"__httk_records": ("test.result",)}
+    assert reopened.layout.declaration == {"__httk_records": ("test.result",), **_LINK_TARGETS}
     matches = optimade_filter_searcher(reopened, Result, "_httk_custom_formation_energy < 0").results()
     assert [row[0].formation_energy for row in matches] == [-1.25]
     reopened.close()
@@ -87,6 +95,7 @@ def test_records_declaration_includes_registered_references() -> None:
         "__httk_records": ("test.result_with_structure",),
         "files": ("core-file",),
         "structures": ("atomistic-unitcell-structure",),
+        **_LINK_TARGETS,
     }
     store.close()
 
@@ -137,6 +146,7 @@ def test_records_declaration_accepts_registered_core_records() -> None:
         "files": ("core-file",),
         "runs": ("core-run",),
         "structures": ("atomistic-unitcell-structure",),
+        **_LINK_TARGETS,
     }
     store.close()
 
@@ -182,9 +192,13 @@ def test_decorated_only_records_layout_is_unchanged() -> None:
         # structure gained the `bonds_dimensions_mask` column (httk-atomistic 0e4b936, alone
         # 1f5cf5b9cc629370) and its bond network the nullable `torsions` reference to the new
         # BondTorsionsRecord table plus a torsions-source reference (httk-atomistic 40d0659).
-        (ResultWithStructure,): "167cf05b3e5f3727",
-        (Result,): "84a01b57df46e5e0",
-        (Alpha, Beta): "0e5c3dbfcf40770e",
+        # Re-pinned November 25, 2026 (all three): every entry record gains the four standard weak
+        # links (references, notes, tags, external) and the layouts the four link-target families.
+        # Resolving only the previously declared `references` links (FileRecord, unit-cell structure)
+        # and no target families reproduces 167cf05b3e5f3727 / 84a01b57df46e5e0 / 0e5c3dbfcf40770e.
+        (ResultWithStructure,): "be68932b14a19368",
+        (Result,): "1885909d7e27a4ec",
+        (Alpha, Beta): "ed9cdf0772454f31",
     }
     for records, digest in layouts.items():
         layout = normalize_entry_types(list(records))

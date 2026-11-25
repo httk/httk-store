@@ -18,6 +18,7 @@ from httk.core import FracScalar, FracVector
 from httk.core.register import register_entry_family, register_entry_record
 from httk.core.storage import IdentitySkip, Indexed, Shape, StorageInfo, content_id
 
+from httk.store.backend.sql.layout import actual_table_names
 from httk.store.backend.sql.mapping import CONTENT_ID_COLUMN, ROLE_COLUMN, SID_COLUMN
 from httk.store.store_common import EntryDispatchIntegrityError, EntryMetadataConflictError
 
@@ -258,12 +259,20 @@ def _app_tables(store) -> dict[str, sqlalchemy.Table]:
 
 
 def _table_stats(store, database) -> dict[str, tuple[int, frozenset[str] | None]]:
-    """Per-table row counts and (for content-addressed tables) content_id sets."""
+    """Per-table row counts and (for content-addressed tables) content_id sets.
+
+    A registered table not yet created (tables are created lazily on first save,
+    e.g. the implicit standard-link target families) counts as empty.
+    """
     stats: dict[str, tuple[int, frozenset[str] | None]] = {}
     with database.engine.connect() as connection:
+        present = actual_table_names(connection)
         for name, table in _app_tables(store).items():
-            count = connection.execute(sqlalchemy.text(f'SELECT count(*) FROM "{name}"')).scalar_one()
             content_ids: frozenset[str] | None = None
+            if name not in present:
+                stats[name] = (0, frozenset() if CONTENT_ID_COLUMN in table.c else None)
+                continue
+            count = connection.execute(sqlalchemy.text(f'SELECT count(*) FROM "{name}"')).scalar_one()
             if CONTENT_ID_COLUMN in table.c:
                 content_ids = frozenset(
                     str(row[0]) for row in connection.execute(sqlalchemy.select(table.c[CONTENT_ID_COLUMN])).all()

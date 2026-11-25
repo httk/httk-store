@@ -426,10 +426,12 @@ class StoreEntryProvider(EntryProvider):
                     for target in values:
                         if target is None:
                             continue
-                        target_type = self._type_for_class.get(type(target))
+                        # A hydrated link-bearing record is a thin bound subclass of its record class.
+                        target_record = getattr(type(target), "__httk_row_base__", type(target))
+                        target_type = self._type_for_class.get(target_record)
                         if target_type != related_type:
                             continue
-                        target_sid = self._store.sid_of(target, as_record=type(target))
+                        target_sid = self._store.sid_of(target, as_record=target_record)
                         if target_sid is None:
                             continue
                         entries.append(
@@ -445,7 +447,7 @@ class StoreEntryProvider(EntryProvider):
                     # target revisions (deduped, retracted dropped), so id
                     # resolution is lineage-level on either side.
                     for target in self._store.linked(source, link_spec.name):
-                        target_sid = self._store.sid_of(target, as_record=type(target))
+                        target_sid = self._store.sid_of(target, as_record=link_spec.target)
                         if target_sid is None:
                             continue
                         entries.append(

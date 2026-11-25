@@ -171,6 +171,27 @@ exactly like the [`_httk_source_id` change](db-schema.md#vocabulary), an existin
 opens against the new code as an incompatible layout and must be rebuilt (this
 change is non-additive).
 
+### Automatic standard links
+
+Entry records (dataclasses with `id` and `immutable_id`) receive the weak links
+`references`, `notes`, `tags` and `external` at schema resolution, targeting
+`ReferenceRecord`, ``httk.core.curation.Note``, `Tag` and
+`ExternalDatabaseEntry`, all with `exposed_relationship=True`. A declared link of
+the same name, or a dataclass field or stored property of that name, takes
+precedence and the standard link is skipped. The four link targets themselves
+get no automatic links. Any store declaring at least one entry record implicitly
+includes the families `references`, `notes`, `tags` and
+`external_database_entries`. An implicit family contains only its core backing
+(`ReferenceRecord`, `Note`, `Tag` or `ExternalDatabaseEntry`); an application
+that registers further backings of one of these families must declare that
+family explicitly. Stores created before the standard links existed carry a
+different link layout and must be rebuilt: opening them with `upgrade=True` is
+refused. Served relationships are keyed `references`, `_httk_notes`,
+`_httk_tags` and `_httk_external_database_entries`, over the entry types of the
+same names (properties `_httk_date`, `_httk_author`, `_httk_text`; `_httk_key`,
+`_httk_value`; `_httk_database`, `_httk_entry_id`, `_httk_url`, `_httk_role`).
+`bulk_ingest` does not support weak links, standard or declared.
+
 ## Strong links (provenance edges)
 
 `StrongLink(relationship, reverse=, role=, description=)` marks a run's

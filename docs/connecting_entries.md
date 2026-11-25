@@ -221,6 +221,52 @@ configuration raises `ValueError`.
 Use a weak link for membership, tagging, ownership, or other curation that an
 operator may change without asserting a new scientific record revision.
 
+## Standard links: references, notes, tags and external entries
+
+Every entry record (a dataclass with `id` and `immutable_id` fields) is linkable
+without declaring anything under four weak-link names, all exposed as OPTIMADE
+relationships: `references` (`ReferenceRecord`), `notes` (`Note`), `tags`
+(`Tag`) and `external` (`ExternalDatabaseEntry`). The targets are the
+``httk.core.curation`` records; a store declaring any entry record also gets
+their four families automatically. A declared link, field or stored property of
+the same name wins. Targets are content-deduplicated, so a shared `Note` is not
+edited in place: unlink it and link a new one. `ExternalDatabaseEntry.role` is
+part of its identity (`None` is a general relation, `"origin"` means the linking
+entry was obtained from that external entry); `url` is not.
+
+```python
+import datetime
+
+from httk.core import Run, RunEntry
+from httk.core.curation import ExternalDatabaseEntry, Note, Tag
+from httk.store import EntryIdScheme
+from httk.store.backend.sql import SqliteStore
+
+store = SqliteStore(":memory:", entry_records={RunEntry: Run}, entry_ids=EntryIdScheme("example.org", "1"))
+run = store.fetch(Run, store.save(Run(source_id="ws:job")), eager=True)
+other = store.fetch(Run, store.save(Run(source_id="ws:other")), eager=True)
+
+note = Note(datetime.datetime(2026, 11, 25, tzinfo=datetime.UTC), "curator", "Removed a stray loop.")
+links = [
+    (run, "notes", note),
+    (run, "tags", Tag("source", "cod")),
+    (run, "external", ExternalDatabaseEntry("cod", "1000000", role="origin")),
+    (other, "external", ExternalDatabaseEntry("cod", "1000001")),  # general relation
+]
+for source, name, target in links:
+    store.link(source, name, store.fetch(type(target), store.save(target), eager=True))
+
+search = store.searcher(only_latest=True)
+v = search.variable(Run)
+lk = v.links.external  # one linked entry must satisfy both conditions
+search.add((lk.database == "cod") & (lk.role == "origin"))
+print([row.values[0].source_id for row in search.results(v=v)])
+```
+
+The query matches only `ws:job`: `lk` is one linked entry that must satisfy
+both conditions, while a fresh `v.links.external` access constrains an
+independent entry. `bulk_ingest` does not support weak links yet.
+
 ## Serving requirements and deeper details
 
 The declarations above are sufficient for storage. To expose an endpoint over

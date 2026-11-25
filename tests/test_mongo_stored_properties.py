@@ -99,7 +99,8 @@ def test_mongo_plan_matches_the_sql_stored_property_scenarios(plan, filter_strin
         assert {record.label for record in sql_records} == expected
 
         mongo_rows = sorted(
-            (plan.response_row(type(record), record) for record in mongo_records),
+            # Link-bearing records hydrate as Mongo's ``.links``-bound subclass of their backing.
+            (plan.response_row(type(record).__httk_row_base__, record) for record in mongo_records),
             key=lambda row: row["id"],
         )
         sql_rows = sorted(

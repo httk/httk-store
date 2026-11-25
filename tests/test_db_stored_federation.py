@@ -384,7 +384,9 @@ def test_unique_prefix_page_has_no_duplicate_probe_queries() -> None:
     # Three count queries, three candidate queries, and one parent plus one
     # child hydration per served row. Entry records hydrate their minted ids
     # from storage rather than reusing the pre-mint source-instance cache.
-    assert len(statements) == 12
+    # No standard weak-link target was ever saved: one catalog read per source
+    # page confirms their tables are still absent and the link scans are skipped.
+    assert len(statements) == 12 + 3
 
 
 def test_single_source_page_skips_probes_but_audit_detects_corrupt_cross_backing_ids() -> None:
@@ -425,7 +427,9 @@ def test_single_source_page_skips_probes_but_audit_detects_corrupt_cross_backing
         assert not any(".id = ?" in " ".join(statement.lower().split()) for statement in statements)
         # Two counts, two page candidates, then one parent and child hydration
         # for the served row; no identity probe accompanies that hydration.
-        assert len(statements) == 6
+        # No standard weak-link target was ever saved: one catalog read confirms
+        # their tables are still absent and the link scans are skipped.
+        assert len(statements) == 6 + 1
         with pytest.raises(DuplicateEntryIdError) as caught:
             federation.audit_duplicate_ids()
 

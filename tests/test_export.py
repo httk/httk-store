@@ -6,11 +6,13 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from httk.core import Run, RunEntry, load_entry_type_definition
 from httk.core.files import FileEntry, FileRecord
 from httk.core.project import initialize_project
 
 from httk.store import EntryIdScheme, export_dataset
 from httk.store.backend.sql import Backend, SqlStore
+from httk.store.export import _add_definition_candidate
 
 
 def _store(path: Path) -> None:
@@ -55,12 +57,25 @@ def test_export_contains_store_manifest_and_every_definition(tmp_path: Path) -> 
             "https://schemas.optimade.org/defs/v1.2/properties/optimade/files/url_stable_until",
             "https://schemas.optimade.org/defs/v1.2/properties/optimade/files/version",
         }
-        assert len(manifest["definitions"]) == 17
+        # The store also declares the four standard-link target families: their entry types and
+        # embedded properties are exported too.
+        for entry_type in (
+            "https://schemas.optimade.org/defs/v1.2/entrytypes/optimade/references",
+            "https://schemas.httk.org/defs/v0.1/entrytypes/notes",
+            "https://schemas.httk.org/defs/v0.1/entrytypes/tags",
+            "https://schemas.httk.org/defs/v0.1/entrytypes/external_database_entries",
+        ):
+            expected_ids.add(entry_type)
+            expected_ids.update(
+                prop.definition_id for prop in load_entry_type_definition(entry_type).properties.values()
+            )
         assert {definition["id"] for definition in manifest["definitions"]} == expected_ids
         for definition in manifest["definitions"]:
             assert definition["path"] in names
             assert hashlib.sha256(archive.read(definition["path"])).hexdigest() == definition["sha256"]
-        assert manifest["entry_record_declaration"][0]["records"] == ["core-file"]
+        families = {item["family"]: item["records"] for item in manifest["entry_record_declaration"]}
+        assert families["files"] == ["core-file"]
+        assert set(families) == {"external_database_entries", "files", "notes", "references", "tags"}
 
 
 def test_export_rejects_aliases_and_protected_project_files(tmp_path: Path) -> None:
@@ -154,3 +169,45 @@ def test_records_export_contains_typed_backing_property_definitions(tmp_path: Pa
     assert "total_energy" not in definitions[RECORDS_DEFINITION_ID]["properties"]
     assert definitions[RECORDS_DEFINITION_ID]["properties"]["_httk_total_energy"]["$id"] == TOTAL_ENERGY_DEFINITION_ID
     assert definitions[TOTAL_ENERGY_DEFINITION_ID]["x-optimade-unit"] == "eV"
+
+
+_ID = "https://schemas.optimade.org/defs/v1.2/properties/core/id"
+
+
+def test_export_merges_property_copies_that_differ_only_in_requirements(tmp_path: Path) -> None:
+    source = tmp_path / "runs.sqlite"
+    output = tmp_path / "runs.zip"
+    with Backend.sqlite(source) as database:
+        # The runs entry type embeds `id` as sortable, the OPTIMADE files entry type as not sortable.
+        store = SqlStore(
+            database, entry_records={RunEntry: Run, FileEntry: FileRecord}, entry_ids=EntryIdScheme("httk.test", "1")
+        )
+        store.save(Run(source_id="ws:job"))
+
+    export_dataset(source, output)
+    with zipfile.ZipFile(output) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        definitions = {item["id"]: json.loads(archive.read(item["path"])) for item in manifest["definitions"]}
+    assert definitions[_ID]["$id"] == _ID
+    assert "x-optimade-requirements" not in definitions[_ID]
+    # Entry types keep their per-property requirements.
+    runs = definitions["https://schemas.httk.org/defs/v0.1/entrytypes/runs"]
+    files = definitions["https://schemas.optimade.org/defs/v1.2/entrytypes/optimade/files"]
+    assert runs["properties"]["id"]["x-optimade-requirements"]["sortable"] is True
+    assert files["properties"]["id"]["x-optimade-requirements"]["sortable"] is False
+
+
+def test_property_copies_differing_beyond_requirements_conflict() -> None:
+    candidates: dict[tuple[str, str], dict[bytes, str]] = {}
+    document = {"$id": _ID, "description": "An id.", "x-optimade-requirements": {"sortable": True}}
+    _add_definition_candidate(candidates, "property", _ID, document, "first")
+    _add_definition_candidate(
+        candidates, "property", _ID, {**document, "x-optimade-requirements": {"sortable": False}}, "second"
+    )
+    assert document["x-optimade-requirements"] == {"sortable": True}  # the caller's document is not mutated
+    with pytest.raises(ValueError, match="conflicting property definitions .*third"):
+        _add_definition_candidate(candidates, "property", _ID, {**document, "description": "Another id."}, "third")
+    # Entry-type documents are compared whole, requirements included.
+    _add_definition_candidate(candidates, "entry-type", "urn:e", {"properties": {"id": {"sortable": True}}}, "a")
+    with pytest.raises(ValueError, match="conflicting entry-type definitions"):
+        _add_definition_candidate(candidates, "entry-type", "urn:e", {"properties": {"id": {"sortable": False}}}, "b")

@@ -39,6 +39,7 @@ from httk.core import (
     load_property_definition,
     standard_entry_type,
 )
+from httk.core.curation import ExternalDatabaseEntry, Note, Tag
 from httk.core.data_records import RECORDS_DEFINITION_ID
 from httk.core.provenance import RUNS_DEFINITION_ID
 from httk.core.storage import (
@@ -636,9 +637,9 @@ def _string_column_projection(column: str, *, timestamp: bool = False) -> Stored
 
 
 # The capability layer owns the serving glue for core records: declare the wire
-# (served) property projections for a stored ``Run`` beside its provider. The
-# keys are the served names produced by ``EntryTypeDefinition.served_form``; the
-# values read the plain internal columns.
+# (served) property projections for a stored ``Run`` and the curation records
+# beside their provider. The keys are the served names produced by
+# ``EntryTypeDefinition.served_form``; the values read the plain internal columns.
 Run.__httk_stored_properties__ = {  # type: ignore[attr-defined]
     "_httk_workflow_declaration_uri": _string_column_projection("workflow_declaration_uri"),
     "_httk_workflow_definition_uri": _string_column_projection("workflow_definition_uri"),
@@ -646,4 +647,19 @@ Run.__httk_stored_properties__ = {  # type: ignore[attr-defined]
     "_httk_name": _string_column_projection("name"),
     "_httk_started_at": _string_column_projection("started_at", timestamp=True),
     "_httk_finished_at": _string_column_projection("finished_at", timestamp=True),
+}
+Note.__httk_stored_properties__ = {  # type: ignore[attr-defined]
+    "_httk_date": _string_column_projection("date", timestamp=True),
+    "_httk_author": _string_column_projection("author"),
+    "_httk_text": _string_column_projection("text"),
+}
+Tag.__httk_stored_properties__ = {  # type: ignore[attr-defined]
+    "_httk_key": _string_column_projection("key"),
+    "_httk_value": _string_column_projection("value"),
+}
+ExternalDatabaseEntry.__httk_stored_properties__ = {  # type: ignore[attr-defined]
+    "_httk_database": _string_column_projection("database"),
+    "_httk_entry_id": _string_column_projection("entry_id"),
+    "_httk_url": _string_column_projection("url"),
+    "_httk_role": _string_column_projection("role"),
 }

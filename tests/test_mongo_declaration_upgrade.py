@@ -186,7 +186,8 @@ def assert_old_entries_intact(store: MongoStore, built: Built) -> None:
         entry: Any = store.fetch_entry(UpFamily, content_id(cls(value)))
         assert entry is not None
         assert entry.value == value
-        assert type(entry) is cls
+        # Link-bearing records hydrate as Mongo's thin ``.links``-bound subclass of the backing.
+        assert type(entry).__httk_row_base__ is cls
     revised = store.fetch(UpA, built.sids[(UpA, 10)])
     history = store.history(revised)
     assert tuple(item.value for item in history) == (1, 10)

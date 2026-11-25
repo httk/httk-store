@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Final, Literal, cast
 
 from httk.core import EntryTypeDefinition, PropertyDefinition
+from httk.core.curation import STANDARD_LINKS, standard_links
 from httk.core.entry_ids import parse_alternative_id, parse_entry_id, parse_immutable_id
 from httk.core.register import (
     entry_family_info,
@@ -684,32 +685,72 @@ def _application_entry_family(name: str, entry_type: str, definition_id: str, re
 
 
 def _normalize_entry_families(declarations: Sequence[EntryFamilyDeclaration], *, explicit: bool) -> StorageLayout:
-    entries: list[EntryFamilyLayout] = []
-    for declaration in declarations:
-        if explicit:
+    if explicit:
+        for declaration in declarations:
             _reject_registry_conflicts(declaration)
-        for record in declaration.records:
-            schema = resolve_schema(record.record)
-            if schema.dedup != "content_id":
-                raise ValueError(
-                    f"configured entry record {record.record.__name__} must use "
-                    f"dedup='content_id', got {schema.dedup!r}"
-                )
-        entries.append(
-            EntryFamilyLayout(
-                name=declaration.name,
-                family=declaration.family,
-                definition_id=declaration.definition_id,
-                record_names=tuple(record.name for record in declaration.records),
-                records=tuple(record.record for record in declaration.records),
-                record_definition_ids=tuple(record.definition_id for record in declaration.records),
-            )
+    entries = [_family_layout(declaration) for declaration in declarations]
+    records = {record for entry in entries for record in entry.records}
+    if any(standard_links(record) for record in records):
+        names = {entry.name for entry in entries}
+        entries.extend(
+            _family_layout(declaration)
+            for declaration in _link_target_declarations()
+            if declaration.name not in names and declaration.records[0].record not in records
         )
     return _storage_layout(entries)
 
 
+def _family_layout(declaration: EntryFamilyDeclaration) -> EntryFamilyLayout:
+    for record in declaration.records:
+        schema = resolve_schema(record.record)
+        if schema.dedup != "content_id":
+            raise ValueError(
+                f"configured entry record {record.record.__name__} must use dedup='content_id', got {schema.dedup!r}"
+            )
+    return EntryFamilyLayout(
+        name=declaration.name,
+        family=declaration.family,
+        definition_id=declaration.definition_id,
+        record_names=tuple(record.name for record in declaration.records),
+        records=tuple(record.record for record in declaration.records),
+        record_definition_ids=tuple(record.definition_id for record in declaration.records),
+    )
+
+
+def _link_target_declarations() -> tuple[EntryFamilyDeclaration, ...]:
+    """The registered families of the :data:`~httk.core.curation.STANDARD_LINKS` targets.
+
+    A declaration containing a record that gets the standard links also gets
+    these families, unless it already declares the family name or the target
+    record class, so that the links can actually be stored.
+    """
+    declarations: list[EntryFamilyDeclaration] = []
+    for link in STANDARD_LINKS:
+        record_name = _registered_record_name(link.target)
+        _, registered_family, definition_id = entry_record_info(record_name)
+        family_name = cast(str, registered_family)  # httk-core registers every link target with a family
+        declarations.append(
+            EntryFamilyDeclaration(
+                name=family_name,
+                family=resolve_entry_family(family_name),
+                records=(EntryRecordDeclaration(name=record_name, record=link.target, definition_id=definition_id),),
+                definition_id=entry_family_info(family_name)[1],
+            )
+        )
+    return tuple(declarations)
+
+
 def _merge_storage_layouts(*layouts: StorageLayout) -> StorageLayout:
-    return _storage_layout([family for layout in layouts for family in layout.families])
+    """Combine layouts; an implicit link-target family yields to any other declaration of that family."""
+    families = [family for layout in layouts for family in layout.families]
+    implicit = {_family_layout(declaration) for declaration in _link_target_declarations()}
+    declared = {item for family in families if family not in implicit for item in (family.name, *family.records)}
+    kept: list[EntryFamilyLayout] = []
+    for family in families:
+        if family in implicit and (family.name in declared or family.records[0] in declared or family in kept):
+            continue
+        kept.append(family)
+    return _storage_layout(kept)
 
 
 def _storage_layout(entries: list[EntryFamilyLayout]) -> StorageLayout:

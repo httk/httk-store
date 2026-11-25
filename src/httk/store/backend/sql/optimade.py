@@ -114,14 +114,18 @@ def _weak_link_id_has_handlers(store: SqlStore, related_cls: type, name: str) ->
     over fresh link aliases (mirroring :func:`field_id_has_handlers`); ``HAS ONLY`` uses
     the set machinery's ``has_only`` (a no-links source matches vacuously), which
     expresses the multi-valued semantics faithfully via the subquery passthrough.
+    A target class with no table yet (nothing of it saved) resolves no id.
     """
 
     def has_handler(
         entry: str, ops: Any, values: Any, search_variable: SearchVariable, has_type: str
     ) -> SearchExpression:
         table = store._table(resolve_schema(related_cls).table_name)
+        missing = store._missing_tables_for_read((related_cls,))
 
         def lineages(selected: Any) -> Any:
+            if missing:
+                return sqlalchemy.select(sqlalchemy.literal(-1)).where(sqlalchemy.false())
             return sqlalchemy.select(table.c[LOGICAL_ID_COLUMN]).where(table.c["id"].in_(selected))
 
         if has_type == 'HAS_ALL':

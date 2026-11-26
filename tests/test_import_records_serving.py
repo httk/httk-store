@@ -24,7 +24,7 @@ from httk.atomistic import (
     WyckoffSite,
 )
 from httk.atomistic.io.cif.cif_items import CIFDataItem
-from httk.core import FileEntry, FileRecord, ImportEntry, ImportRecord, ImportReport
+from httk.core import FileEntry, FileRecord, ImportEntry, ImportRecord, ImportReport, ReferenceEntry, ReferenceRecord
 from httk.core.register.schemas import load_entry_type_definition
 from httk.core.storage import project_storage_record, stored_property_projections
 
@@ -98,8 +98,8 @@ _EXCLUDED = UnitcellStructureImportRecord(
 )
 
 
-def _store(store_factory) -> SqlStore:
-    store = store_factory(entry_records=_RECORDS, entry_ids=EntryIdScheme("httk.test", "1"))
+def _store(store_factory, records: dict[type, Any] = _RECORDS) -> SqlStore:
+    store = store_factory(entry_records=records, entry_ids=EntryIdScheme("httk.test", "1"))
     if not isinstance(store, SqlStore):
         pytest.skip("stored-federation serving and filtering are SQL-only")
     return store
@@ -196,6 +196,48 @@ def test_structure_to_import_record_by_relationship_filter(store_factory) -> Non
     # A relationship no backing of the family serves stays an unrecognized property.
     with pytest.raises(FilterTranslationError, match="unrecognized property name: calculations.id"):
         ids('calculations.id HAS "x"')
+
+
+def test_negated_relationship_filter_composes_with_scalar_conditions(store_factory) -> None:
+    """A negated relationship filter ANDed or ORed with a scalar condition, in either operand order.
+
+    The negation is a grouped query's HAVING condition. The scalar column beside it must be
+    grouped by (DuckDB rejected the query), and a scalar on the left must not drop the negation
+    (SQLite and PostgreSQL answered as if it were absent).
+    """
+    store = _store(store_factory, {**_RECORDS, ReferenceEntry: ReferenceRecord})
+    imported = store.fetch(ASUStructureImportRecord, store.save(_imported()), eager=True)
+    failed = store.fetch(ImportRecord, store.save(_FAILED), eager=True)  # no structure field at all
+    excluded = store.fetch(UnitcellStructureImportRecord, store.save(_EXCLUDED), eager=True)  # NULL structure
+    reference = store.fetch(ReferenceRecord, store.save(ReferenceRecord(title="Cited")), eager=True)
+    store.link(imported, "references", reference)
+    assert imported.structure is not None and imported.source_file is not None
+    s, f, r = imported.structure.id, imported.source_file.id, reference.id
+    everything = sorted([imported.id, failed.id, excluded.id])
+    after = '"2026-11-25T00:00:00Z"'
+    cases = {
+        f'NOT structures.id HAS "{s}" AND _httk_status = "imported"': [],
+        f'_httk_status = "imported" AND NOT structures.id HAS "{s}"': [],
+        f'NOT (structures.id HAS "{s}") OR _httk_status = "imported"': everything,
+        f'_httk_status = "imported" OR NOT structures.id HAS "{s}"': everything,
+        'NOT structures.id HAS "x" AND _httk_status = "imported"': [imported.id],
+        '_httk_status = "imported" AND NOT structures.id HAS "x"': [imported.id],
+        'NOT (structures.id HAS "x") OR _httk_status = "failed"': everything,
+        'NOT structures.id HAS "x"': everything,
+        'NOT files.id HAS "x" AND _httk_status = "imported"': [imported.id],
+        f'NOT files.id HAS "{f}" AND _httk_importer STARTS "build-cod"': [excluded.id],
+        f'_httk_importer STARTS "build-cod" AND NOT files.id HAS "{f}"': [excluded.id],
+        '_httk_error IS KNOWN AND NOT structures.id HAS ONLY "nonesuch"': [],
+        'NOT structures.id HAS ONLY "nonesuch" AND _httk_error IS KNOWN': [],
+        '_httk_error IS UNKNOWN OR NOT structures.id HAS ONLY "nonesuch"': [imported.id],
+        f'_httk_imported_at > {after} AND NOT structures.id HAS ALL "{s}","x"': sorted([imported.id, failed.id]),
+        f'NOT structures.id HAS ANY "{s}","x" AND _httk_imported_at > {after}': [failed.id],
+        f'NOT references.id HAS "{r}" AND _httk_status = "imported"': [],
+        f'_httk_status = "imported" AND NOT references.id HAS "{r}"': [],
+        f'_httk_status = "failed" OR NOT references.id HAS "{r}"': sorted([failed.id, excluded.id]),
+        f'NOT references.id HAS "{r}" OR _httk_status = "imported"': everything,
+    }
+    assert {filter_string: _ids(_query(store, ImportEntry, filter_string)) for filter_string in cases} == cases
 
 
 @pytest.mark.parametrize("promote", [True, False])

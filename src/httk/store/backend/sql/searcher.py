@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 import sqlalchemy
 from httk.core.storage import resolve_storage_record
+from sqlalchemy.sql import visitors
 
 from httk.store.backend.codecs import ValueCodec, codec_named, decode_fracvector_exact
 from httk.store.backend.schema import (
@@ -1947,10 +1948,13 @@ class SqlSearcher:
         Those are (a) the :attr:`SqlExpression.group_columns` of the conditions
         applied in HAVING position — a plain comparison reaching HAVING names a
         root-table column, which strict dialects (DuckDB) reject unless it is
-        grouped — and (b) the non-child sort keys, which ORDER BY names for the
-        same reason. Both kinds hold one distinct value per group (they are
-        functionally dependent on the grouped root ``sid``), so grouping by them
-        cannot split a group.
+        grouped — together with every root-variable column their HAVING
+        renderings mention at all, so a condition built outside this module
+        (the stored-property predicates, whose correlated subqueries also name
+        root columns) never depends on declaring them; and (b) the non-child
+        sort keys, which ORDER BY names for the same reason. All of these hold
+        one distinct value per group (they are functionally dependent on the
+        grouped root ``sid``), so grouping by them cannot split a group.
 
         Columns are de-duplicated by :func:`id`, never by ``==``/``in``:
         :class:`sqlalchemy.ColumnElement` overloads ``==`` to build a SQL clause
@@ -1964,9 +1968,13 @@ class SqlSearcher:
                 seen.add(id(column))
                 columns.append(column)
 
+        roots = [variable._alias for variable in self._variables]
         for expression in self._having:
             for column in expression.group_columns:
                 append(column)
+            for node in visitors.iterate(expression.having_clause):
+                if isinstance(node, sqlalchemy.ColumnClause) and any(node.table is root for root in roots):
+                    append(cast("sqlalchemy.ColumnElement[Any]", node))
         for sort_column, _descending in self._sorts:
             if not sort_column._from_child:
                 append(sort_column._element)

@@ -263,6 +263,48 @@ def test_reference_comparison_under_grouped_mode(store):
     assert searcher.count() == len(searcher.results(rec=v))
 
 
+# A negated set-derived condition (HAVING position) beside a scalar one, whose column must
+# then be grouped by: (negated condition, scalar condition, combinator, expected formulas).
+# Each case runs in both operand orders.
+NEGATED_SET_WITH_SCALAR_CASES = [
+    (lambda v: ~v.symbols.has_any("Ca"), lambda v: v.spacegroup == 225, "&", {"NaCl", "MgO"}),
+    (lambda v: ~v.symbols.has_any("Ca"), lambda v: v.spacegroup == 221, "|", {"CaTiO3", "NaCl", "MgO", "X"}),
+    (lambda v: ~v.symbols.has_only("O", "Ca", "Ti"), lambda v: v.formula.startswith("Mg"), "&", {"MgO"}),
+    (
+        lambda v: ~v.symbols.has_only("O", "Ca", "Ti"),
+        lambda v: v.formula.startswith("Ca"),
+        "|",
+        {"CaTiO3", "NaCl", "MgO", "CaO", "SrCaTiO"},
+    ),
+    (
+        lambda v: ~(v.symbols.has_any("Ca") & v.symbols.has_any("Ti")),
+        lambda v: (v.energy > 0.0) & (v.energy <= 1.0),
+        "&",
+        {"NaCl", "X"},
+    ),
+    (
+        lambda v: ~(v.symbols.has_any("Ca") & v.symbols.has_any("Ti")),
+        lambda v: v.energy > 1.0,
+        "|",
+        {"NaCl", "MgO", "CaO", "X", "SrCaTiO"},
+    ),
+    (lambda v: ~v.symbols.is_in("Ca", "O"), lambda v: v.ref.doi == "10.1/a", "&", {"CaTiO3", "NaCl"}),
+    (lambda v: ~v.symbols.is_in("Ca", "O"), lambda v: v.ref == None, "|", ALL_FORMULAS),
+    (lambda v: ~(v.symbols == "O"), lambda v: v.spacegroup.is_in(62), "|", {"NaCl", "X", "SrCaTiO"}),
+    (lambda v: ~v.symbols.has_any("Na"), lambda v: v.ref != None, "&", {"CaTiO3", "MgO", "SrCaTiO"}),
+]
+
+
+@pytest.mark.parametrize("negated,scalar,combinator,expected", NEGATED_SET_WITH_SCALAR_CASES)
+@pytest.mark.parametrize("negated_first", [True, False])
+def test_negated_set_condition_with_scalar_condition(store, negated, scalar, combinator, expected, negated_first):
+    searcher, v = rec_searcher(store)
+    left, right = (negated(v), scalar(v)) if negated_first else (scalar(v), negated(v))
+    searcher.add(left & right if combinator == "&" else left | right)
+    assert formulas(searcher, v) == expected
+    assert searcher.count() == len(expected)
+
+
 # ------------------------------------------------------------- constant expressions
 
 

@@ -172,14 +172,25 @@ class _SqlPredicate:
         object.__setattr__(self, "where_clause", self.clause)
         object.__setattr__(self, "having_clause", self.clause)
 
-    def __and__(self, other: object) -> "_SqlPredicate":
+    def _expression(self) -> SqlExpression:
+        """This predicate as a searcher expression (the same clause in both positions)."""
+        return SqlExpression(self.clause, self.clause, correlation_depth=self.correlation_depth)
+
+    # Combining with a searcher expression (a relationship ``HAS`` built on the search
+    # variable) defers to its combinators: a negated set-derived or for-all operand lives
+    # in its HAVING rendering, which ``_predicate`` would drop for its WHERE rendering.
+    def __and__(self, other: object) -> "_SqlPredicate | SqlExpression":
+        if isinstance(other, SqlExpression):
+            return self._expression() & other
         other_predicate = _predicate(other)
         return _SqlPredicate(
             _bool_clause(sqlalchemy.and_(self.clause, other_predicate.clause)),
             correlation_depth=max(self.correlation_depth, other_predicate.correlation_depth),
         )
 
-    def __or__(self, other: object) -> "_SqlPredicate":
+    def __or__(self, other: object) -> "_SqlPredicate | SqlExpression":
+        if isinstance(other, SqlExpression):
+            return self._expression() | other
         other_predicate = _predicate(other)
         return _SqlPredicate(
             _bool_clause(sqlalchemy.or_(self.clause, other_predicate.clause)),

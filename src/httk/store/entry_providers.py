@@ -658,6 +658,7 @@ Tag.__httk_stored_properties__ = {  # type: ignore[attr-defined]
     "_httk_value": _string_column_projection("value"),
 }
 ExternalDatabaseEntry.__httk_stored_properties__ = {  # type: ignore[attr-defined]
+    "_httk_database_provider": _string_column_projection("database_provider"),
     "_httk_database": _string_column_projection("database"),
     "_httk_entry_id": _string_column_projection("entry_id"),
     "_httk_url": _string_column_projection("url"),

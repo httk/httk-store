@@ -198,9 +198,12 @@ def test_decorated_only_records_layout_is_unchanged() -> None:
         # and no target families reproduces 167cf05b3e5f3727 / 84a01b57df46e5e0 / 0e5c3dbfcf40770e.
         # Re-pinned November 25, 2026 (all three): the implicit notes family's `author` column became
         # `source`; the previous pins were be68932b14a19368 / 1885909d7e27a4ec / ed9cdf0772454f31.
-        (ResultWithStructure,): "73e25798f4f226fe",
-        (Result,): "580468d366fd860d",
-        (Alpha, Beta): "f36d7e38afbc1f7c",
+        # Re-pinned November 26, 2026 (all three): the implicit external_database_entries family's
+        # `database` column was split into `database_provider` and a nullable `database`, and its
+        # index widened; the previous pins were 73e25798f4f226fe / 580468d366fd860d / f36d7e38afbc1f7c.
+        (ResultWithStructure,): "76722073d607b085",
+        (Result,): "6107bd8dc03568e3",
+        (Alpha, Beta): "5f628e53c1502008",
     }
     for records, digest in layouts.items():
         layout = normalize_entry_types(list(records))

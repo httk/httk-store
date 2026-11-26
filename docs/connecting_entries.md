@@ -252,8 +252,10 @@ relationships: `references` (`ReferenceRecord`), `notes` (`Note`), `tags`
 ``httk.core.curation`` records; a store declaring any entry record also gets
 their four families automatically. A declared link, field or stored property of
 the same name wins. Targets are content-deduplicated, so a shared `Note` is not
-edited in place: unlink it and link a new one. `ExternalDatabaseEntry.role` is
-part of its identity (`None` is a general relation, `"origin"` means the linking
+edited in place: unlink it and link a new one. An `ExternalDatabaseEntry` names
+the provider (its OPTIMADE provider prefix, e.g. `"cod"`), the provider's
+database (`None` for its only or main one) and the entry id. Its `role` is part
+of its identity (`None` is a general relation, `"origin"` means the linking
 entry was obtained from that external entry); `url` is not.
 
 ```python
@@ -272,8 +274,8 @@ note = Note(datetime.datetime(2026, 11, 25, tzinfo=datetime.UTC), "curator", "Re
 links = [
     (run, "notes", note),
     (run, "tags", Tag("source", "cod")),
-    (run, "external", ExternalDatabaseEntry("cod", "1000000", role="origin")),
-    (other, "external", ExternalDatabaseEntry("cod", "1000001")),  # general relation
+    (run, "external", ExternalDatabaseEntry("cod", None, "1000000", role="origin")),
+    (other, "external", ExternalDatabaseEntry("cod", None, "1000001")),  # general relation
 ]
 for source, name, target in links:
     store.link(source, name, store.fetch(type(target), store.save(target), eager=True))
@@ -281,7 +283,7 @@ for source, name, target in links:
 search = store.searcher(only_latest=True)
 v = search.variable(Run)
 lk = v.links.external  # one linked entry must satisfy both conditions
-search.add((lk.database == "cod") & (lk.role == "origin"))
+search.add((lk.database_provider == "cod") & (lk.role == "origin"))
 print([row.values[0].source_id for row in search.results(v=v)])
 ```
 

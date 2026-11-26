@@ -156,7 +156,7 @@ def test_run_links_to_every_curation_record_and_reopens(store_factory) -> None:
         "references": ReferenceRecord(title="The external database"),  # type: ignore[arg-type]
         "notes": Note(_DATE, "httk-test 1.0", "Removed a stray loop."),
         "tags": Tag("source", "cod"),
-        "external": ExternalDatabaseEntry("cod", "1000000", role="origin"),
+        "external": ExternalDatabaseEntry("cod", None, "1000000", role="origin"),
     }
     ids = {}
     for name, target in targets.items():
@@ -177,14 +177,16 @@ def test_run_links_to_every_curation_record_and_reopens(store_factory) -> None:
 def test_curation_records_deduplicate(store_factory) -> None:
     store = _linking_store(store_factory)
     assert store.save(Tag("source", "cod")) == store.save(Tag("source", "cod"))
-    origin = ExternalDatabaseEntry("cod", "1", role="origin")
+    origin = ExternalDatabaseEntry("cod", None, "1", role="origin")
     origin_sid = store.save(origin)
-    assert store.save(ExternalDatabaseEntry("cod", "1")) != origin_sid
+    assert store.save(ExternalDatabaseEntry("cod", None, "1")) != origin_sid
+    # The provider's database is part of the identity.
+    assert store.save(ExternalDatabaseEntry("cod", "x", "1", role="origin")) != origin_sid
     stored = store.fetch(ExternalDatabaseEntry, origin_sid, eager=True)
     assert stored.url is None
     # The url is outside the identity: a later save fills the stored NULL (KeepStored) in place.
     url = "https://www.crystallography.net/cod/1.html"
-    assert store.save(ExternalDatabaseEntry("cod", "1", url=url, role="origin")) == origin_sid
+    assert store.save(ExternalDatabaseEntry("cod", None, "1", url=url, role="origin")) == origin_sid
     filled = store.fetch(ExternalDatabaseEntry, origin_sid, eager=True)
     assert filled.url == url
     assert (filled.id, filled.immutable_id) == (stored.id, stored.immutable_id)
@@ -202,8 +204,8 @@ def test_query_dsl_over_standard_links(store_factory) -> None:
     first = store.fetch(Run, store.save(Run(source_id="first")), eager=True)
     second = store.fetch(Run, store.save(Run(source_id="second")), eager=True)
     for run, entries in (
-        (first, (ExternalDatabaseEntry("cod", "1", role="origin"), ExternalDatabaseEntry("icsd", "2"))),
-        (second, (ExternalDatabaseEntry("cod", "3"),)),
+        (first, (ExternalDatabaseEntry("cod", None, "1", role="origin"), ExternalDatabaseEntry("icsd", None, "2"))),
+        (second, (ExternalDatabaseEntry("cod", None, "3"),)),
     ):
         for entry in entries:
             store.link(run, "external", store.fetch(ExternalDatabaseEntry, store.save(entry), eager=True))
@@ -212,11 +214,11 @@ def test_query_dsl_over_standard_links(store_factory) -> None:
 
     def same_external(searcher, v):
         lk = v.links.external
-        searcher.add((lk.database == "cod") & (lk.role == "origin"))
+        searcher.add((lk.database_provider == "cod") & (lk.role == "origin"))
 
     assert _labels(store, same_external) == ["first"]
     # Fresh accesses constrain independent linked entries: second has a cod entry, but no origin at all.
-    assert _labels(store, lambda s, v: s.add(v.links.external.database == "cod")) == ["first", "second"]
+    assert _labels(store, lambda s, v: s.add(v.links.external.database_provider == "cod")) == ["first", "second"]
     assert _labels(store, lambda s, v: s.add(v.links.tags.key == "x")) == ["first", "second"]
 
     def same_tag(searcher, v):
@@ -244,10 +246,10 @@ def test_curation_records_serve_and_filter(store_factory) -> None:
     tag = store.fetch(Tag, store.save(Tag("x", "y")), eager=True)
     origin = store.fetch(
         ExternalDatabaseEntry,
-        store.save(ExternalDatabaseEntry("cod", "1", url="https://example.org/1", role="origin")),
+        store.save(ExternalDatabaseEntry("cod", None, "1", url="https://example.org/1", role="origin")),
         eager=True,
     )
-    general = store.fetch(ExternalDatabaseEntry, store.save(ExternalDatabaseEntry("icsd", "2")), eager=True)
+    general = store.fetch(ExternalDatabaseEntry, store.save(ExternalDatabaseEntry("icsd", "core", "2")), eager=True)
     store.link(run, "notes", note)
     store.link(run, "tags", tag)
     store.link(run, "external", origin)
@@ -269,12 +271,16 @@ def test_curation_records_serve_and_filter(store_factory) -> None:
     assert (tag_row["id"], tag_row["_httk_value"]) == (tag.id, "y")
     assert _ids(_query(store, TagEntry, '_httk_key = "other"')) == []
     rows = {row["id"]: row for row in _query(store, ExternalDatabaseEntryFamily).rows}
-    assert rows[origin.id]["_httk_database"] == "cod"
+    assert rows[origin.id]["_httk_database_provider"] == "cod"
+    assert rows[origin.id]["_httk_database"] is None
+    assert (rows[general.id]["_httk_database_provider"], rows[general.id]["_httk_database"]) == ("icsd", "core")
     assert rows[origin.id]["_httk_entry_id"] == "1"
     assert rows[origin.id]["_httk_url"] == "https://example.org/1"
     assert rows[origin.id]["_httk_role"] == "origin"
     assert rows[general.id]["_httk_role"] is None
-    assert _ids(_query(store, ExternalDatabaseEntryFamily, '_httk_database = "cod"')) == [origin.id]
+    assert _ids(_query(store, ExternalDatabaseEntryFamily, '_httk_database_provider = "cod"')) == [origin.id]
+    assert _ids(_query(store, ExternalDatabaseEntryFamily, '_httk_database = "core"')) == [general.id]
+    assert _ids(_query(store, ExternalDatabaseEntryFamily, "_httk_database IS UNKNOWN")) == [origin.id]
     assert _ids(_query(store, ExternalDatabaseEntryFamily, '_httk_role = "origin"')) == [origin.id]
 
     assert _ids(_query(store, RunEntry, f'_httk_external_database_entries.id HAS "{origin.id}"')) == [run.id]

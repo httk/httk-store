@@ -253,7 +253,7 @@ def test_populated_store_link_semantics(store_factory, chunk_size, index_strateg
         bulk.save(Run(source_id="retracted"), links={"notes": _note("retracted")})  # revival row
         bulk.save(Run(source_id="new"), links={"notes": _note("fresh")})  # replaced source: lineage id
         bulk.save(Run(source_id="brand-new"), links={"notes": _note("kept")})  # new source, existing target
-        bulk.save(Run(source_id="brand-new"), links={"external": ExternalDatabaseEntry("cod", "1000000")})
+        bulk.save(Run(source_id="brand-new"), links={"external": ExternalDatabaseEntry("cod", None, "1000000")})
     assert _count(store, Note) == 3
     after = _link_rows(store, "notes")
     added = after[len(before) :]
@@ -330,7 +330,7 @@ def _ingest_corpus(bulk_ingest) -> tuple[dict[str, list[tuple[str, str, int]]], 
                 links={
                     "notes": [shared, _note("own")],
                     "tags": [tag, Tag("k")],
-                    "external": [ExternalDatabaseEntry("cod", "1000000")],
+                    "external": [ExternalDatabaseEntry("cod", None, "1000000")],
                 },
             )
         )

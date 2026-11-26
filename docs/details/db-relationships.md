@@ -189,7 +189,8 @@ different link layout and must be rebuilt: opening them with `upgrade=True` is
 refused. Served relationships are keyed `references`, `_httk_notes`,
 `_httk_tags` and `_httk_external_database_entries`, over the entry types of the
 same names (properties `_httk_date`, `_httk_source`, `_httk_text`; `_httk_key`,
-`_httk_value`; `_httk_database`, `_httk_entry_id`, `_httk_url`, `_httk_role`).
+`_httk_value`; `_httk_database_provider`, `_httk_database`, `_httk_entry_id`, `_httk_url`,
+`_httk_role`).
 `bulk_ingest` supports weak links, standard or declared, through
 `bulk.save(obj, links=...)` in every mode; the deferred and parallel paths need
 the default `track_sids=True` (see the bulk-ingestion guide).

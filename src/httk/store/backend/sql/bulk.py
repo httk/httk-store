@@ -232,7 +232,7 @@ class BulkIngest:
         each link target counts as a buffered record.
     :param workers: The number of worker processes; ``1`` (the default) is the serial path, ``>1`` encodes in parallel and merges shards.
     :param finalize: The finalization profile: ``"auto"`` selects the deferred finalizer on a fresh supported store for serial ingestion and the parity merge otherwise; ``"parity"`` and ``"deferred"`` force the respective profile.
-    :param track_sids: Retain the per-save provisional-to-final sid mapping.  Disable it for bounded-memory offline builds when callers do not need :meth:`resolved_sid`.
+    :param track_sids: Retain the per-save provisional-to-final sid mapping.  Disable it for bounded-memory offline builds when callers do not need :meth:`resolved_sid`; the deferred and parallel ingests also need it for ``save(links=...)``.
     :param id_series: Override the configured entry-id series for ids minted during the ingest.
     """
 
@@ -944,8 +944,8 @@ class BulkIngest:
         target the store already holds resolves to its existing row), and the link rows are resolved with the
         ordinary :meth:`~httk.store.backend.sql.store.SqlStore.link` semantics at flush (a live pair is kept, a
         retracted pair is revived, an absent pair founds a fresh link lineage). Each target counts as one save
-        towards ``chunk_size`` and ``on_progress``. Only the serial parity finalizer supports a ``links`` mapping
-        with at least one target so far; the others still validate it.
+        towards ``chunk_size`` and ``on_progress``. The deferred and parallel (``workers>1``) ingests resolve the
+        links once, after finalization, from the values ``save`` returned, so there they need ``track_sids=True``.
 
         :param obj: The object to store.
         :param as_record: The alternate record representation to use, if any.
@@ -956,9 +956,8 @@ class BulkIngest:
         :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
         :return: The provisional sid (see :meth:`resolved_sid` for the durable one).
         :raises RuntimeError: If the bulk context is not open.
-        :raises ValueError: If ``alternative_of`` or ``alternative_kind`` is given (bulk ingest is mains only).
-        :raises NotImplementedError: If ``links`` names at least one target in a deferred or parallel
-            (``workers>1``) ingest.
+        :raises ValueError: If ``alternative_of`` or ``alternative_kind`` is given (bulk ingest is mains only), or
+            ``links`` names at least one target in a deferred or parallel ingest opened with ``track_sids=False``.
         :raises httk.store.backend.schema.SchemaError: If ``obj``'s record declares no weak link of a given name.
         :raises TypeError: If ``obj`` or a link target is a cursor row that must be materialized first, or a
             target's type does not match its link's declared target.
@@ -975,16 +974,24 @@ class BulkIngest:
         refuse_undeclared_entry(self._store.layout, obj, record_type)
         promoted = self._promoted_types(record_type, promote)
         link_targets = self._link_targets(record_type, links) if links else []
-        if link_targets and (self._parallel or self._deferred):
-            selected = f"workers={self._workers}" if self._parallel else f"finalize={self._requested_finalize!r}"
-            raise NotImplementedError(
-                f"bulk_ingest({selected}) selected the {'parallel' if self._parallel else 'deferred'} ingest, "
-                'which does not support save(links=...) yet; use bulk_ingest(finalize="parity", workers=1)'
-            )
-        if self._parallel:
-            return self._parallel_save(obj, as_record, record_type, promoted)
-        if self._deferred:
-            return self._deferred_serial_save(obj, as_record, record_type, promoted)
+        if self._parallel or self._deferred:
+            if link_targets and not self._track_sids:
+                selected = f"workers={self._workers}" if self._parallel else f"finalize={self._requested_finalize!r}"
+                raise ValueError(
+                    f"bulk_ingest({selected}) selected the {'parallel' if self._parallel else 'deferred'} ingest, "
+                    "whose save(links=...) resolves links from the retained sids and so needs track_sids=True; "
+                    'use track_sids=True, or bulk_ingest(finalize="parity", workers=1)'
+                )
+            mode_save = self._parallel_save if self._parallel else self._deferred_serial_save
+            returned = mode_save(obj, as_record, record_type, promoted)
+            # Resolved to link rows after finalization (see _insert_link_rows).
+            # ponytail: every pair of the ingest is held in memory until then; spill to the stage if that bites.
+            intents = [
+                (key, (returned, mode_save(target, None, cls, frozenset()))) for key, target, cls in link_targets
+            ]
+            for key, pair in intents:
+                self._link_intents.setdefault(key, set()).add(pair)
+            return returned
         sid = self._serial_save(obj, record_type, promoted)
         self._returned_sids.add((resolve_schema(record_type).table_name, sid))
         # Recorded only once every target saved, so a failing save(links=...) records no link.
@@ -1587,8 +1594,13 @@ class BulkIngest:
             # After dedup, remap and the sweep, so endpoints are final and the
             # link rows (which no graph edge reaches) are not swept.
             self._buffer_link_rows()
-        for name in self._logical_graph().dependency_order(store._metadata.tables):
-            table = store._metadata.tables[name]
+        self._insert_buffered()
+
+    def _insert_buffered(self) -> None:
+        """Append every buffered row, referenced tables first, and count it."""
+        assert self._connection is not None
+        for name in self._logical_graph().dependency_order(self._store._metadata.tables):
+            table = self._store._metadata.tables[name]
             name = table.name
             rows = self._rows.get(name)
             if not rows:
@@ -1598,6 +1610,13 @@ class BulkIngest:
             self._inserted_count[name] = self._inserted_count.get(name, 0) + len(rows)
             self._rows_flushed_total += len(rows)
             rows.clear()
+
+    def _insert_link_rows(self) -> None:
+        """Resolve the deferred or parallel ingest's link intents through the finalized sids and append their rows."""
+        if self._link_intents:
+            self._buffer_link_rows()
+            self._insert_buffered()
+            self._rows_by_sid.clear()
 
     def _buffer_link_rows(self) -> None:
         """Resolve this chunk's link intents to lineage pairs and buffer the link rows they need.
@@ -1612,12 +1631,27 @@ class BulkIngest:
         # Final sids per endpoint table; rows this ingest inserts are their own lineage.
         final: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
         older: dict[str, set[int]] = {}
+        # A serial parity sid absent from the map resolves to itself; a deferred public sid or parallel
+        # token is never a stored sid, so it must have been mapped by finalization.
+        strict = self._parallel or self._deferred
+
+        def resolve(table_name: str, returned: int) -> int:
+            final_sid = self._resolved_map.get((table_name, returned))
+            if final_sid is not None:
+                return final_sid
+            if strict:
+                raise RuntimeError(
+                    f"bulk_ingest link endpoint {table_name!r} save value {returned} was not resolved by "
+                    "finalization (internal invariant breach)"
+                )
+            return returned
+
         for key, pairs in intents.items():
             _link, source_table, target_table = key
             resolved = final[key] = []
             for provisional_source, provisional_target in pairs:
-                source_sid = self._resolved_map.get((source_table, provisional_source), provisional_source)
-                target_sid = self._resolved_map.get((target_table, provisional_target), provisional_target)
+                source_sid = resolve(source_table, provisional_source)
+                target_sid = resolve(target_table, provisional_target)
                 resolved.append((source_sid, target_sid))
                 for endpoint_table, sid in ((source_table, source_sid), (target_table, target_sid)):
                     if sid < self._initial_next_sid.get(endpoint_table, 1):
@@ -1752,7 +1786,10 @@ class BulkIngest:
         manifests = self._controller.finish()  # re-raises the first worker exception
         self._assert_no_lost_tasks(manifests)
         merge(self, manifests)
+        self._insert_link_rows()
         self._create_new_indexes()
+        # Only a pre-created (necessarily empty) link table can have had its indexes dropped.
+        self._recreate_dropped_indexes()
         self._resync_sequences()
         self._assert_counts()
 
@@ -1810,6 +1847,8 @@ class BulkIngest:
                 if not self._parallel:
                     for (table, public_sid), stage_sid in self._serial_public_stage_sid.items():
                         self._resolved_map[(table, public_sid)] = finalizer._final_for_stage(table, stage_sid)
+                # A fresh store: every endpoint is a new row whose lineage id is its final sid.
+                self._insert_link_rows()
                 finalizer_timings = dict(finalizer.finalize_timings)
                 self.finalize_timings.update(finalizer_timings)
                 started = time.perf_counter()

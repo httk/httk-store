@@ -1,10 +1,11 @@
-"""Weak links through ``bulk_ingest`` (``save(..., links=...)``) on the serial parity finalizer.
+"""Weak links through ``bulk_ingest`` (``save(..., links=...)``) in every bulk mode.
 
 Bulk saves each link target as a top-level entry, deduplicated like any save, and
-resolves the link rows at flush with ordinary ``SqlStore.link`` semantics. The
-deferred and parallel finalizers validate ``links`` but refuse any target for
-now. Runs over the SQL arms of the shared ``store_factory`` fixture (Mongo has no
-``bulk_ingest``).
+resolves the link rows with ordinary ``SqlStore.link`` semantics: at flush on the
+serial parity finalizer, once after finalization on the deferred and parallel ones
+(which therefore need ``track_sids=True``). Runs over the SQL arms of the shared
+``store_factory`` fixture (Mongo has no ``bulk_ingest``) and, with
+``HTTK_TEST_CLICKHOUSE_URI``, the ClickHouse deferred arms.
 """
 
 import contextlib
@@ -22,7 +23,7 @@ from httk.core.storage import IdentitySkip, Indexed, Unique
 
 from httk.store import EntryIdScheme
 from httk.store.backend.schema import SchemaError, resolve_schema
-from httk.store.backend.sql import SqlStore
+from httk.store.backend.sql import Backend, SqlStore
 from httk.store.backend.sql.layout import actual_table_names
 from httk.store.store_common import EntryIdConflictError
 
@@ -82,6 +83,40 @@ def _store(store_factory, *, extended: bool = False) -> SqlStore:
     if not isinstance(store, SqlStore):
         pytest.skip("MongoStore has no bulk_ingest")
     return store
+
+
+_MODES = {
+    "serial-parity": {"finalize": "parity"},
+    "serial-deferred": {"finalize": "deferred"},
+    "parallel-parity": {"finalize": "parity", "workers": 2},
+    "parallel-deferred": {"finalize": "deferred", "workers": 2},
+}
+
+
+def _bulk(store: SqlStore, mode: str, **options):
+    """Open ``store``'s bulk ingest in ``mode``, skipping a combination the backend cannot run."""
+    selected = _MODES[mode]
+    if selected.get("workers", 1) > 1 and store.backend_facts.parallel_shard_format == "parquet":
+        pytest.importorskip("pyarrow")
+    return store.bulk_ingest(**selected, **options)
+
+
+def _link_pairs(store: SqlStore, source_cls: type, name: str) -> list[tuple[str, str, int]]:
+    """Every row of one link table as ``(source content id, target content id, retracted)``, sorted."""
+    source = resolve_schema(source_cls)
+    spec = next(link for link in source.links if link.name == name)
+    target = resolve_schema(spec.target).table_name
+    with store._database.engine.connect() as connection:
+        if spec.table_name not in actual_table_names(connection):
+            return []
+        rows = connection.execute(
+            sqlalchemy.text(
+                f'SELECT s.content_id, t.content_id, l.retracted FROM "{spec.table_name}" l '
+                f'JOIN "{source.table_name}" s ON s.logical_id = l.source_lid '
+                f'JOIN "{target}" t ON t.logical_id = l.target_lid'
+            )
+        )
+        return sorted((str(s), str(t), int(r)) for s, t, r in rows)
 
 
 def _note(text: str) -> Note:
@@ -159,11 +194,15 @@ def _insert_link_rows(store: SqlStore, name: str, rows: list[dict[str, int]]) ->
 
 
 @pytest.mark.parametrize("chunk_size", [100_000, 1])
-@pytest.mark.parametrize("track_sids", [True, False])
-def test_fresh_store_links(store_factory, chunk_size, track_sids) -> None:
+@pytest.mark.parametrize(
+    ("mode", "track_sids"),
+    # Only serial parity links without retained sids; the other modes refuse it (see below).
+    [(mode, True) for mode in _MODES] + [("serial-parity", False)],
+)
+def test_fresh_store_links(store_factory, mode, chunk_size, track_sids) -> None:
     store = _store(store_factory)
     shared = _note("Removed a stray loop.")
-    with store.bulk_ingest(finalize="parity", chunk_size=chunk_size, track_sids=track_sids) as bulk:
+    with _bulk(store, mode, chunk_size=chunk_size, track_sids=track_sids) as bulk:
         bulk.save(
             Run(source_id="first"),
             links={"notes": [shared, _note("Second note.")], "tags": Tag("source", "cod")},
@@ -253,25 +292,130 @@ def test_invalid_links_refuse_before_buffering(store_factory, links, error) -> N
     assert _labels(store, lambda v: v.source_id != "") == ["accepted", "existing"]
 
 
-@pytest.mark.parametrize(
-    "options",
-    [{"finalize": "parity"}, {"finalize": "deferred"}, {"finalize": "auto"}, {"workers": 2, "track_sids": False}],
-)
-def test_finalizer_link_support(store_factory, options) -> None:
-    """Every path validates ``links`` and accepts one without targets; deferred/parallel refuse a target."""
+@pytest.mark.parametrize("mode", [*_MODES, "auto"])
+def test_untracked_sids_link_support(store_factory, mode) -> None:
+    """Without retained sids every mode validates ``links`` first; only serial parity accepts a target."""
     store = _store(store_factory)
-    with store.bulk_ingest(**options) as bulk:
+    ingest = store.bulk_ingest(track_sids=False) if mode == "auto" else _bulk(store, mode, track_sids=False)
+    with ingest as bulk:
         refuses = bulk._deferred or bulk._parallel
         with pytest.raises(SchemaError):
             bulk.save(Run(source_id="undeclared"), links={"undeclared": _note("x")})
+        with pytest.raises(TypeError):
+            bulk.save(Run(source_id="mistyped"), links={"notes": Tag("source", "cod")})
         if refuses:
-            with pytest.raises(NotImplementedError, match='finalize="parity", workers=1'):
-                bulk.save(Run(source_id="linked"), links={"notes": _note("x")})
+            with pytest.raises(ValueError, match="track_sids=True"):
+                bulk.save(Run(source_id="refused"), links={"notes": _note("x")})
+        else:
+            bulk.save(Run(source_id="linked"), links={"notes": _note("x")})
         bulk.save(Run(source_id="empty-mapping"), links={})
         bulk.save(Run(source_id="empty-list"), links={"notes": [], "tags": ()})
-    assert _labels(store, lambda v: v.source_id != "") == ["empty-list", "empty-mapping"]
-    assert _count(store, Note) == 0
-    assert _link_rows(store, "notes") == []
+    linked = [] if refuses else ["linked"]
+    assert _labels(store, lambda v: v.source_id != "") == sorted(["empty-list", "empty-mapping", *linked])
+    assert _count(store, Note) == len(linked)
+    assert len(_link_rows(store, "notes")) == len(linked)
+
+
+def _ingest_corpus(bulk_ingest) -> tuple[dict[str, list[tuple[str, str, int]]], list[int]]:
+    """Save the shared link corpus through ``bulk_ingest``; return the link pairs by content and the Run sids."""
+    shared, tag = _note("shared"), Tag("source", "cod")
+    with bulk_ingest as bulk:
+        # Several sources share one target; one source has several targets and link names.
+        returned = [
+            bulk.save(Run(source_id=f"run-{index}"), links={"notes": shared, "tags": tag}) for index in range(5)
+        ]
+        returned.append(
+            bulk.save(
+                Run(source_id="many"),
+                links={
+                    "notes": [shared, _note("own")],
+                    "tags": [tag, Tag("k")],
+                    "external": [ExternalDatabaseEntry("cod", "1000000")],
+                },
+            )
+        )
+        # The same pair twice, and a target equal to an entry saved on its own.
+        bulk.save(Run(source_id="many"), links={"notes": [_note("own"), _note("own")]})
+        bulk.save(_note("separate"))
+        bulk.save(Run(source_id="run-0"), links={"notes": _note("separate")})
+        bulk.save(_note("separate"))
+    sids = [bulk.resolved_sid(Run, value) for value in returned]
+    return {name: _link_pairs(bulk._store, Run, name) for name in ("notes", "tags", "external")}, sids
+
+
+def _assert_corpus(
+    store: SqlStore, pairs: dict[str, list[tuple[str, str, int]]], sids: list[int], *, link_filters: bool = True
+) -> None:
+    assert len(pairs["notes"]) == 8 and len(pairs["tags"]) == 7 and len(pairs["external"]) == 1
+    assert _count(store, Note) == 3
+    assert _count(store, Tag) == 2
+    assert [row[0] for row in _link_rows(store, "notes")] == list(range(1, 9))  # dense link sids
+    assert all(row[1] == row[0] and row[4] == 0 for row in _link_rows(store, "notes"))
+    many = store.fetch(Run, sids[-1])
+    assert many.source_id == "many"
+    assert sorted(note.text for note in store.linked(many, "notes")) == ["own", "shared"]
+    assert sorted(tag.key for tag in store.linked(many, "tags")) == ["k", "source"]
+    assert sorted(note.text for note in store.linked(_run(store, "run-0"), "notes")) == ["separate", "shared"]
+    if link_filters:
+        assert _labels(store, lambda v: v.links.notes.text == "separate") == ["run-0"]
+
+
+@pytest.mark.parametrize("mode", [mode for mode in _MODES if mode != "serial-parity"])
+def test_links_equal_serial_parity(store_factory, mode) -> None:
+    """Deferred and parallel ingests store exactly the links (by content) serial parity stores."""
+    reference = _store(store_factory)
+    expected, _sids = _ingest_corpus(_bulk(reference, "serial-parity", chunk_size=2))
+    store = _store(store_factory)
+    actual, sids = _ingest_corpus(_bulk(store, mode, chunk_size=2))
+    assert actual == expected
+    _assert_corpus(store, actual, sids)
+    _assert_fsck_clean(store)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_clickhouse_deferred_links(workers) -> None:
+    """ClickHouse's deferred-only bulk path stores the serial parity links."""
+    from conftest import clickhouse_test_uri
+    from test_clickhouse_bulk import _clickhouse_bulk_database
+
+    pytest.importorskip("pyarrow")
+    records = {RunEntry: Run}
+    scheme = EntryIdScheme("httk.test", "1")
+    reference = SqlStore(Backend.sqlite(), entry_records=records, entry_ids=scheme)
+    try:
+        expected, _sids = _ingest_corpus(reference.bulk_ingest(finalize="parity", chunk_size=2))
+    finally:
+        reference._database.dispose()
+    with _clickhouse_bulk_database(clickhouse_test_uri()) as database:
+        store = SqlStore(database, entry_records=records, entry_ids=scheme)
+        actual, sids = _ingest_corpus(store.bulk_ingest(workers=workers, finalize="deferred", chunk_size=2))
+        assert actual == expected
+        # ClickHouse rejects the correlated subquery of a link filter, however the links were written.
+        _assert_corpus(store, actual, sids, link_filters=False)
+
+
+@pytest.mark.parametrize("index_strategy", ["auto", "keep", "rebuild"])
+def test_parallel_parity_into_precreated_tables(store_factory, index_strategy) -> None:
+    """Parallel ingest refuses stored rows, but appends links into pre-created empty tables, indexes intact."""
+    store = _store(store_factory)
+    if store._database.engine.dialect.name == "duckdb":
+        pytest.skip("parallel DuckDB ingest refuses pre-created tables")
+    # Run brings its link tables; content-id duplicates cannot load into a pre-created table (unrelated to links).
+    store.ensure_tables(Run)
+    with _bulk(store, "parallel-parity", index_strategy=index_strategy) as bulk:
+        bulk.save(Run(source_id="a"), links={"notes": [_note("n"), _note("m")]})
+        bulk.save(Run(source_id="b"), links={"notes": _note("n")})
+        assert _LINKS["notes"] in bulk._preexisting
+    assert len(_link_rows(store, "notes")) == 3
+    assert sorted(note.text for note in store.linked(_run(store, "a"), "notes")) == ["m", "n"]
+    link_table = store._table(_LINKS["notes"])
+    with store._database.engine.connect() as connection:
+        present = {index["name"] for index in sqlalchemy.inspect(connection).get_indexes(link_table.name)}
+    assert {index.name for index in link_table.indexes} <= present
+    (other,) = [note for note in store.linked(_run(store, "a"), "notes") if note.text == "m"]
+    store.link(_run(store, "b"), "notes", other)  # draws its sid past the bulk-assigned ones
+    assert [row[0] for row in _link_rows(store, "notes")] == [1, 2, 3, 4]
+    _assert_fsck_clean(store)
 
 
 def test_exception_rolls_back_links_and_targets(store_factory) -> None:
@@ -391,10 +535,11 @@ def test_unused_links_issue_identical_statements(store_factory, populated) -> No
     assert traces[0] == traces[1] == traces[2]
 
 
-def test_references_promote_and_as_record(store_factory) -> None:
+@pytest.mark.parametrize("mode", _MODES)
+def test_references_promote_and_as_record(store_factory, mode) -> None:
     store = _store(store_factory, extended=True)
     reference = ReferenceRecord(title="The external database")  # type: ignore[call-arg]
-    with store.bulk_ingest(finalize="parity") as bulk:
+    with _bulk(store, mode) as bulk:
         bulk.save(Job("job"), as_record=JobRecord, links={"references": reference, "notes": _note("n")})
         bulk.save(Envelope("cif", Run(source_id="nested")), promote=Run, links={"notes": _note("n")})
     searcher = store.searcher()
@@ -409,3 +554,37 @@ def test_references_promote_and_as_record(store_factory) -> None:
     assert store.linked(_run(store, "nested"), "notes") == ()
     assert _count(store, Note) == 1
     _assert_fsck_clean(store)
+
+
+@pytest.mark.parametrize("mode", [mode for mode in _MODES if mode != "serial-parity"])
+def test_unresolved_endpoint_is_an_invariant_breach(store_factory, monkeypatch, mode) -> None:
+    """A deferred or parallel link endpoint finalization did not map fails the ingest instead of guessing a sid."""
+    from httk.store.backend.sql import bulk_deferred, bulk_parallel
+
+    store = _store(store_factory)
+
+    def drop_notes(ingest) -> None:
+        for key in [key for key in ingest._resolved_map if key[0] == "core_note"]:
+            del ingest._resolved_map[key]
+
+    merge = bulk_parallel.merge
+    populate = bulk_deferred.DeferredFinalizer._populate_returned_sids
+
+    def lossy_merge(ingest, manifests) -> None:
+        merge(ingest, manifests)
+        drop_notes(ingest)
+
+    def lossy_populate(finalizer) -> None:
+        populate(finalizer)
+        drop_notes(finalizer.ingest)
+
+    monkeypatch.setattr(bulk_parallel, "merge", lossy_merge)
+    monkeypatch.setattr(bulk_deferred.DeferredFinalizer, "_populate_returned_sids", lossy_populate)
+    breach = pytest.raises(RuntimeError, match=r"'core_note' save value \d+ was not resolved by finalization")
+    with breach, _bulk(store, mode) as bulk:
+        bulk.save(Run(source_id="a"), links={"notes": _note("n")})
+        # Serial deferred maps its public sids from this table after the finalizer ran.
+        bulk._serial_public_stage_sid = {
+            key: value for key, value in bulk._serial_public_stage_sid.items() if key[0] != "core_note"
+        }
+    assert _link_rows(store, "notes") == []

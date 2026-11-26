@@ -110,11 +110,14 @@ the same chunk or a later one, adds no row. Each target counts as one save
 towards `chunk_size` and the `on_progress` record total. An undeclared link name
 raises `httk.store.backend.schema.SchemaError` and a target of the wrong type
 raises `TypeError`, both at the `save()` call and before anything is buffered; a
-failing target save records none of that call's links. Only the serial parity
-finalizer supports links for now: under `finalize="deferred"` (including
-`"auto"` when it selects deferred) or `workers>1`, a `links` mapping with at
-least one target is validated and then raises `NotImplementedError`, so pass
-`finalize="parity"`.
+failing target save records none of that call's links. Under
+`finalize="deferred"` (including `"auto"` when it selects deferred) or
+`workers>1` the links are resolved the same way, but once, after finalization,
+from the values `save()` returned: those ingests start from an empty store, so
+every link row is new. They therefore need the default `track_sids=True`; a
+`links` mapping with at least one target in such an ingest opened with
+`track_sids=False` is validated and then raises `ValueError`. The serial parity
+path links with either setting.
 
 ```python
 import datetime
@@ -184,7 +187,9 @@ buffered before a flush. Buffered rows and the in-memory dedup indexes are held
 until the next flush, so peak memory scales with the chunk size and each
 record's fan-out into child and reference rows: lower it for very wide records
 or a tight memory budget, raise it to amortize the staging round-trips over more
-rows. Each weak-link target passed through `links=` counts as one save. Identity
+rows. Each weak-link target passed through `links=` counts as one save. The
+deferred and parallel ingests keep every requested link pair in memory until
+finalization. Identity
 caches are deliberately not populated by bulk ingestion.
 
 **`on_progress`** is an optional `(records_buffered_total, rows_flushed_total)`

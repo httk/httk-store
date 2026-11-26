@@ -529,6 +529,9 @@ class _WorkerEncoder:
         self._rows: dict[str, list[dict[str, Any]]] = {}
         # table -> sid -> the buffered parent row dict; lives exactly one chunk.
         self._rows_by_sid: dict[str, dict[int, dict[str, Any]]] = {}
+        # (record type, id(source)) -> source validated in this chunk; holding the
+        # source keeps its id from being reused while the entry exists.
+        self._validated: dict[tuple[type, int], Any] = {}
         self._content_index: dict[str, dict[str, int]] = {}
         self._value_index: dict[str, dict[tuple[Any, ...], int]] = {}
         self._token_sid: dict[int, tuple[str, int]] = {}
@@ -673,9 +676,11 @@ class _WorkerEncoder:
 
         validation_key = (record_type, id(source))
         if type(source) is record_type and validation_key not in projection.validated:
-            validator = vars(record_type).get("__httk_validate__")
-            if validator is not None:
-                validator.__get__(None, record_type)(source)
+            if validation_key not in self._validated:
+                validator = vars(record_type).get("__httk_validate__")
+                if validator is not None:
+                    validator.__get__(None, record_type)(source)
+                self._validated[validation_key] = source
             projection.validated.add(validation_key)
 
         def resolve_sid(referenced_type: type, value: Any, field_path: str) -> int:
@@ -811,6 +816,7 @@ class _WorkerEncoder:
                 self._writer.write(table_name, rows)
                 rows.clear()
         self._rows_by_sid.clear()
+        self._validated.clear()
         if self._root_rows:
             self._writer.write_roots(self._root_rows)
             self._root_rows.clear()

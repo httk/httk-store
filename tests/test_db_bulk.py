@@ -109,6 +109,31 @@ class ValidatedRecord:
             raise ValueError(f"validator rejected value {source.value}")
 
 
+# Every value CountedRecord.__httk_validate__ was called with, in order.
+_COUNTED_CALLS: list[int] = []
+
+
+@dataclass(frozen=True)
+class CountedRecord:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="bulk_counted")
+
+    value: int
+
+    @classmethod
+    def __httk_validate__(cls, source: "CountedRecord") -> None:
+        _COUNTED_CALLS.append(source.value)
+        if source.value < 0:
+            raise ValueError(f"validator rejected value {source.value}")
+
+
+@dataclass(frozen=True)
+class CountedEnvelope:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="bulk_counted_envelope")
+
+    label: str
+    record: CountedRecord
+
+
 class BulkCalcFamily:
     type = "bulk-calculations"
 
@@ -924,3 +949,35 @@ def test_bulk_incremental_cross_chunk_metadata_verified_against_stored(store_fac
     ):
         bulk.save(MetaScalar("k", "note1"))
         bulk.save(MetaScalar("k", "note2"))  # conflicting metadata against the stored row
+
+
+@pytest.mark.parametrize("finalize", ["parity", "deferred"])
+def test_bulk_validates_same_source_once_per_chunk(store_factory, finalize):
+    """One source saved repeatedly in a chunk validates once; a flush, an equal copy or a failure validates again."""
+    store = store_factory()
+    _require_bulk(store)
+    record = CountedRecord(1)
+    _COUNTED_CALLS.clear()
+    with store.bulk_ingest(finalize=finalize) as bulk:
+        bulk.save(record)
+        bulk.save(CountedEnvelope("embedded", record))
+        bulk.save(record)
+        assert _COUNTED_CALLS == [1]
+        bulk.save(CountedRecord(1))  # equal content, distinct object
+        assert _COUNTED_CALLS == [1, 1]
+
+    store = store_factory()
+    _COUNTED_CALLS.clear()
+    with store.bulk_ingest(finalize=finalize, chunk_size=1) as bulk:
+        bulk.save(record)
+        bulk.save(CountedEnvelope("embedded", record))  # a flush sits between the two saves
+        assert _COUNTED_CALLS == [1, 1]
+
+    store = store_factory()
+    rejected = CountedRecord(-1)
+    _COUNTED_CALLS.clear()
+    with pytest.raises(ValueError, match="validator rejected"), store.bulk_ingest(finalize=finalize) as bulk:
+        with pytest.raises(ValueError, match="validator rejected"):
+            bulk.save(rejected)
+        bulk.save(rejected)  # a failure is not memoized
+    assert _COUNTED_CALLS == [-1, -1]

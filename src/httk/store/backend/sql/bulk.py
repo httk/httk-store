@@ -325,6 +325,9 @@ class BulkIngest:
         self._value_index: dict[str, dict[tuple[Any, ...], int]] = {}
         self._meta_values: dict[str, Mapping[str, object]] = {}
         self._meta_sources: dict[str, tuple[type, Any]] = {}
+        # (record type, id(source)) -> source validated in this chunk; holding the
+        # source keeps its id from being reused while the entry exists.
+        self._validated: dict[tuple[type, int], Any] = {}
         self._parent_schema: dict[str, TableSchema] = {}
         self._dispatch_rows: dict[str, dict[str, dict[str, Any]]] = {}
         self._dispatch_family: dict[str, Any] = {}
@@ -1312,11 +1315,13 @@ class BulkIngest:
 
         validation_key = (record_type, id(source))
         if type(source) is record_type and validation_key not in projection.validated:
-            validator = vars(record_type).get("__httk_validate__")
-            if validator is not None:
-                # Bind the descriptor from the class's own dict; the own-dict
-                # lookup keeps inherited validators out, exactly as save() does.
-                validator.__get__(None, record_type)(source)
+            if validation_key not in self._validated:
+                validator = vars(record_type).get("__httk_validate__")
+                if validator is not None:
+                    # Bind the descriptor from the class's own dict; the own-dict
+                    # lookup keeps inherited validators out, exactly as save() does.
+                    validator.__get__(None, record_type)(source)
+                self._validated[validation_key] = source
             projection.validated.add(validation_key)
 
         def resolve_sid(referenced_type: type, value: Any, field_path: str) -> int:
@@ -1556,6 +1561,7 @@ class BulkIngest:
         # an already-flushed content id verifies against the stored row instead.
         self._meta_values.clear()
         self._meta_sources.clear()
+        self._validated.clear()
         self._chunk_roots = []
         self._since_flush = 0
         if self._on_progress is not None:

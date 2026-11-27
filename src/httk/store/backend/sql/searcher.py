@@ -1704,7 +1704,7 @@ class SqlSearcher:
         return variable
 
     def _latest_of_lineage(self, schema: TableSchema, alias: sqlalchemy.FromClause) -> SqlExpression:
-        """A ``NOT EXISTS`` restricting ``alias`` to the latest row of its lineage by sid.
+        """A condition restricting ``alias`` to the latest row of its lineage by sid.
 
         Latest is decided by ``sid`` alone (monotone), never by timestamp. When
         the searcher carries an ``as_of`` cutoff the "newer" subquery is bounded
@@ -1717,7 +1717,13 @@ class SqlSearcher:
         return self._latest_of_lineage_in(self._store._table(schema.table_name), alias)
 
     def _latest_of_lineage_in(self, table: sqlalchemy.Table, alias: sqlalchemy.FromClause) -> SqlExpression:
-        """A ``NOT EXISTS`` restricting ``alias`` to the latest row of its ``logical_id`` lineage by sid.
+        """A condition restricting ``alias`` to the latest row of its ``logical_id`` lineage by sid.
+
+        A correlated ``NOT EXISTS`` over a newer sibling, or, where the backend facts say the
+        dialect rejects correlated subqueries in JOIN conditions (ClickHouse), the equivalent
+        uncorrelated ``sid IN (SELECT max(sid) ... GROUP BY logical_id)``. That form costs a
+        whole-table ``GROUP BY logical_id`` per restricted alias per query, however selective
+        the rest of the query is.
 
         The ``newer`` sibling subquery draws from the same ``table`` — used both
         for root/reference parent tables (via :meth:`_latest_of_lineage`) and for
@@ -1730,13 +1736,22 @@ class SqlSearcher:
         :return: A WHERE-position condition true only for latest-of-lineage rows.
         """
         newer = table.alias()
+        cutoff: list[sqlalchemy.ColumnElement[bool]] = []
+        if self._as_of is not None:
+            as_of_units = ns_operand_to_store_units(self._as_of, cast(int, self._store.store_timestamp_resolution))
+            cutoff.append(_bool_clause(newer.c[STORE_TIMESTAMP_COLUMN] <= as_of_units))
+        if self._store.backend_facts.latest_of_lineage == "max-sid-in":
+            latest = (
+                sqlalchemy.select(sqlalchemy.func.max(newer.c[SID_COLUMN]))
+                .where(*cutoff)
+                .group_by(newer.c[LOGICAL_ID_COLUMN])
+            )
+            return _same(_bool_clause(alias.c[SID_COLUMN].in_(latest)))
         conds: list[sqlalchemy.ColumnElement[bool]] = [
             _bool_clause(newer.c[LOGICAL_ID_COLUMN] == alias.c[LOGICAL_ID_COLUMN]),
             _bool_clause(newer.c[SID_COLUMN] > alias.c[SID_COLUMN]),
+            *cutoff,
         ]
-        if self._as_of is not None:
-            as_of_units = ns_operand_to_store_units(self._as_of, cast(int, self._store.store_timestamp_resolution))
-            conds.append(_bool_clause(newer.c[STORE_TIMESTAMP_COLUMN] <= as_of_units))
         subquery = sqlalchemy.select(sqlalchemy.literal(1)).select_from(newer).where(*conds).correlate(alias)
         return _same(~subquery.exists())
 

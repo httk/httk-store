@@ -343,9 +343,7 @@ def _ingest_corpus(bulk_ingest) -> tuple[dict[str, list[tuple[str, str, int]]], 
     return {name: _link_pairs(bulk._store, Run, name) for name in ("notes", "tags", "external")}, sids
 
 
-def _assert_corpus(
-    store: SqlStore, pairs: dict[str, list[tuple[str, str, int]]], sids: list[int], *, link_filters: bool = True
-) -> None:
+def _assert_corpus(store: SqlStore, pairs: dict[str, list[tuple[str, str, int]]], sids: list[int]) -> None:
     assert len(pairs["notes"]) == 8 and len(pairs["tags"]) == 7 and len(pairs["external"]) == 1
     assert _count(store, Note) == 3
     assert _count(store, Tag) == 2
@@ -356,8 +354,7 @@ def _assert_corpus(
     assert sorted(note.text for note in store.linked(many, "notes")) == ["own", "shared"]
     assert sorted(tag.key for tag in store.linked(many, "tags")) == ["k", "source"]
     assert sorted(note.text for note in store.linked(_run(store, "run-0"), "notes")) == ["separate", "shared"]
-    if link_filters:
-        assert _labels(store, lambda v: v.links.notes.text == "separate") == ["run-0"]
+    assert _labels(store, lambda v: v.links.notes.text == "separate") == ["run-0"]
 
 
 @pytest.mark.parametrize("mode", [mode for mode in _MODES if mode != "serial-parity"])
@@ -390,8 +387,7 @@ def test_clickhouse_deferred_links(workers) -> None:
         store = SqlStore(database, entry_records=records, entry_ids=scheme)
         actual, sids = _ingest_corpus(store.bulk_ingest(workers=workers, finalize="deferred", chunk_size=2))
         assert actual == expected
-        # ClickHouse rejects the correlated subquery of a link filter, however the links were written.
-        _assert_corpus(store, actual, sids, link_filters=False)
+        _assert_corpus(store, actual, sids)
 
 
 @pytest.mark.parametrize("index_strategy", ["auto", "keep", "rebuild"])
@@ -400,7 +396,7 @@ def test_parallel_parity_into_precreated_tables(store_factory, index_strategy) -
     store = _store(store_factory)
     if store._database.engine.dialect.name == "duckdb":
         pytest.skip("parallel DuckDB ingest refuses pre-created tables")
-    # Run brings its link tables; content-id duplicates cannot load into a pre-created table (unrelated to links).
+    # Run brings its link tables; content-id repeats are covered by test_db_bulk_parallel.
     store.ensure_tables(Run)
     with _bulk(store, "parallel-parity", index_strategy=index_strategy) as bulk:
         bulk.save(Run(source_id="a"), links={"notes": [_note("n"), _note("m")]})

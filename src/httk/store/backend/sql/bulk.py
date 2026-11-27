@@ -1801,11 +1801,18 @@ class BulkIngest:
         assert self._controller is not None
         manifests = self._controller.finish()  # re-raises the first worker exception
         self._assert_no_lost_tasks(manifests)
+        # The merge loads every worker's occurrences before collapsing duplicates, so a
+        # pre-created (necessarily empty) table must shed its unique indexes for the load
+        # whatever the strategy, exactly like a table this ingest created.
+        for name in self._existing_scanned:
+            self._decide_index(name, force=True)
         merge(self, manifests)
         self._insert_link_rows()
         self._create_new_indexes()
-        # Only a pre-created (necessarily empty) link table can have had its indexes dropped.
+        # Recreating the dropped indexes re-verifies uniqueness over the merged rows
+        # (DuckDB, which keeps them, would verify by scan; it refuses pre-created tables today).
         self._recreate_dropped_indexes()
+        self._verify_rebuild_scans()
         self._resync_sequences()
         self._assert_counts()
 
@@ -2812,14 +2819,14 @@ class BulkIngest:
         """Compatibility name for the logical sid-column map used by remapping."""
         return self._logical_graph().sid_columns()
 
-    def _decide_index(self, name: str) -> None:
-        """Before a pre-existing table's first append, drop its separable indexes if the strategy asks."""
+    def _decide_index(self, name: str, *, force: bool = False) -> None:
+        """Before a pre-existing table's first append, drop its separable indexes if the strategy (or ``force``) asks."""
         if name not in self._preexisting or name in self._index_decided:
             return
         self._index_decided.add(name)
-        if self._index_strategy == "keep":
+        if not force and self._index_strategy == "keep":
             return
-        if self._index_strategy == "auto":
+        if not force and self._index_strategy == "auto":
             existing = self._existing_row_count.get(name, 0)
             staged = self._next_sid.get(name, 1) - self._initial_next_sid.get(name, 1)
             if staged * _AUTO_REBUILD_DIVISOR <= existing:

@@ -172,6 +172,9 @@ reserves a dropped index's name until commit, a `"rebuild"` decision instead
 keeps the indexes in place — relying on their incremental maintenance — and
 verifies content-id uniqueness with a duplicate scan at finalize; the final
 indexes are identical either way.
+A `workers>1` merge loads every worker's occurrences before collapsing
+duplicates, so it drops a pre-created (necessarily empty) table's indexes for
+the load and recreates them afterwards under every strategy.
 
 **`finalize`** (`"auto"`, `"parity"`, or `"deferred"`, default `"auto"`)
 chooses the finalization profile. `"deferred"` is an explicit fresh-store

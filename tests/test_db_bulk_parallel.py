@@ -18,13 +18,17 @@ import signal
 import tempfile
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Annotated, ClassVar
+from typing import Annotated, Any, ClassVar
 
 import pytest
 import sqlalchemy
+from httk.core import Run, RunEntry
+from httk.core.curation import Note
 from httk.core.storage import IdentitySkip, StorageInfo, content_id
+from test_bulk_links import _link_pairs, _note
 from test_db_bulk import (
     Author,
+    AuthorTag,
     BulkCalcA,
     BulkCalcB,
     BulkCalcFamily,
@@ -53,6 +57,7 @@ from test_db_bulk import (
 # These modules fork their own worker processes; the loadgroup scheduler
 # keeps them on one xdist worker so their memory use never stacks.
 pytestmark = pytest.mark.xdist_group("bulk-heavy")
+from httk.store import EntryIdScheme
 from httk.store.backend.sql import Backend, SqlStore
 from httk.store.backend.sql.layout import METADATA_TABLE_NAME, actual_schema_objects
 from httk.store.backend.sql.mapping import ROLE_COLUMN, SID_COLUMN
@@ -940,3 +945,73 @@ def test_parallel_nan_attribution_is_schema_order_first(store_factory, run):
         bulk.save(TwoFloatMeta("k", math.nan, math.nan))  # token 0 -> worker 0
         bulk.save(TwoFloatMeta("k", math.nan, math.nan))  # token 1 -> worker 1
     assert not _has_application_rows(store, _database_of(store))
+
+
+def _precreated_stream(with_links: bool) -> list[tuple[Any, Any]]:
+    """Repeats routed to one worker and across workers (tokens alternate between two workers)."""
+    ada = Author("Ada", 1852)
+    stream: list[tuple[Any, Any]] = [(ada, None)] * 4  # content id
+    stream += [(Author("Grace", 1906), None)]
+    stream += [(AuthorTag(ada, "role", "pioneer"), None)] * 3  # by value, nested content-id reference
+    stream += [(make_sample(), None)] * 3  # content id with children
+    stream += [(_root("one"), None)] * 3 + [(_root("two"), None)]  # shared nested Leaf
+    stream += [(Node(2, Node(1)), None)] * 3 + [(Node(3, Node(2, Node(1))), None)]  # nested by value
+    links_a = {"notes": [_note("n"), _note("m")]} if with_links else None
+    links_b = {"notes": _note("n")} if with_links else None
+    stream += [(Run(source_id="a"), links_a)] * 2 + [(Run(source_id="b"), links_b)]
+    return stream
+
+
+@pytest.mark.parametrize("with_links", [False, True])
+@pytest.mark.parametrize("index_strategy", ["auto", "keep", "rebuild"])
+def test_parallel_parity_into_precreated_empty_tables(store_factory, index_strategy, with_links):
+    """Parallel parity into pre-created empty tables stores exactly what a fresh store and serial parity store.
+
+    The merge loads every worker's occurrences before collapsing them, so a pre-created table's
+    unique indexes must not be live during the load whatever the strategy (formerly a UNIQUE
+    content_id IntegrityError); afterwards they exist, sids are dense, and sequences resynced.
+    """
+
+    def build(mode: str):
+        store = store_factory(entry_records={RunEntry: Run}, entry_ids=EntryIdScheme("httk.test", "1"))
+        _require_bulk(store)
+        if _database_of(store).engine.dialect.name not in ("sqlite", "postgresql"):
+            pytest.skip("parallel DuckDB ingest refuses pre-created tables")
+        if mode == "precreated":
+            store.ensure_tables(Author, AuthorTag, Sample, Root, Node, Run, Note)
+        options = {"finalize": "parity"} if mode == "serial" else {"workers": 2, "index_strategy": index_strategy}
+        with store.bulk_ingest(**options) as bulk:
+            for obj, links in _precreated_stream(with_links):
+                bulk.save(obj, links=links)
+        return store
+
+    serial, fresh, precreated = build("serial"), build("fresh"), build("precreated")
+    expected = _table_stats(serial, _database_of(serial))
+    assert _table_stats(fresh, _database_of(fresh)) == expected
+    assert _table_stats(precreated, _database_of(precreated)) == expected
+    if with_links:
+        assert _link_pairs(precreated, Run, "notes") == _link_pairs(serial, Run, "notes")
+        assert len(_link_pairs(precreated, Run, "notes")) == 3
+    database = _database_of(precreated)
+    with database.engine.connect() as connection:
+        present = actual_schema_objects(connection)
+        inspector = sqlalchemy.inspect(connection)
+        for name, table in precreated._metadata.tables.items():
+            if name not in present or name == METADATA_TABLE_NAME:
+                continue
+            if SID_COLUMN in table.c and not name.startswith("_httk_"):  # owners reference backing sids
+                low, high, count = connection.execute(
+                    sqlalchemy.text(f'SELECT min("{SID_COLUMN}"), max("{SID_COLUMN}"), count(*) FROM "{name}"')
+                ).one()
+                assert (low, high) == ((1, count) if count else (None, None)), name
+            stored = {index["name"]: bool(index["unique"]) for index in inspector.get_indexes(name)}
+            for index in table.indexes:
+                assert stored.get(index.name) == bool(index.unique), (name, index.name)
+    # Sequences continue past the merged sids, on PostgreSQL as on SQLite.
+    authors = _physical_counts(database)["bulk_author"]
+    assert precreated.save(Author("Hopper", 1906)) == authors + 1
+    reopened = store_factory.reopen(precreated)
+    searcher = reopened.searcher()
+    searcher.variable(Author)
+    assert searcher.count() == authors + 1
+    assert precreated.fsck(repair=False, collect_garbage=False).violations == ()

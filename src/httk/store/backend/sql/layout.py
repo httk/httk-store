@@ -123,6 +123,8 @@ class BackendFacts:
     supports_adhoc_indexes: bool
     default_indexes: Literal["all", "minimal"]
     stores_nan: bool
+    #: ``"max-sid-in"`` where the dialect rejects a correlated subquery in a JOIN condition (ClickHouse code 48).
+    latest_of_lineage: Literal["not-exists", "max-sid-in"]
 
 
 _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
@@ -144,6 +146,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         supports_adhoc_indexes=True,
         default_indexes="all",
         stores_nan=False,
+        latest_of_lineage="not-exists",
     ),
     "duckdb": BackendFacts(
         transactional_ddl=True,
@@ -163,6 +166,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         supports_adhoc_indexes=True,
         default_indexes="minimal",
         stores_nan=True,
+        latest_of_lineage="not-exists",
     ),
     "postgresql": BackendFacts(
         transactional_ddl=True,
@@ -182,6 +186,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         supports_adhoc_indexes=True,
         default_indexes="all",
         stores_nan=True,
+        latest_of_lineage="not-exists",
     ),
     "clickhousedb": BackendFacts(
         transactional_ddl=False,
@@ -201,6 +206,7 @@ _BACKEND_FACTS: Final[dict[str, BackendFacts]] = {
         supports_adhoc_indexes=False,
         default_indexes="all",
         stores_nan=True,
+        latest_of_lineage="max-sid-in",
     ),
 }
 

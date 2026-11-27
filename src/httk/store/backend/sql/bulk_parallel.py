@@ -1303,8 +1303,14 @@ class _Merger:
         existing = actual_table_names(self._connection)
         for name in self._graph.dependency_order(self._store._metadata.tables):
             table = self._store._metadata.tables[name]
-            if name in existing and SID_COLUMN in table.c:
+            if name not in existing:
+                continue
+            if SID_COLUMN in table.c:
                 self._compact(table)
+            else:
+                # A child table is not renumbered, but a pre-created one is under the row-count check.
+                count = self._connection.execute(sqlalchemy.select(sqlalchemy.func.count()).select_from(table))
+                self._ingest._inserted_count[name] = int(count.scalar_one())
         self._merge_dispatch()
         self._populate_resolved_map()
 

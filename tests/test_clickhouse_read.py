@@ -223,8 +223,8 @@ def test_clickhouse_bulk_row_logical_id_equals_own_sid(clickhouse_read_store: Sq
     assert rows and all(int(sid) == int(logical_id) for sid, logical_id in rows)
 
 
-def test_clickhouse_only_latest_correlated_subquery_is_a_server_side_no_op(clickhouse_read_store: SqlStore) -> None:
-    """``only_latest`` emits a correlated ``NOT EXISTS``; on a bulk-fenced store it
+def test_clickhouse_only_latest_is_a_server_side_no_op(clickhouse_read_store: SqlStore) -> None:
+    """``only_latest`` emits the latest-of-lineage filter; on a bulk-fenced store it
     must execute without server error and return exactly the plain result set
     (every row is a lineage root, so none are filtered)."""
     plain, plain_record = _read_search(clickhouse_read_store)

@@ -33,6 +33,11 @@ importable from `httk.store`.
 Records are content-addressed (`content_id`) as well as locally numbered
 (`sid`), and identical content saves to one row however many times it arrives.
 
+Stores trust what they are given: a record class's `__httk_validate__` runs only
+when asked to, through `validate_records=True` on the store or `validate=True`
+on a `save()`, `replace()` or `bulk_ingest()` call (see
+[Storing and fetching](details/db-records.md#storing-and-fetching)).
+
 Store timestamps are enabled by default. They support historic predicates such
 as `store_timestamp <= T`; configure their unit size with
 `store_timestamp_resolution` (default: microseconds, `time_ns() // 1000`).

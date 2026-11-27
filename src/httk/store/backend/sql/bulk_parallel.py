@@ -217,6 +217,8 @@ class _WorkerConfig:
     # alongside record rows.  Parity merge deliberately keeps its established
     # in-memory manifest protocol.
     spill_deferred_auxiliary: bool = False
+    # Whether encoding runs each record instance's own __httk_validate__ (opt-in).
+    validate: bool = False
 
 
 @dataclass
@@ -573,7 +575,7 @@ class _WorkerEncoder:
         promote: frozenset[type] = frozenset(),
     ) -> int:
         record_type = resolve_storage_record(obj, as_record=as_record)
-        projection = SaveProjection(store_timestamp=self._config.store_timestamp)
+        projection = SaveProjection(store_timestamp=self._config.store_timestamp, validate=self._config.validate)
         occurrences: list[tuple[type, Any, int]] = []
         seen: set[tuple[type, int, int]] = set()
         sid = self._encode(record_type, obj, projection, "", promote, occurrences, seen)
@@ -675,7 +677,11 @@ class _WorkerEncoder:
         projected = projection.projector(record_type, source)
 
         validation_key = (record_type, id(source))
-        if type(source) is record_type and validation_key not in projection.validated:
+        if (
+            projection.validate
+            and getattr(type(source), "__httk_row_base__", type(source)) is record_type
+            and validation_key not in projection.validated
+        ):
             if validation_key not in self._validated:
                 validator = vars(record_type).get("__httk_validate__")
                 if validator is not None:
@@ -917,6 +923,7 @@ class ParallelController:
         track_sids: bool = True,
         store_timestamp: int | None = None,
         spill_deferred_auxiliary: bool = False,
+        validate: bool = False,
     ) -> None:
         import multiprocessing
 
@@ -933,6 +940,7 @@ class ParallelController:
             track_sids=track_sids,
             store_timestamp=store_timestamp,
             spill_deferred_auxiliary=spill_deferred_auxiliary,
+            validate=validate,
         )
         self._queues: list[Any] = [self._context.Queue(maxsize=_QUEUE_MAXSIZE) for _ in range(workers)]
         self._result_queue: Any = self._context.Queue()

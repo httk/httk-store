@@ -295,6 +295,29 @@ class ValidationProbeRecord:
 
 
 ValidationProbeView.__httk_storage_record__ = ValidationProbeRecord
+
+
+@dataclass(frozen=True)
+class RejectingRecord:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="behavior_rejecting")
+
+    value: int
+    calls: ClassVar[list[int]] = []
+
+    @classmethod
+    def __httk_validate__(cls, source: "RejectingRecord") -> None:
+        cls.calls.append(source.value)
+        raise ValueError(f"validator rejected value {source.value}")
+
+
+@dataclass(frozen=True)
+class RejectingEnvelope:
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="behavior_rejecting_envelope")
+
+    label: str
+    record: RejectingRecord
+
+
 LeafView.__httk_storage_record__ = LeafRecord
 RootView.__httk_storage_record__ = RootRecord
 
@@ -543,14 +566,57 @@ def test_dedup_hit_does_not_reconstruct_graph_for_metadata(store_factory):
 
 def test_validate_hook_runs_once_for_an_exact_record_save(store_factory):
     ValidationProbeRecord.calls.clear()
-    store = store_factory()
+    store = store_factory(validate_records=True)
     store.save(ValidationProbeRecord(1))
     assert ValidationProbeRecord.calls == [1]
 
 
+def test_store_trusts_records_unless_validation_is_requested(store_factory):
+    """By default no validator runs; a store setting or a per-call argument opts in, per call overriding."""
+    RejectingRecord.calls.clear()
+    store = store_factory()
+    assert store.validate_records is False
+    sid = store.save(RejectingEnvelope("nested", RejectingRecord(1)))
+    first = store.save(RejectingRecord(2))
+    assert store.replace(store.fetch(RejectingRecord, first, eager=True), RejectingRecord(3)) > 0
+    assert RejectingRecord.calls == []
+    assert store.fetch(RejectingEnvelope, sid, eager=True).record == RejectingRecord(1)
+
+    with pytest.raises(ValueError, match="rejected value 4"):
+        store.save(RejectingEnvelope("nested", RejectingRecord(4)), validate=True)
+    with pytest.raises(ValueError, match="rejected value 5"):
+        store.replace(store.fetch(RejectingRecord, first, eager=True), RejectingRecord(5), validate=True)
+    assert RejectingRecord.calls == [4, 5]
+
+    validating = store_factory(validate_records=True)
+    assert validating.validate_records is True
+    with pytest.raises(ValueError, match="rejected value 6"):
+        validating.save(RejectingRecord(6))
+    kept = validating.save(RejectingRecord(7), validate=False)
+    with pytest.raises(ValueError, match="rejected value 8"):
+        validating.replace(validating.fetch(RejectingRecord, kept, eager=True), RejectingRecord(8))
+    validating.replace(validating.fetch(RejectingRecord, kept, eager=True), RejectingRecord(9), validate=False)
+    assert RejectingRecord.calls == [4, 5, 6, 8]
+
+
+def test_validation_treats_fetched_rows_as_their_record_class(store_factory):
+    """A fetched row, and ``dataclasses.replace`` of one, is validated as its record class when asked."""
+    from httk.core.storage import validate_storage_record
+
+    RejectingRecord.calls.clear()
+    store = store_factory(validate_records=True)
+    sid = store.save(RejectingRecord(1), validate=False)
+    fetched = store.fetch(RejectingRecord, sid)
+    with pytest.raises(ValueError, match="rejected value 2"):
+        store.replace(fetched, replace(fetched, value=2))
+    with pytest.raises(ValueError, match="rejected value 1"):
+        validate_storage_record(store.fetch(RejectingRecord, sid))
+    assert RejectingRecord.calls == [2, 1]
+
+
 def test_validate_hook_skips_domain_sources_and_fetches(store_factory):
     ValidationProbeRecord.calls.clear()
-    store = store_factory()
+    store = store_factory(validate_records=True)
     sid = store.save(ValidationProbeRecord(1))
     ValidationProbeRecord.calls.clear()
     store.fetch(ValidationProbeRecord, sid)

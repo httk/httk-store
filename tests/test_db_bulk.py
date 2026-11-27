@@ -507,7 +507,7 @@ def test_bulk_failure_leaves_no_tables_or_rows(store_factory):
     """A validator raising mid-ingest drops every created table; a later save works."""
     store = store_factory()
     _require_bulk(store)
-    with pytest.raises(ValueError, match="validator rejected"), store.bulk_ingest() as bulk:
+    with pytest.raises(ValueError, match="validator rejected"), store.bulk_ingest(validate=True) as bulk:
         bulk.save(ValidatedRecord(1))
         bulk.save(Author("Ada", 1852))
         bulk.save(ValidatedRecord(-1))  # validator raises here
@@ -796,7 +796,10 @@ def test_bulk_incremental_failure_atomicity_and_recovery(store_factory):
     database = _database_of(store)
     before = _physical_counts(database)
 
-    with pytest.raises(ValueError, match="validator rejected"), store.bulk_ingest(index_strategy="rebuild") as bulk:
+    with (
+        pytest.raises(ValueError, match="validator rejected"),
+        store.bulk_ingest(index_strategy="rebuild", validate=True) as bulk,
+    ):
         bulk.save(Author("Zoe", 2000))
         bulk.save(ValidatedRecord(-1))  # validator raises here
     assert _physical_counts(database) == before
@@ -958,7 +961,7 @@ def test_bulk_validates_same_source_once_per_chunk(store_factory, finalize):
     _require_bulk(store)
     record = CountedRecord(1)
     _COUNTED_CALLS.clear()
-    with store.bulk_ingest(finalize=finalize) as bulk:
+    with store.bulk_ingest(finalize=finalize, validate=True) as bulk:
         bulk.save(record)
         bulk.save(CountedEnvelope("embedded", record))
         bulk.save(record)
@@ -968,7 +971,7 @@ def test_bulk_validates_same_source_once_per_chunk(store_factory, finalize):
 
     store = store_factory()
     _COUNTED_CALLS.clear()
-    with store.bulk_ingest(finalize=finalize, chunk_size=1) as bulk:
+    with store.bulk_ingest(finalize=finalize, chunk_size=1, validate=True) as bulk:
         bulk.save(record)
         bulk.save(CountedEnvelope("embedded", record))  # a flush sits between the two saves
         assert _COUNTED_CALLS == [1, 1]
@@ -976,8 +979,38 @@ def test_bulk_validates_same_source_once_per_chunk(store_factory, finalize):
     store = store_factory()
     rejected = CountedRecord(-1)
     _COUNTED_CALLS.clear()
-    with pytest.raises(ValueError, match="validator rejected"), store.bulk_ingest(finalize=finalize) as bulk:
+    with (
+        pytest.raises(ValueError, match="validator rejected"),
+        store.bulk_ingest(finalize=finalize, validate=True) as bulk,
+    ):
         with pytest.raises(ValueError, match="validator rejected"):
             bulk.save(rejected)
         bulk.save(rejected)  # a failure is not memoized
     assert _COUNTED_CALLS == [-1, -1]
+
+
+@pytest.mark.parametrize("finalize", ["parity", "deferred"])
+def test_bulk_validation_is_opt_in(store_factory, finalize):
+    """No validator runs by default; the store setting or ``validate=True`` opts in, ``validate=False`` overrides."""
+    store = store_factory()
+    _require_bulk(store)
+    _COUNTED_CALLS.clear()
+    with store.bulk_ingest(finalize=finalize) as bulk:
+        bulk.save(CountedEnvelope("invalid", CountedRecord(-1)))
+        sid = bulk.save(CountedRecord(-2))
+    assert _COUNTED_CALLS == []
+    assert store.fetch(CountedRecord, bulk.resolved_sid(CountedRecord, sid)) == CountedRecord(-2)
+
+    with (
+        pytest.raises(ValueError, match="validator rejected"),
+        store_factory().bulk_ingest(finalize=finalize, validate=True) as bulk,
+    ):
+        bulk.save(CountedEnvelope("invalid", CountedRecord(-3)))
+    assert _COUNTED_CALLS == [-3]
+
+    validating = store_factory(validate_records=True)
+    with pytest.raises(ValueError, match="validator rejected"), validating.bulk_ingest(finalize=finalize) as bulk:
+        bulk.save(CountedRecord(-4))
+    with validating.bulk_ingest(finalize=finalize, validate=False) as bulk:
+        bulk.save(CountedRecord(-5))
+    assert _COUNTED_CALLS == [-3, -4]

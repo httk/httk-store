@@ -309,7 +309,9 @@ behavior as the eager record. Classes with custom `__eq__` or `__hash__` are
 rejected for lazy rows. Each row also exposes its database `sid`.
 
 `dataclasses.replace(row, ...)` creates a new ordinary dataclass instance of
-the lazy row class and runs validation. Lazy rows intentionally reject
+the lazy row class and runs its `__post_init__`; semantic `__httk_validate__`
+validation stays opt-in (see [Storing and fetching](db-records.md#storing-and-fetching)),
+and a store asked to validate treats the row as its record class. Lazy rows intentionally reject
 `copy.copy`, `copy.deepcopy`, and pickling. Search rows bypass the store's
 identity cache: two result rows for one sid are not an identity guarantee.
 `fetch()` returns lazy rows too (see [Lazy records](db-records.md#lazy-records)); repeated

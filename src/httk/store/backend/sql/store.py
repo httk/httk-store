@@ -409,6 +409,10 @@ class SqlStore:
     :param skip_indexes: Names of further non-unique indexes not to create,
         exactly as created in the database (e.g. ``ix_<table>_<column>``).
         Stamped like ``indexes``; an empty collection on reopen adopts the stamp.
+    :param validate_records: Whether writes run each saved record instance's own
+        ``__httk_validate__`` classmethod by default. The store trusts what it is
+        given unless this is set; ``save``, ``replace`` and ``bulk_ingest`` take a
+        per-call ``validate`` override. Not stamped: it never affects reopening.
     :raises TypeError: If the first open omits both declaration forms.
     :raises ValueError: If ``indexes`` or ``skip_indexes`` is invalid (an
         unknown name, a unique index or a primary key), or differs from the
@@ -442,6 +446,7 @@ class SqlStore:
         upgrade: bool = False,
         indexes: Literal["all", "minimal"] | None = None,
         skip_indexes: Collection[str] = (),
+        validate_records: bool = False,
     ) -> None:
         if (
             not isinstance(store_timestamp_resolution, int)
@@ -462,6 +467,7 @@ class SqlStore:
         self._database = database
         self._entry_ids = entry_ids
         self._upgrade = upgrade
+        self._validate_records = validate_records
         self._identity_ownership_ready = True
         self._store_timestamps = store_timestamps
         self._store_timestamp_resolution = store_timestamp_resolution
@@ -616,6 +622,11 @@ class SqlStore:
     def write_profile(self) -> Literal["transactional", "degraded", "bulk-fenced"]:
         """Return the persisted permanentization write profile."""
         return self._write_profile
+
+    @property
+    def validate_records(self) -> bool:
+        """Whether writes run record ``__httk_validate__`` classmethods unless a call overrides it."""
+        return self._validate_records
 
     @property
     def store_timestamps(self) -> bool:
@@ -2115,6 +2126,7 @@ class SqlStore:
         finalize: Literal["auto", "parity", "deferred"] = "auto",
         track_sids: bool = True,
         id_series: str | None = None,
+        validate: bool | None = None,
     ) -> "BulkIngest":
         """Return a context manager that appends a stream of objects into this store.
 
@@ -2165,6 +2177,8 @@ class SqlStore:
             subclass may override :attr:`bulk_ingest_finalize_default` for ``"auto"`` calls.
         :param track_sids: Whether to retain provisional-to-durable sid mappings.
         :param id_series: Override the configured entry-id series for minted bulk rows.
+        :param validate: Whether every encoded record instance's own ``__httk_validate__`` runs, in the serial,
+            deferred and parallel paths alike; ``None`` uses :attr:`validate_records`.
         :return: A bulk-ingest context manager bound to this store.
         """
         from httk.store.backend.sql.bulk import BulkIngest
@@ -2179,6 +2193,7 @@ class SqlStore:
             finalize=finalize,
             track_sids=track_sids,
             id_series=id_series,
+            validate=validate,
         )
 
     def ensure_tables(self, *classes: type) -> None:
@@ -2960,6 +2975,7 @@ class SqlStore:
         alternative_of: str | None = None,
         alternative_kind: str | None = None,
         links: Mapping[str, object] | None = None,
+        validate: bool | None = None,
     ) -> int:
         """Store ``obj`` (deduplicating per its class's policy) and return its integer sid.
 
@@ -2987,6 +3003,7 @@ class SqlStore:
         :param alternative_of: The stored main entry's id this record is an alternative of, if any.
         :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
         :param links: Weak links to add after saving, mapping each declared link name to a target or iterable of targets; the save and every link are applied in one atomic transaction.
+        :param validate: Whether each saved record instance's own ``__httk_validate__`` runs first; ``None`` uses :attr:`validate_records`.
         :return: The stored row's sid.
         :raises TypeError: If ``obj`` is a cursor row that must be materialized first.
         :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing table, or itself an alternative.
@@ -3000,6 +3017,7 @@ class SqlStore:
             raise ValueError(
                 f"invalid alternative_kind {alternative_kind!r}; expected {ALTERNATIVE_KIND_PATTERN.pattern}"
             )
+        validate = self._validate_records if validate is None else validate
         if not links:
             return self._save_top(
                 obj,
@@ -3008,6 +3026,7 @@ class SqlStore:
                 id_series=id_series,
                 alternative_of=alternative_of,
                 alternative_kind=alternative_kind,
+                validate=validate,
             )
         self._refuse_degraded_links("save(links=...)")
         with self.transaction():
@@ -3018,6 +3037,7 @@ class SqlStore:
                 id_series=id_series,
                 alternative_of=alternative_of,
                 alternative_kind=alternative_kind,
+                validate=validate,
             )
             self._apply_save_links(resolve_storage_record(obj, as_record=as_record), sid, links)
         return sid
@@ -3035,6 +3055,7 @@ class SqlStore:
         replace_alt_group: int | None = None,
         replace_alt_kind: str | None = None,
         replace_alt_main_id: str | None = None,
+        validate: bool,
     ) -> int:
         """Run one top-level save, optionally as a replacement carrying ``replace_logical_id``.
 
@@ -3049,7 +3070,7 @@ class SqlStore:
         reject_cursor_proxy(obj)
         record_type = resolve_storage_record(obj, as_record=as_record)
         refuse_undeclared_entry(self.layout, obj, record_type)
-        projection = SaveProjection()
+        projection = SaveProjection(validate=validate)
         timestamp_state = getattr(self._local, "store_timestamp_transaction", None)
         _publish_after_commit = (
             None
@@ -3193,7 +3214,11 @@ class SqlStore:
                 if entry_id is not None and entry_id != replacement_entry_id:
                     raise EntryIdConflictError(table.name, str(entry_id), replacement, replacement)
         validation_key = (record_type, id(source))
-        if type(source) is record_type and validation_key not in projection.validated:
+        if (
+            projection.validate
+            and getattr(type(source), "__httk_row_base__", type(source)) is record_type
+            and validation_key not in projection.validated
+        ):
             validator = vars(record_type).get("__httk_validate__")
             if validator is not None:
                 # Bind the descriptor fetched from the class's own dict; the
@@ -4457,6 +4482,7 @@ class SqlStore:
         *,
         id_series: str | None = None,
         links: Mapping[str, object] | None = None,
+        validate: bool | None = None,
     ) -> int:
         """Store ``obj`` as a logical replacement of ``predecessor`` and return its sid.
 
@@ -4486,20 +4512,22 @@ class SqlStore:
         :param obj: The replacement object to store.
         :param id_series: Override the configured entry-id series when an id must be minted.
         :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
+        :param validate: Whether each saved record instance's own ``__httk_validate__`` runs first; ``None`` uses :attr:`validate_records`.
         :return: The stored replacement row's sid.
         :raises ValueError: If ``predecessor`` is not known to this store, or ``obj``'s record table differs from ``predecessor``'s.
         :raises EntryReplacementError: If ``obj`` deduplicates onto a row from a different lineage.
         """
+        validate = self._validate_records if validate is None else validate
         if not links:
-            sid, _obj_type = self._replace_core(predecessor, obj, id_series)
+            sid, _obj_type = self._replace_core(predecessor, obj, id_series, validate)
             return sid
         self._refuse_degraded_links("replace(links=...)")
         with self.transaction():
-            sid, obj_type = self._replace_core(predecessor, obj, id_series)
+            sid, obj_type = self._replace_core(predecessor, obj, id_series, validate)
             self._apply_save_links(obj_type, sid, links)
         return sid
 
-    def _replace_core(self, predecessor: Any, obj: Any, id_series: str | None) -> tuple[int, type]:
+    def _replace_core(self, predecessor: Any, obj: Any, id_series: str | None, validate: bool) -> tuple[int, type]:
         self._check_mutation_policy("replace")
         self._reject_during_bulk()
         predecessor_sid = self.sid_of(predecessor)
@@ -4563,6 +4591,7 @@ class SqlStore:
             replace_alt_group=predecessor_alt_id,
             replace_alt_kind=predecessor_alt_kind,
             replace_alt_main_id=alt_main_id,
+            validate=validate,
         )
         return sid, obj_type
 

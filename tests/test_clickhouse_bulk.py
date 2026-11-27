@@ -9,7 +9,7 @@ import pytest
 import sqlalchemy
 from conftest import clickhouse_test_uri
 from sqlalchemy import text
-from test_db_bulk import Author, ByValParent, _stream, _table_stats
+from test_db_bulk import Author, ByValParent, ValidatedRecord, _stream, _table_stats
 from test_db_bulk_deferred import (
     CALC_FAMILY,
     Leaf,
@@ -202,6 +202,19 @@ def test_clickhouse_untracked_save_returns_provisional_value_without_resolution(
     assert isinstance(sid, int)
     with pytest.raises(RuntimeError, match="track_sids=False"):
         bulk.resolved_sid(MutualValueA, sid)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_clickhouse_bulk_validation_is_opt_in(clickhouse_bulk_database, workers):
+    """A rejecting validator runs only when the ingest asks for it."""
+    store = SqlStore(clickhouse_bulk_database, entry_records={})
+    with store.bulk_ingest(workers=workers) as bulk:
+        sid = bulk.save(ValidatedRecord(-1))
+    assert store.fetch(ValidatedRecord, bulk.resolved_sid(ValidatedRecord, sid)) == ValidatedRecord(-1)
+    with _clickhouse_bulk_database(clickhouse_test_uri()) as database:
+        validating = SqlStore(database, entry_records={}, validate_records=True)
+        with pytest.raises(ValueError, match="validator rejected"), validating.bulk_ingest(workers=workers) as bulk:
+            bulk.save(ValidatedRecord(-1))
 
 
 def test_clickhouse_serial_untracked_parquet_stage_keeps_no_dedup_indexes(clickhouse_bulk_database):

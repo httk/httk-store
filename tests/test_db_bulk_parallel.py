@@ -466,7 +466,7 @@ def test_parallel_worker_failure_is_atomic(store_factory):
     store = store_factory()
     _require_bulk(store)
     database = _database_of(store)
-    with pytest.raises(ValueError, match="validator rejected"), store.bulk_ingest(workers=4) as bulk:
+    with pytest.raises(ValueError, match="validator rejected"), store.bulk_ingest(workers=4, validate=True) as bulk:
         for i in range(30):
             bulk.save(Author(f"A{i}", i))
         bulk.save(ValidatedRecord(-1))  # the validator raises inside a worker
@@ -474,6 +474,34 @@ def test_parallel_worker_failure_is_atomic(store_factory):
     # The store is usable afterwards.
     sid = store.save(Author("Boole", 1854))
     assert store_factory.reopen(store).fetch(Author, sid) == Author("Boole", 1854)
+
+
+def test_parallel_validation_is_opt_in(store_factory):
+    """Workers run no validator by default; the store setting or ``validate=True`` opts in, ``validate=False`` overrides."""
+    store = store_factory()
+    _require_bulk(store)
+    with store.bulk_ingest(workers=2) as bulk:
+        sids = [bulk.save(ValidatedRecord(-1 - i)) for i in range(4)]
+    assert [store.fetch(ValidatedRecord, bulk.resolved_sid(ValidatedRecord, sid)).value for sid in sids] == [
+        -1,
+        -2,
+        -3,
+        -4,
+    ]
+
+    with (
+        pytest.raises(ValueError, match="validator rejected"),
+        store_factory().bulk_ingest(workers=2, validate=True) as bulk,
+    ):
+        bulk.save(ValidatedRecord(-1))
+
+    validating = store_factory(validate_records=True)
+    with pytest.raises(ValueError, match="validator rejected"), validating.bulk_ingest(workers=2) as bulk:
+        bulk.save(ValidatedRecord(-1))
+    validating = store_factory(validate_records=True)
+    with validating.bulk_ingest(workers=2, validate=False) as bulk:
+        sid = bulk.save(ValidatedRecord(-1))
+    assert validating.fetch(ValidatedRecord, bulk.resolved_sid(ValidatedRecord, sid)) == ValidatedRecord(-1)
 
 
 def test_parallel_requires_empty_store(store_factory):

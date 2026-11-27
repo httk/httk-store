@@ -133,7 +133,14 @@ A source object with an exact `__httk_storage_record__` can be saved directly;
 Nested record fields are projected recursively. A projected source must expose
 any derived `stored_property` declared by its target record because storage
 does not construct an intermediate record merely to evaluate that property.
-Record validation runs at this storage boundary through `__httk_validate__`.
+Stores trust what they are given: no save runs a record's
+`__httk_validate__` classmethod unless asked to. Open the store with
+`validate_records=True` to run it for every record instance a write encodes
+(top-level and nested), or pass `validate=True` (or `validate=False` to
+override a validating store) to `save()`, `replace()` or `bulk_ingest()`. To
+check records without a store, for example in parallel workers, call
+`httk.core.storage.validate_storage_record(record)`. The setting is not
+stamped, so it never affects reopening.
 Optional child fields use presence columns, so `None` remains distinct from an
 empty child value.
 

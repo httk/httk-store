@@ -163,15 +163,19 @@ class _StoreFactory:
         self._postgres_isolated = []
         self._stores = {}
 
-    def __call__(self, *, entry_records=None, entry_ids=None, transactions="never"):
+    def __call__(self, *, entry_records=None, entry_ids=None, transactions="never", validate_records=False):
         if self._backend == "sqlite":
             database = Backend.sqlite()
             declaration = entry_records if entry_records is not None else {}
-            store = SqlStore(database, entry_records=declaration, entry_ids=entry_ids)
+            store = SqlStore(
+                database, entry_records=declaration, entry_ids=entry_ids, validate_records=validate_records
+            )
         elif self._backend == "duckdb":
             database = Backend.duckdb()
             declaration = entry_records if entry_records is not None else {}
-            store = SqlStore(database, entry_records=declaration, entry_ids=entry_ids)
+            store = SqlStore(
+                database, entry_records=declaration, entry_ids=entry_ids, validate_records=validate_records
+            )
         elif self._backend == "postgresql":
             from postgres_support import IsolatedPostgresDatabase
 
@@ -179,7 +183,9 @@ class _StoreFactory:
             self._postgres_isolated.append(isolated)
             database = Backend.postgresql(isolated.uri)
             declaration = entry_records if entry_records is not None else {}
-            store = SqlStore(database, entry_records=declaration, entry_ids=entry_ids)
+            store = SqlStore(
+                database, entry_records=declaration, entry_ids=entry_ids, validate_records=validate_records
+            )
         else:
             from httk.store.backend.mongo import MongoDatabase, MongoStore
 
@@ -187,7 +193,9 @@ class _StoreFactory:
             assert self._mongo_client is not None
             database = MongoDatabase(self._mongo_client, name, transactions=transactions)
             declaration = entry_records if entry_records is not None else {}
-            store = MongoStore(database, entry_records=declaration, entry_ids=entry_ids)
+            store = MongoStore(
+                database, entry_records=declaration, entry_ids=entry_ids, validate_records=validate_records
+            )
         self._databases.append(database)
         self._stores[id(store)] = (store, database, declaration, transactions)
         return store
@@ -207,13 +215,16 @@ class _StoreFactory:
             mongo_database = MongoDatabase(self._mongo_client, database.database.name, transactions=transactions)
             self._databases.append(mongo_database)
             return MongoStore(
-                mongo_database, entry_records=declaration, entry_ids=getattr(original, "_entry_ids", None)
+                mongo_database,
+                entry_records=declaration,
+                entry_ids=getattr(original, "_entry_ids", None),
+                validate_records=original.validate_records,
             )
         if self._backend == "postgresql":
             reopened = Backend.postgresql(database.engine.url)
             self._databases.append(reopened)
-            return SqlStore(reopened, entry_records=declaration)
-        return SqlStore(database, entry_records=declaration)
+            return SqlStore(reopened, entry_records=declaration, validate_records=original.validate_records)
+        return SqlStore(database, entry_records=declaration, validate_records=original.validate_records)
 
 
 @pytest.fixture

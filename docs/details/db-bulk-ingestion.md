@@ -82,6 +82,14 @@ and immutable identity uniqueness against all existing family owners. Parallel
 and deferred initial builds, and explicit ownership upgrades, validate every
 surviving entry row.
 
+**Validation is opt-in.** Like `save()`, an ingest runs no record
+`__httk_validate__` classmethod unless asked to: `bulk_ingest(validate=True)`
+runs it for every encoded record instance in the serial, deferred and parallel
+paths alike, and `validate=None`, the default, follows the store's
+`validate_records` setting. With validation on, each distinct object is
+validated once per chunk (per worker chunk with `workers>1`); with it off,
+nothing is validated or memoized.
+
 **Returned sids are provisional.** `bulk.save()` returns an integer sid like
 `save()`, but it is provisional while the context is open: a record that
 deduplicates against a row the store already held is remapped to that existing

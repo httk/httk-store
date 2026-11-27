@@ -340,6 +340,10 @@ class MongoStore:
         (dispatch validators widened and back-filled, entry-id offsets
         recorded, all under the exclusive fsck lease).  Non-additive or other
         differences still raise; every refusal carries a typed ``remedy``.
+    :param validate_records: Whether writes run each saved record instance's own
+        ``__httk_validate__`` classmethod by default. The store trusts what it is
+        given unless this is set; ``save`` and ``replace`` take a per-call
+        ``validate`` override. Not stamped: it never affects reopening.
     :raises TypeError: If the first open omits both declaration forms.
     :raises ~httk.store.storage_layout.StorageLayoutUpgradeRequiredError: If the
         persisted layout is not trusted by this implementation.
@@ -360,6 +364,7 @@ class MongoStore:
         allow_clock_regression: bool = False,
         clock_regression_grace: bool = True,
         upgrade: bool = False,
+        validate_records: bool = False,
     ) -> None:
         if (
             not isinstance(store_timestamp_resolution, int)
@@ -370,6 +375,7 @@ class MongoStore:
         self._database = database
         self._entry_ids = entry_ids
         self._upgrade = upgrade
+        self._validate_records = validate_records
         self._identity_ownership_ready = True
         self._store_timestamps = store_timestamps
         self._store_timestamp_resolution = store_timestamp_resolution
@@ -493,6 +499,11 @@ class MongoStore:
         :return: The normalized entry declaration keyed by family class.
         """
         return self.layout.entry_records
+
+    @property
+    def validate_records(self) -> bool:
+        """Whether writes run record ``__httk_validate__`` classmethods unless a call overrides it."""
+        return self._validate_records
 
     @property
     def store_timestamps(self) -> bool:
@@ -1687,6 +1698,7 @@ class MongoStore:
         alternative_of: str | None = None,
         alternative_kind: str | None = None,
         links: Mapping[str, object] | None = None,
+        validate: bool | None = None,
     ) -> int:
         """Store an object graph and return its integer sid.
 
@@ -1703,6 +1715,7 @@ class MongoStore:
         :param alternative_of: The stored main entry's id this record is an alternative of, if any.
         :param alternative_kind: The alternative kind name (grammar ``[a-z][a-z0-9_]*``); required with ``alternative_of``.
         :param links: Weak links to add after saving, mapping each declared link name to a target or iterable of targets; the save and every link are applied in one atomic transaction.
+        :param validate: Whether each saved record instance's own ``__httk_validate__`` runs first; ``None`` uses :attr:`validate_records`.
         :return: The stored sid.
         :raises TypeError: If ``obj`` is a cursor proxy.
         :raises ValueError: If exactly one of ``alternative_of``/``alternative_kind`` is given, the kind is malformed, or the named main is missing, in another backing collection, or itself an alternative.
@@ -1716,6 +1729,7 @@ class MongoStore:
             raise ValueError(
                 f"invalid alternative_kind {alternative_kind!r}; expected {ALTERNATIVE_KIND_PATTERN.pattern}"
             )
+        validate = self._validate_records if validate is None else validate
         if not links:
             return self._save_graph(
                 obj,
@@ -1724,6 +1738,7 @@ class MongoStore:
                 id_series=id_series,
                 alternative_of=alternative_of,
                 alternative_kind=alternative_kind,
+                validate=validate,
             )
         with self.transaction():
             sid = self._save_graph(
@@ -1733,6 +1748,7 @@ class MongoStore:
                 id_series=id_series,
                 alternative_of=alternative_of,
                 alternative_kind=alternative_kind,
+                validate=validate,
             )
             self._apply_save_links(resolve_storage_record(obj, as_record=as_record), sid, links)
         return sid
@@ -1750,6 +1766,7 @@ class MongoStore:
         replace_alt_group: int | None = None,
         replace_alt_kind: str | None = None,
         replace_alt_main_id: str | None = None,
+        validate: bool,
     ) -> int:
         """Run one top-level save, optionally as a replacement carrying ``replace_logical_id``.
 
@@ -1790,6 +1807,7 @@ class MongoStore:
                 id_series,
                 replacement_entry_id,
                 alt_request,
+                validate=validate,
             )
             return sid
         with self._write_lock:
@@ -1814,6 +1832,7 @@ class MongoStore:
                                 id_series,
                                 replacement_entry_id,
                                 alt_request,
+                                validate=validate,
                             )
                         finally:
                             self._local.write_session = previous_session
@@ -1827,6 +1846,7 @@ class MongoStore:
                         id_series,
                         replacement_entry_id,
                         alt_request,
+                        validate=validate,
                     )
                 self._advance_store_timestamp_mark(captured)
                 return sid
@@ -1843,8 +1863,10 @@ class MongoStore:
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
         alt_request: "_AlternativeRequest | None" = None,
+        *,
+        validate: bool,
     ) -> int:
-        projection = SaveProjection(store_timestamp=store_timestamp)
+        projection = SaveProjection(store_timestamp=store_timestamp, validate=validate)
         self._projection_state(projection)
         alt_group: int | None
         alt_kind: str | None
@@ -1917,6 +1939,8 @@ class MongoStore:
         id_series: str | None = None,
         replacement_entry_id: str | None = None,
         alt_request: "_AlternativeRequest | None" = None,
+        *,
+        validate: bool,
     ) -> int:
         last_error: BaseException | None = None
         for attempt in range(_TRANSACTION_ATTEMPTS):
@@ -1934,6 +1958,7 @@ class MongoStore:
                         id_series,
                         replacement_entry_id,
                         alt_request,
+                        validate=validate,
                     )
                     self._commit(session)
                 except BaseException as error:
@@ -2072,7 +2097,11 @@ class MongoStore:
                         replacement,
                     )
         validation_key = (record_type, id(source))
-        if type(source) is record_type and validation_key not in projection.validated:
+        if (
+            projection.validate
+            and getattr(type(source), "__httk_row_base__", type(source)) is record_type
+            and validation_key not in projection.validated
+        ):
             validator = vars(record_type).get("__httk_validate__")
             if validator is not None:
                 validator.__get__(None, record_type)(source)
@@ -2747,6 +2776,7 @@ class MongoStore:
         *,
         id_series: str | None = None,
         links: Mapping[str, object] | None = None,
+        validate: bool | None = None,
     ) -> int:
         """Store ``obj`` as a logical replacement of ``predecessor`` and return its sid.
 
@@ -2776,18 +2806,20 @@ class MongoStore:
         :param obj: The replacement object to store.
         :param id_series: Override the configured entry-id series when an id must be minted.
         :param links: Weak links to add, mapping each declared link name to a target or iterable of targets.
+        :param validate: Whether each saved record instance's own ``__httk_validate__`` runs first; ``None`` uses :attr:`validate_records`.
         :return: The stored replacement document's sid.
         :raises ValueError: If ``predecessor`` is not known to this store, or ``obj``'s record collection differs from ``predecessor``'s.
         :raises ~httk.store.store_common.EntryReplacementError: If ``obj`` deduplicates onto a document from a different lineage.
         """
+        validate = self._validate_records if validate is None else validate
         if links:
             with self.transaction():
-                sid = self._replace_core(predecessor, obj, id_series)
+                sid = self._replace_core(predecessor, obj, id_series, validate)
                 self._apply_save_links(resolve_storage_record(obj), sid, links)
             return sid
-        return self._replace_core(predecessor, obj, id_series)
+        return self._replace_core(predecessor, obj, id_series, validate)
 
-    def _replace_core(self, predecessor: Any, obj: Any, id_series: str | None) -> int:
+    def _replace_core(self, predecessor: Any, obj: Any, id_series: str | None, validate: bool) -> int:
         predecessor_sid = self.sid_of(predecessor)
         if predecessor_sid is None:
             raise ValueError(
@@ -2837,6 +2869,7 @@ class MongoStore:
             replace_alt_group=predecessor_alt_id,
             replace_alt_kind=(predecessor_alt_kind if isinstance(predecessor_alt_kind, str) else None),
             replace_alt_main_id=alt_main_id,
+            validate=validate,
         )
 
     # ------------------------------------------------------------------ weak links

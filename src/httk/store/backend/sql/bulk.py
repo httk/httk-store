@@ -234,6 +234,8 @@ class BulkIngest:
     :param finalize: The finalization profile: ``"auto"`` selects the deferred finalizer on a fresh supported store for serial ingestion and the parity merge otherwise; ``"parity"`` and ``"deferred"`` force the respective profile.
     :param track_sids: Retain the per-save provisional-to-final sid mapping.  Disable it for bounded-memory offline builds when callers do not need :meth:`resolved_sid`; the deferred and parallel ingests also need it for ``save(links=...)``.
     :param id_series: Override the configured entry-id series for ids minted during the ingest.
+    :param validate: Whether every encoded record instance's own ``__httk_validate__`` runs; ``None`` uses the
+        store's ``validate_records``.
     """
 
     def __init__(
@@ -248,6 +250,7 @@ class BulkIngest:
         finalize: Literal["auto", "parity", "deferred"] = "auto",
         track_sids: bool = True,
         id_series: str | None = None,
+        validate: bool | None = None,
     ) -> None:
         if chunk_size < 1:
             raise ValueError("chunk_size must be a positive integer")
@@ -272,6 +275,7 @@ class BulkIngest:
         self._requested_finalize = finalize
         self._track_sids = track_sids
         self._id_series = id_series
+        self._validate = store.validate_records if validate is None else validate
         self._finalize_profile = "parity"
         self._store_timestamp: int | None = None
         self._deferred = False
@@ -585,6 +589,7 @@ class BulkIngest:
             track_sids=self._track_sids,
             store_timestamp=self._store_timestamp,
             spill_deferred_auxiliary=(self._deferred and self._store.backend_facts.parallel_shard_format == "parquet"),
+            validate=self._validate,
         )
         self._controller.start()
 
@@ -1028,7 +1033,7 @@ class BulkIngest:
 
     def _serial_save(self, obj: Any, record_type: type, promoted: frozenset[type]) -> int:
         """Encode one top-level serial parity save and count it towards the chunk."""
-        projection = SaveProjection(store_timestamp=self._store_timestamp)
+        projection = SaveProjection(store_timestamp=self._store_timestamp, validate=self._validate)
         occurrences: list[tuple[type, Any, int]] = []
         seen: set[tuple[type, int, int]] = set()
         sid = self._encode(record_type, obj, projection, "", promoted, occurrences, seen)
@@ -1075,6 +1080,7 @@ class BulkIngest:
                 track_sids=self._track_sids,
                 store_timestamp=self._store_timestamp,
                 spill_deferred_auxiliary=(self._deferred and stage_format == "parquet"),
+                validate=self._validate,
             )
             self._serial_stage = _SerialDeferredStage(temp, _WorkerEncoder(self._store, 0, config))
         token = self._serial_next_token
@@ -1314,7 +1320,11 @@ class BulkIngest:
         projected = projection.projector(record_type, source)
 
         validation_key = (record_type, id(source))
-        if type(source) is record_type and validation_key not in projection.validated:
+        if (
+            projection.validate
+            and getattr(type(source), "__httk_row_base__", type(source)) is record_type
+            and validation_key not in projection.validated
+        ):
             if validation_key not in self._validated:
                 validator = vars(record_type).get("__httk_validate__")
                 if validator is not None:

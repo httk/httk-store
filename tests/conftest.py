@@ -48,6 +48,10 @@ def _duckdb_test_memory_limit() -> str:
 
 
 os.environ.setdefault("HTTK_DUCKDB_MEMORY_LIMIT", _duckdb_test_memory_limit())
+# Likewise DuckDB starts one worker thread per CPU per instance; the tiny test
+# databases gain nothing from that, and across xdist workers it multiplies into
+# thousands of threads against task limits. An exported value always wins.
+os.environ.setdefault("HTTK_DUCKDB_THREADS", "2")
 
 from httk.store.backend.sql import Backend, SqlStore
 

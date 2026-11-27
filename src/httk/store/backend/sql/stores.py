@@ -98,6 +98,9 @@ class DuckdbStore(SqlStore):
     :param memory_limit: An optional DuckDB ``memory_limit`` setting such as
         ``"1GB"``; ``None`` falls back to the ``HTTK_DUCKDB_MEMORY_LIMIT``
         environment variable.
+    :param threads: An optional positive cap on DuckDB's worker ``threads``;
+        ``None`` falls back to the ``HTTK_DUCKDB_THREADS`` environment variable
+        (DuckDB's default, one per CPU, when that is unset too).
     :param \\**store_options: Keyword options of :class:`~httk.store.backend.sql.store.SqlStore`
         (``records``, ``entry_records``, ``entry_ids``, ``upgrade``, ...).
     """
@@ -108,9 +111,14 @@ class DuckdbStore(SqlStore):
         *,
         read_only: bool = False,
         memory_limit: str | None = None,
+        threads: int | None = None,
         **store_options: Any,
     ) -> None:
-        _init_owning(self, Backend.duckdb(path, memory_limit=memory_limit, read_only=read_only), store_options)
+        _init_owning(
+            self,
+            Backend.duckdb(path, memory_limit=memory_limit, threads=threads, read_only=read_only),
+            store_options,
+        )
 
 
 class PostgresqlStore(SqlStore):

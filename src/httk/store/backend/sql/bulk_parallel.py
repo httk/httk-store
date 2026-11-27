@@ -442,7 +442,13 @@ class _DuckdbStageWriter:
     def finalize(self) -> dict[str, Any]:
         for _writer, file, _columns in self._csv.values():
             file.close()
-        engine = sqlalchemy.create_engine(f"duckdb:///{self._path}")
+        from httk.store.backend.duckdb.engine import _resource_config
+
+        # Each worker opens its own stage database: honour the process-tree caps.
+        config = _resource_config()
+        engine = sqlalchemy.create_engine(
+            f"duckdb:///{self._path}", **({"connect_args": {"config": config}} if config else {})
+        )
         try:
             with engine.begin() as connection:
                 for table_name, (_writer, _file, columns) in self._csv.items():

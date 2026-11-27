@@ -123,6 +123,7 @@ class Backend:
         path: str | os.PathLike[str] | None = None,
         *,
         memory_limit: str | None = None,
+        threads: int | None = None,
         read_only: bool = False,
     ) -> "Backend":
         """Create a DuckDB database stored in ``path``, or in memory when ``path`` is None.
@@ -134,6 +135,11 @@ class Backend:
             ingest processes; when this parameter is ``None`` the
             ``HTTK_DUCKDB_MEMORY_LIMIT`` environment variable (if set) supplies
             the cap instead, so process trees can be memory-guarded wholesale.
+        :param threads: An optional cap on DuckDB's worker ``threads`` (a positive
+            integer). DuckDB's own default is one thread per CPU per instance,
+            which multiplies across parallel processes; when this parameter is
+            ``None`` the ``HTTK_DUCKDB_THREADS`` environment variable (if set)
+            supplies the cap instead.
         :param read_only: Open the file in DuckDB ``READ_ONLY`` access mode, which
             takes no write lock and so permits several processes to open the same
             database concurrently for reading. Writes on the backend then fail.
@@ -141,10 +147,11 @@ class Backend:
         :return: The configured database wrapper.
         :raises ImportError: If the ``duckdb_engine`` SQLAlchemy dialect is not installed;
             install the ``httk-store[duckdb]`` extra to use it.
+        :raises ValueError: If ``threads`` or ``HTTK_DUCKDB_THREADS`` is not a positive integer.
         """
         from httk.store.backend.duckdb.engine import database
 
-        return database(cls, path, memory_limit=memory_limit, read_only=read_only)
+        return database(cls, path, memory_limit=memory_limit, threads=threads, read_only=read_only)
 
     @classmethod
     def clickhouse(cls, url: str | sqlalchemy.URL, *, database: str | None = None) -> "Backend":

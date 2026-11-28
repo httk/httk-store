@@ -263,12 +263,29 @@ def _metadata_has_plan(record_type: type) -> bool:
         hints = typing.get_type_hints(reachable_type, include_extras=True)
         if any(
             not spec.derived
-            and _has_identity_skip(hints.get(spec.field))
-            and (not _has_identity_skip(hints.get(spec.field), KeepStored) or spec.role in _KEEP_FILLED_ROLES)
+            and (
+                _inline_identity_skips(spec)
+                or _has_identity_skip(hints.get(spec.field))
+                and (not _has_identity_skip(hints.get(spec.field), KeepStored) or spec.role in _KEEP_FILLED_ROLES)
+            )
             for spec in resolve_schema(reachable_type).fields
         ):
             return True
     return False
+
+
+def _inline_identity_skips(spec: FieldSpec) -> bool:
+    """Whether ``spec`` is an Inline field whose element class has identity-excluded fields.
+
+    Stored inline rows then may differ from an incoming value of equal content
+    id, so a deduplicating save compares the whole field like an
+    identity-excluded child sequence.
+    """
+    if spec.child is None or spec.child.inline is None:
+        return False
+    element = spec.child.inline
+    hints = typing.get_type_hints(element.cls, include_extras=True)
+    return any(_has_identity_skip(hints.get(field.field)) for field in element.fields)
 
 
 @functools.cache
@@ -288,7 +305,7 @@ def _metadata_plan(record_type: type) -> _MetadataPlan | None:
             if spec.role in _KEEP_FILLED_ROLES:
                 keep_specs.append(spec)
             continue
-        if _has_identity_skip(hints.get(spec.field)):
+        if _has_identity_skip(hints.get(spec.field)) or _inline_identity_skips(spec):
             if spec.role in {"scalar", "encoded", "fixed_array"}:
                 skipped_specs.append(spec)
             else:
@@ -298,6 +315,32 @@ def _metadata_plan(record_type: type) -> _MetadataPlan | None:
     if not skipped_specs and not skipped_nested and not descend_specs and not keep_specs:
         return None
     return _MetadataPlan(tuple(skipped_specs), tuple(skipped_nested), tuple(descend_specs), tuple(keep_specs))
+
+
+def _child_value_conflict(
+    spec: FieldSpec, incoming: Any, stored: Any, path: str, equal: Callable[[Any, Any], bool]
+) -> EntryMetadataConflictError | None:
+    """The metadata conflict of a non-record child value, or ``None`` when the stored values agree.
+
+    An ``Inline`` field of equally many elements is compared on its stored element
+    fields only (a ``Skip`` field is not stored), and a conflict names the first
+    differing one (``Rec.sites[0].note``), as the link layout does through its element records.
+    """
+    if equal(incoming, stored):
+        return None
+    inline = None if spec.child is None else spec.child.inline
+    if inline is not None and incoming is not None and stored is not None and len(incoming) == len(stored):
+        for index, (new, old) in enumerate(zip(incoming, stored, strict=True)):
+            new_values = project_storage_record(inline.cls, new)
+            old_values = project_storage_record(inline.cls, old)
+            for field in inline.fields:
+                if not equal(new_values[field.field], old_values[field.field]):
+                    return EntryMetadataConflictError(
+                        f"metadata conflict for {path}[{index}].{field.field}: stored {old_values[field.field]!r}, "
+                        f"received {new_values[field.field]!r}"
+                    )
+        return None
+    return EntryMetadataConflictError(f"metadata conflict for {path}: stored {stored!r}, received {incoming!r}")
 
 
 def _keeps_stored(record_type: type) -> bool:

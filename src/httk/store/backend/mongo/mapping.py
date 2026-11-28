@@ -269,6 +269,17 @@ def index_specs_for(schema: TableSchema, *, store_timestamps: bool = True) -> li
         )
     for field in schema.fields:
         if field.role == "child":
+            # An Inline element's Indexed field gets a multikey index on its key in the embedded array.
+            inline = field.child.inline if field.child is not None else None
+            for column in () if inline is None else (column for spec in inline.fields for column in spec.columns):
+                if column.indexed:
+                    result.append(
+                        IndexSpec(
+                            ((f"f.{field.field}.{column.name}", 1),),
+                            # "ixe": apart from a parent field index named after the same words.
+                            _index_name("ixe", collection, (field.field, column.name)),
+                        )
+                    )
             continue
         # Per-column flags, as in SQL: an encoded field's Indexed/Unique sits on its
         # codec's query column only, and a Unique tensor is unique through its exact key.
@@ -303,7 +314,15 @@ def _field_validator(
     properties: dict[str, Any] = {}
     dependencies: dict[str, list[str]] = {}
     required: list[str] = []
-    if spec.role == "child":
+    if spec.role == "child" and spec.child is not None and spec.child.inline is not None:
+        # Inline element subdocuments are validated like the fields of a record's ``f`` document.
+        properties[spec.field] = {
+            "bsonType": "array",
+            "items": _fields_schema(spec.child.inline.fields, additional=False),
+        }
+        if not spec.optional:
+            required.append(spec.field)
+    elif spec.role == "child":
         assert spec.child is not None
         element_properties = {
             column.name: {"bsonType": _element_bson_type(column.kind, column.nullable)}
@@ -330,6 +349,29 @@ def _field_validator(
     if spec.role in {"encoded", "fixed_array"}:
         dependencies.update(_channel_dependencies(spec.columns))
     return properties, dependencies, required
+
+
+def _fields_schema(specs: tuple[FieldSpec, ...], *, additional: bool) -> dict[str, Any]:
+    """The ``$jsonSchema`` object of one document holding ``specs``' fields (a record's ``f``, an Inline element)."""
+    field_properties: dict[str, Any] = {}
+    dependencies: dict[str, list[str]] = {}
+    field_required: list[str] = []
+    for spec in specs:
+        field_props, field_dependencies, required_fields = _field_validator(spec)
+        field_properties.update(field_props)
+        dependencies.update(field_dependencies)
+        field_required.extend(required_fields)
+    result: dict[str, Any] = {
+        "bsonType": "object",
+        "properties": field_properties,
+        "additionalProperties": additional,
+    }
+    # MongoDB rejects ``required: []`` even though JSON Schema permits it.
+    if field_required:
+        result["required"] = field_required
+    if dependencies:
+        result["dependencies"] = dependencies
+    return result
 
 
 def validator_for(schema: TableSchema, *, store_timestamps: bool = True) -> dict[str, Any]:
@@ -365,25 +407,7 @@ def validator_for(schema: TableSchema, *, store_timestamps: bool = True) -> dict
             "pattern": "^[0-9a-fA-F]{64}$",
         }
         required.append("content_id")
-    field_properties: dict[str, Any] = {}
-    dependencies: dict[str, list[str]] = {}
-    field_required: list[str] = []
-    for spec in schema.fields:
-        field_props, field_dependencies, required_fields = _field_validator(spec)
-        field_properties.update(field_props)
-        dependencies.update(field_dependencies)
-        field_required.extend(required_fields)
-    f_schema: dict[str, Any] = {
-        "bsonType": "object",
-        "properties": field_properties,
-        "additionalProperties": True,
-    }
-    # MongoDB rejects ``required: []`` even though JSON Schema permits it.
-    if field_required:
-        f_schema["required"] = field_required
-    properties["f"] = f_schema
-    if dependencies:
-        properties["f"]["dependencies"] = dependencies
+    properties["f"] = _fields_schema(schema.fields, additional=True)
     return {
         "$jsonSchema": {
             "bsonType": "object",

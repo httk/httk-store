@@ -10,7 +10,8 @@ In order, the script:
 2. saves both with `as_record=SitesStructureRecord`;
 3. validates the served properties with `store.stored_property_plan`;
 4. searches for structures with a chlorine site, and with one near the origin;
-5. prints the physical tables and their columns with plain `duckdb`;
+5. prints the physical tables and their columns with plain `duckdb`: the
+   structures and one sites table ``(parent sid, index, x, y, z, symbol)``;
 6. reopens the store and fetches a record back.
 
 The assertions pin the layout, so the example fails if it changes.
@@ -109,7 +110,20 @@ def main() -> None:
 
         print("physical tables:")
         counts = show_layout(path)
-        assert counts == {"example_site": 10, "example_sites_structure": 2, "example_sites_structure_sites": 10}
+        assert counts == {"example_sites_structure": 2, "example_sites_structure_sites": 10}
+        with duckdb.connect(str(path), read_only=True) as connection:
+            site_columns = connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'example_sites_structure_sites' ORDER BY ordinal_position"
+            ).fetchall()
+        assert [name for (name,) in site_columns] == [
+            "example_sites_structure_sid",
+            "sites_index",
+            "x",
+            "y",
+            "z",
+            "symbol",
+        ]
 
         # [reopen]
         with DuckdbStore(path) as store:  # sites_layout is imported, so the registration is known

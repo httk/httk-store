@@ -1,17 +1,18 @@
 """Chaining from a child field of storable records into the element fields (``s.sites.symbol``).
 
-One spec for every backend: the SQL dialects and, live, MongoDB (gated on ``HTTK_TEST_MONGODB_URI``).
+One spec for every backend: the SQL dialects and, live, MongoDB (gated on ``HTTK_TEST_MONGODB_URI``), and
+for both layouts of the child field: a link table to an element table, and ``Inline()`` rows.
 """
 
 import re
 import uuid
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
 import pytest
 from clickhouse_read_support import CLICKHOUSE_PARAM, bulk_store
-from httk.core.storage import StorageInfo, WeakLink
+from httk.core.storage import Inline, Shape, StorageInfo, WeakLink
 from postgres_support import POSTGRES_PARAM, postgres_database
 
 from httk.store import FederatedStore
@@ -50,32 +51,82 @@ PARENTS = [
 ]
 
 
+@dataclass(frozen=True)
+class InlineSiteRow:
+    x: float
+    symbol: str
+    occupancy: Fraction = Fraction(1)
+    pos: Annotated[tuple[tuple[float, ...], ...], Shape(1, 1)] | None = None
+
+
+@dataclass(frozen=True)
+class InlineParent:
+    name: str
+    sites: Annotated[tuple[InlineSiteRow, ...], Inline()]
+    n: int | None = None
+    labels: tuple[str, ...] = ()
+
+
+INLINE_PARENTS = [
+    InlineParent(
+        parent.name,
+        tuple(InlineSiteRow(site.x, site.symbol, site.occupancy) for site in parent.sites),
+        parent.n,
+        parent.labels,
+    )
+    for parent in PARENTS
+]
+LAYOUTS = {"link": PARENTS, "inline": INLINE_PARENTS}
+# The parent class each fixture store (or federation) holds, keyed by id(); unlisted stores hold Parent.
+PARENT_OF: dict[int, type] = {}
+
+
+def _parent_class(store: Any) -> type:
+    return PARENT_OF.get(id(store), Parent)
+
+
 def _mongo_store(client: Any) -> Any:
     from httk.store.backend.mongo import MongoDatabase, MongoStore
 
     return MongoStore(MongoDatabase(client, f"httk_test_{uuid.uuid4().hex}"), entry_records={})
 
 
+@pytest.fixture(scope="module", params=["link", "inline"])
+def layout(request):
+    """The child-field layout: a link table to element rows, or Inline() rows."""
+    return request.param
+
+
 @pytest.fixture(scope="module", params=["sqlite", "duckdb", CLICKHOUSE_PARAM, POSTGRES_PARAM, "mongo"])
-def store(request):
-    """A populated store per supported backend."""
+def store(request, layout):
+    """A populated store per supported backend and layout."""
+    records = LAYOUTS[layout]
+    for sql_store in _populated(request, records):
+        PARENT_OF[id(sql_store)] = type(records[0])
+        try:
+            yield sql_store
+        finally:
+            PARENT_OF.pop(id(sql_store), None)
+
+
+def _populated(request: Any, records: list[Any]) -> Any:
     if request.param == "mongo":
         mongo_store = _mongo_store(request.getfixturevalue("mongo_test_client"))
         try:
-            for parent in PARENTS:
+            for parent in records:
                 mongo_store.save(parent)
             yield mongo_store
         finally:
             mongo_store._database.client.drop_database(mongo_store._database.database.name)
         return
     if request.param == "clickhousedb":
-        with bulk_store(PARENTS) as sql_store:
+        with bulk_store(records) as sql_store:
             yield sql_store
         return
     if request.param == "postgresql":
         with postgres_database() as database:
             sql_store = SqlStore(database, entry_records={})
-            for parent in PARENTS:
+            for parent in records:
                 sql_store.save(parent)
             yield sql_store
         return
@@ -83,14 +134,14 @@ def store(request):
         pytest.importorskip("duckdb_engine")
     with Backend.duckdb() if request.param == "duckdb" else Backend.sqlite() as database:
         sql_store = SqlStore(database, entry_records={})
-        for parent in PARENTS:
+        for parent in records:
             sql_store.save(parent)
         yield sql_store
 
 
 def names(store: Any, build: Any) -> list[str]:
     search = store.searcher()
-    s = search.variable(Parent)
+    s = search.variable(_parent_class(store))
     search.add(build(s))
     return sorted(row.parent.name for row in search.results(parent=s))
 
@@ -115,11 +166,15 @@ def test_one_traversal_correlates_and_separate_accesses_do_not(store):
     assert names(store, lambda s: (s.sites.symbol == "Cl") & (s.sites.x > 0.4)) == ["A", "B"]
 
     search = store.searcher()
-    s = search.variable(Parent)
+    s = search.variable(_parent_class(store))
     site = s.sites
     _ = (site.symbol, site.x)
-    if isinstance(store, SqlStore):
+    if isinstance(store, SqlStore) and _parent_class(store) is InlineParent:
+        assert len(s._joins) == 1  # the child alias holds the element columns
+    elif isinstance(store, SqlStore):
         assert len(s._joins) == 2  # one link alias, one element alias
+    elif _parent_class(store) is InlineParent:
+        assert search._child_lookups == []  # the elements are embedded: no $lookup
     else:
         assert len(search._child_lookups) == 1  # one element $lookup per traversal object
 
@@ -152,6 +207,12 @@ def test_set_operations_on_element_field(store):
 
 
 def test_element_sid_comparison_still_works(store):
+    if _parent_class(store) is InlineParent:
+        # Inline rows have no element identity: the field itself refuses comparisons and set operations.
+        for build in (lambda s: s.sites.has_any(1), lambda s: s.sites == 1, lambda s: s.sites.has_only()):
+            with pytest.raises(UnsupportedQueryError, match="InlineParent.sites is an Inline field"):
+                names(store, build)
+        return
     search = store.searcher()
     site = search.variable(SiteRow)
     search.add((site.symbol == "Cl") & (site.x > 0.4))
@@ -170,7 +231,7 @@ def test_element_sid_comparison_still_works(store):
 
 def test_no_duplicate_parents(store):
     search = store.searcher()
-    s = search.variable(Parent)
+    s = search.variable(_parent_class(store))
     search.add(s.sites.symbol.has_any("Na", "Cl"))
     rows = [row.parent.name for row in search.results(parent=s)]
     assert sorted(rows) == ["A", "B", "D"]
@@ -179,9 +240,13 @@ def test_no_duplicate_parents(store):
 
 def test_refusals(store):
     search = store.searcher()
-    s = search.variable(Parent)
-    with pytest.raises(UnsupportedQueryError, match=r"SiteRow\.tag is a reference field"):
-        s.sites.tag  # noqa: B018
+    s = search.variable(_parent_class(store))
+    if _parent_class(store) is InlineParent:
+        with pytest.raises(UnsupportedQueryError, match=r"InlineSiteRow\.pos is a fixed_array field"):
+            s.sites.pos  # noqa: B018
+    else:
+        with pytest.raises(UnsupportedQueryError, match=r"SiteRow\.tag is a reference field"):
+            s.sites.tag  # noqa: B018
     with pytest.raises(AttributeError, match=r"SiteRow has no stored field 'nope'"):
         s.sites.nope  # noqa: B018
     with pytest.raises(AttributeError, match="'sid'"):
@@ -192,8 +257,10 @@ def test_refusals(store):
         search.add_sort(s.sites.x)
 
 
+@pytest.mark.parametrize("chain_layout", ["link", "inline"])
 @pytest.mark.parametrize("first_backend", ["sqlite", "mongo"])
-def test_federated_chain(request, first_backend):
+def test_federated_chain(request, first_backend, chain_layout):
+    records = LAYOUTS[chain_layout]
     with Backend.sqlite() as first_database, Backend.sqlite() as second_database:
         if first_backend == "mongo":
             first = _mongo_store(request.getfixturevalue("mongo_test_client"))
@@ -201,16 +268,18 @@ def test_federated_chain(request, first_backend):
         else:
             first = SqlStore(first_database, entry_records={})
         second = SqlStore(second_database, entry_records={})
-        for index, parent in enumerate(PARENTS):
+        for index, parent in enumerate(records):
             (first if index % 2 else second).save(parent)
         federation = FederatedStore({"first": first, "second": second})
+        PARENT_OF[id(federation)] = type(records[0])
+        request.addfinalizer(lambda: PARENT_OF.pop(id(federation), None))
         assert names(federation, lambda s: s.sites.symbol == "Cl") == ["A", "B"]
         assert names(federation, correlated) == ["B"]
         assert names(federation, lambda s: (s.sites.symbol == "Cl") & (s.sites.x > 0.4)) == ["A", "B"]
         assert names(federation, not_correlated) == ["A", "C", "D"]
 
         search = federation.searcher()  # correlation also spans separate add() calls
-        s = search.variable(Parent)
+        s = search.variable(type(records[0]))
         site = s.sites
         search.add(site.symbol == "Cl")
         search.add(site.x > 0.4)
@@ -243,7 +312,7 @@ def test_uncorrelatable_combinations_are_refused(store):
         with pytest.raises(UnsupportedQueryError, match="cannot evaluate on one element"):
             names(store, build)
     search = store.searcher()
-    s = search.variable(Parent)
+    s = search.variable(_parent_class(store))
     with pytest.raises(UnsupportedQueryError, match="compares only with literal values"):
         _ = s.sites.symbol == None
     with pytest.raises(UnsupportedQueryError, match="compares only with literal values"):
@@ -307,7 +376,7 @@ def test_list_field_object_reuse_constrains_one_entry(store):
         names(store, list_reuse_mixed)
     assert names(store, list_reuse_positive) == []  # no single label is both "x" and "y"
     search = store.searcher()
-    s = search.variable(Parent)
+    s = search.variable(_parent_class(store))
     labels = s.labels
     search.add(labels.has_any("x"))
     search.add(labels.contains("y"))

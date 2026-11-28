@@ -8,7 +8,7 @@ from typing import Any
 
 from bson import encode as bson_encode
 from httk.core import FracVector
-from httk.core.storage import Shape
+from httk.core.storage import Shape, project_storage_record
 
 from httk.store.backend.codecs import (
     _float_tensor,
@@ -89,14 +89,20 @@ def encode_record(
     source: Any,
     record_type: type,
     resolve_reference: Callable[..., int],
+    *,
+    validate: bool = False,
 ) -> dict[str, Any]:
     """Encode projected field values into the record's ``f`` document.
+
+    An ``Inline`` field becomes an array of element subdocuments, each encoded
+    exactly as this function encodes a record's own fields.
 
     :param schema: The resolved record schema.
     :param projected: The backend-neutral storage projection.
     :param source: The source object used for derived stored properties.
     :param record_type: The record representation being encoded.
     :param resolve_reference: Callback saving a reference and returning its sid.
+    :param validate: Whether each ``Inline`` element's own ``__httk_validate__`` runs.
     :return: The embedded ``f`` document.
     """
     fields = {item.field: item for item in document_fields_for(schema)}
@@ -131,6 +137,20 @@ def encode_record(
                         }
                         | {_exact_column(spec.field): encode_fracvector_exact(row)}
                     )
+            elif spec.child.inline is not None:
+                inline = spec.child.inline
+                for element in typing.cast(typing.Iterable[Any], value):
+                    if element is None:
+                        raise ValueError(
+                            f"{record_type.__name__}.{spec.field}[{len(elements)}] cannot be None; "
+                            f"Inline elements are dataclass instances"
+                        )
+                    # Like a record's own save: only an exact instance is validated, never a projection source.
+                    validator = vars(inline.cls).get("__httk_validate__") if validate else None
+                    if validator is not None and type(element) is inline.cls:
+                        validator.__get__(None, inline.cls)(element)
+                    projected_element = project_storage_record(inline.cls, element)
+                    elements.append(encode_record(inline, projected_element, element, inline.cls, resolve_reference))
             else:
                 codec = codec_named(spec.codec_name) if spec.codec_name is not None else None
                 for element in typing.cast(typing.Iterable[Any], value):
@@ -207,7 +227,9 @@ def _decode_child(spec: FieldSpec, value: Any, resolve_reference: Callable[[type
             for element in value
         ]
         return FracVector(rows)
-    if spec.target is not None:
+    if spec.child.inline is not None:
+        elements = [decode_record(spec.child.inline, {"f": element}, resolve_reference) for element in value]
+    elif spec.target is not None:
         elements = [
             resolve_reference(spec.target, int(element[spec.child.element_columns[0].name])) for element in value
         ]

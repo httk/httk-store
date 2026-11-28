@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from functools import reduce
 from itertools import islice
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, cast
 
 from httk.core.storage import resolve_storage_record
 
@@ -42,6 +42,8 @@ __all__ = [
     "MongoChildRecords",
     "MongoExpression",
     "MongoField",
+    "MongoInlineRecordField",
+    "MongoInlineRecords",
     "MongoLinkField",
     "MongoLinkSet",
     "MongoLinks",
@@ -140,10 +142,13 @@ class ChildRecordNode:
     and ``predicate`` an ``$elemMatch`` body over one of them. Conjoined (or
     disjoined) nodes of one path merge into a single body before rendering (see
     :func:`_correlate`), so they constrain one element; ``~`` is set-wise.
+    An ``Inline`` traversal reads the embedded element array itself, shared by
+    every access, so its nodes carry the traversal object's own ``key``.
     """
 
     path: str
     predicate: dict[str, Any]
+    key: Any = None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -461,7 +466,7 @@ def _child_string_predicate(node: ChildStringNode) -> dict[str, Any]:
 
 def _reject_link_output(value: Any) -> None:
     """Reject projecting or sorting by a weak-link path or a field of child records (variable-length)."""
-    if isinstance(value, MongoChildRecordField):
+    if isinstance(value, (MongoChildRecordField, MongoInlineRecords)):
         raise UnsupportedQueryError(
             "a field of child records is variable-length and cannot be a scalar output or sort key; child-record "
             "traversals are usable only as search predicates, so project the variable and read its records instead"
@@ -567,6 +572,9 @@ def _element(node: Node, labels: Mapping[str, str]) -> ElementNode | None:
     """Describe ``node`` as a positive per-element condition on one collection-valued object, if it is one."""
     if isinstance(node, ElementNode):
         return node
+    if isinstance(node, ChildRecordNode) and node.key is not None:
+        label = labels.get(node.path, node.path)
+        return ElementNode(node.key, node.key, label, node.path, node.predicate, False)
     if isinstance(node, ChildRecordNode) or (isinstance(node, LinkPredicateNode) and not node.universal):
         return ElementNode(node.path, node.path, labels.get(node.path, node.path), node.path, node.predicate, False)
     field = getattr(node, "field", None)
@@ -605,7 +613,8 @@ def _uses(node: Node, labels: Mapping[str, str], positive: bool = True) -> dict[
         return {node.use: (positive, node.label)}
     if isinstance(node, (ChildRecordNode, LinkPredicateNode)):
         universal = isinstance(node, LinkPredicateNode) and node.universal
-        return {node.path: (positive and not universal, labels.get(node.path, node.path))}
+        key = node.key if isinstance(node, ChildRecordNode) and node.key is not None else node.path
+        return {key: (positive and not universal, labels.get(node.path, node.path))}
     use = _field_use(getattr(node, "field", None))
     if use is None:
         return {}
@@ -900,6 +909,58 @@ class MongoChildRecords(MongoField):
                 }
             )
         return MongoChildRecordField(self._lookup_path, element_spec)
+
+
+class MongoInlineRecords:
+    """An ``Inline`` field (``v.sites``): its embedded element subdocuments, chainable into the element fields.
+
+    Attribute access (``v.sites.symbol``) yields a :class:`MongoInlineRecordField`
+    over the embedded array, tagged with this object so that conditions from one
+    access constrain one element and fresh accesses stay independent, as for
+    :class:`MongoChildRecords`. Inline elements have no identity, so the field
+    itself refuses comparisons and set operations.
+
+    :param variable: The query variable owning the field.
+    :param spec: The stored ``Inline`` child field specification.
+    """
+
+    __slots__ = ("_key", "_path", "_spec", "_variable")
+
+    def __init__(self, variable: "MongoVariable", spec: FieldSpec) -> None:
+        self._variable = variable
+        self._spec = spec
+        self._path = MongoField(variable, f"f.{spec.field}", spec)._path
+        self._key = object()
+        variable._searcher._collection_labels[self._path] = f"{variable._cls.__name__}.{spec.field}"
+
+    def __getattr__(self, name: str) -> "MongoInlineRecordField":
+        if name.startswith("_"):
+            raise AttributeError(name)
+        assert self._spec.child is not None and self._spec.child.inline is not None
+        schema = self._spec.child.inline
+        try:
+            element_spec = schema.field(name)
+        except SchemaError:
+            raise AttributeError(
+                f"{schema.cls.__name__} has no stored field {name!r} to query through "
+                f"{self._variable._cls.__name__}.{self._spec.field}"
+            ) from None
+        if element_spec.role not in ("scalar", "encoded"):
+            raise UnsupportedQueryError(
+                f"child-record chaining reaches only scalar and encoded fields; {schema.cls.__name__}.{name} "
+                f"is a {element_spec.role} field"
+            )
+        return MongoInlineRecordField(self._path, element_spec, self._key)
+
+    def _refuse(self, *_args: Any) -> NoReturn:
+        raise UnsupportedQueryError(
+            f"{self._variable._cls.__name__}.{self._spec.field} is an Inline field whose elements have no identity; "
+            f"query an element field instead, as in v.{self._spec.field}.<field> == value"
+        )
+
+    __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _refuse
+    has = has_any = has_only = is_in = contains = startswith = endswith = _refuse
+    __hash__ = object.__hash__
 
 
 class MongoReference:
@@ -1394,6 +1455,28 @@ class MongoChildRecordField(MongoLinkField):
         return super()._comparison(op, value)
 
 
+class MongoInlineRecordField(MongoChildRecordField):
+    """An element field of an ``Inline`` traversal (``v.sites.symbol``), compared existentially.
+
+    As :class:`MongoChildRecordField`, but its keys sit directly in the embedded
+    element subdocuments and its nodes carry the traversal's merge key.
+
+    :param path: The embedded element array path.
+    :param spec: The resolved scalar or encoded element field.
+    :param key: The owning traversal object's merge key.
+    """
+
+    __slots__ = ("_traversal_key",)
+    _key_prefix: ClassVar[str] = ""
+
+    def __init__(self, path: str, spec: FieldSpec, key: Any) -> None:
+        super().__init__(path, spec)
+        self._traversal_key = key
+
+    def _node(self, predicate: dict[str, Any]) -> MongoExpression:
+        return MongoExpression(ChildRecordNode(self._path, predicate, self._traversal_key))
+
+
 class MongoVariable:
     """A query variable, optionally produced by a lookup from another variable."""
 
@@ -1429,7 +1512,7 @@ class MongoVariable:
         """Return the weak-link namespace of this variable."""
         return MongoLinks(self)
 
-    def __getattr__(self, name: str) -> MongoField | MongoReference:
+    def __getattr__(self, name: str) -> MongoField | MongoReference | MongoInlineRecords:
         if name.startswith("_"):
             raise AttributeError(name)
         if name == "sid":
@@ -1478,6 +1561,8 @@ class MongoVariable:
             return reference
         if spec.role == "child":
             assert spec.child is not None
+            if spec.child.inline is not None:
+                return MongoInlineRecords(self, spec)
             if spec.target is not None:
                 return MongoChildRecords(self, spec)
             # A tensor child (FracVector or float) queries its first element key without a codec.

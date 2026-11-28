@@ -150,6 +150,7 @@ from httk.store.store_common import (
     EntryIdConflictError,
     EntryMetadataConflictError,
     SaveProjection,
+    _child_value_conflict,
     _keep_stored_fill,
     _metadata_plan,
     reject_cursor_proxy,
@@ -1389,6 +1390,7 @@ class BulkIngest:
                 SqlStore._projected_value(record_type, source, projected, spec),
                 _field_path(path, spec.field),
                 resolve_sid,
+                validate=projection.validate,
             )
             for child_row in child_rows:
                 self._buffer_row(spec.child.table_name, child_row)
@@ -2977,10 +2979,9 @@ class BulkIngest:
         if spec.target is None:
             # A non-storable child sequence: compare the projected values whole,
             # exactly as save() compares the decoded child list.
-            if not _metadata_scalar_equal(incoming, stored):
-                raise EntryMetadataConflictError(
-                    f"metadata conflict for {path}: stored {stored!r}, received {incoming!r}"
-                )
+            conflict = _child_value_conflict(spec, incoming, stored, path, _metadata_scalar_equal)
+            if conflict is not None:
+                raise conflict
             return
         if incoming is None or stored is None:
             if incoming is not stored:

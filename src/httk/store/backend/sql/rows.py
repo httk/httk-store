@@ -6,7 +6,7 @@ import typing
 import weakref
 from array import array
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import sqlalchemy
@@ -226,7 +226,10 @@ class _Chunk:
                 for entry in entries
             ]
             return FracVector(rows)
-        if spec.target is not None:
+        if spec.child.inline is not None:
+            element = spec.child.inline
+            elements = [_decode_inline_element(element, dict(zip(columns, entry, strict=True))) for entry in entries]
+        elif spec.target is not None:
             target_sids = [int(entry[columns[spec.child.element_columns[0].name]]) for entry in entries]
             all_target_sids = [
                 int(entry[columns[spec.child.element_columns[0].name]])
@@ -376,6 +379,21 @@ def decode_field(store: "SqlStore", schema: TableSchema, spec: FieldSpec, sid: i
     :return: The decoded field value.
     :raises TypeError: If the field needs its row chunk for child or reference hydration.
     """
+    return _decode_columns(spec, row)
+
+
+def _decode_inline_element(element: TableSchema, row: Mapping[str, Any]) -> Any:
+    """Rebuild one ``Inline`` element from its child-table row.
+
+    :param element: The inline element schema (``ChildTableSpec.inline``).
+    :param row: The child row, keyed by column name.
+    :return: The element dataclass instance.
+    """
+    return element.cls(**{spec.field: _decode_columns(spec, row) for spec in element.fields})
+
+
+def _decode_columns(spec: FieldSpec, row: Mapping[str, Any]) -> Any:
+    """Decode a scalar, encoded or fixed-array field from its columns in ``row``."""
     if spec.role == "scalar":
         return row[spec.columns[0].name]
     if spec.role == "encoded":

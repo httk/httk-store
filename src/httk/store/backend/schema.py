@@ -38,6 +38,15 @@ Resolution rules (field annotation, then the resulting relational shape):
 - ``list[T]`` / homogeneous ``tuple[T, ...]`` — a child table: scalar or
   codec-typed elements store their columns per row; storable-dataclass elements
   store one ``name_sid`` foreign-key column per row.
+- ``Annotated[tuple[D, ...], Inline()]`` / ``Annotated[list[D], Inline()]`` for a
+  frozen dataclass ``D`` — one child table whose rows carry ``D``'s own columns
+  (derived as on a record table) after ``<parent>_sid`` and ``<name>_index``; no
+  table for ``D`` and no identity of its own. Every field of ``D`` must resolve
+  to a scalar, codec, or fixed-shape tensor column set (``Skip`` omits one,
+  ``Indexed`` indexes its child column); references, sequences, stored
+  properties, ``Unique`` and ``KeepStored`` are rejected, and of ``D``'s own
+  ``__httk_storage__`` only ``identity_name`` matters (to content identity,
+  not to storage). Elements cannot be ``None``.
 - ``list[T | None]`` / ``tuple[T | None, ...]`` for a scalar or codec ``T`` —
   the same child table with every element column nullable; a ``None`` element
   is a row whose element columns are all NULL. Storable-dataclass elements
@@ -85,6 +94,7 @@ from httk.core.storage import (
     STORAGE_INFO_ATTRIBUTE,
     DedupPolicy,
     Indexed,
+    Inline,
     KeepStored,
     Related,
     Shape,
@@ -222,6 +232,7 @@ class ChildTableSpec:
     :param table_name: The child table name.
     :param element_columns: The value columns of one element row.
     :param target: The storable element class for foreign-key rows, if any.
+    :param inline: The element schema of an ``Inline`` field, if any.
     """
 
     table_name: str
@@ -232,6 +243,14 @@ class ChildTableSpec:
 
     target: type | None = None
     """The storable element class when rows are foreign keys, else None."""
+
+    inline: "TableSchema | None" = None
+    """For an ``Inline`` field, the element dataclass's schema, else None.
+
+    Its ``table_name`` is this child table and its ``fields`` (scalar, encoded
+    and fixed-array roles only) produce :attr:`element_columns`; it has no
+    store-managed columns and is never a table of its own.
+    """
 
 
 @dataclasses.dataclass(frozen=True)
@@ -611,7 +630,14 @@ def _property_annotation(cls: type, name: str, prop: stored_property) -> Any:
 
 
 def _resolve_field(
-    cls: type, table_name: str, name: str, annotation: Any, *, derived: bool, has_default: bool
+    cls: type,
+    table_name: str,
+    name: str,
+    annotation: Any,
+    *,
+    derived: bool,
+    has_default: bool,
+    inline_element: bool = False,
 ) -> FieldSpec | None:
     if name in _RESERVED_FIELD_NAMES:
         raise SchemaError(
@@ -628,6 +654,7 @@ def _resolve_field(
     related: Related | None = None
     strong_link: StrongLink | None = None
     keep_stored = False
+    inline = False
     while True:
         origin = typing.get_origin(base)
         if origin is Annotated:
@@ -647,6 +674,8 @@ def _resolve_field(
                     keep_stored = True
                 elif isinstance(marker, StrongLink):
                     strong_link = marker
+                elif isinstance(marker, Inline):
+                    inline = True
             base = arguments[0]
             continue
         if origin is typing.Union or origin is types.UnionType:
@@ -674,8 +703,21 @@ def _resolve_field(
                 f"reconstructed without it"
             )
         return None
+    if inline_element and (unique or keep_stored):
+        raise SchemaError(
+            f"{cls.__name__}.{name}: Unique and KeepStored do not apply to a field of an Inline element; "
+            f"inline rows have no identity of their own"
+        )
+    if inline_element and inline:
+        # Refused before resolving, so recursive (Node -> Node) and mutual element classes cannot loop.
+        raise SchemaError(f"{cls.__name__}.{name}: an Inline element cannot itself hold an Inline field")
+    if inline and (indexed or unique or keep_stored):
+        raise SchemaError(
+            f"{cls.__name__}.{name}: Indexed, Unique and KeepStored do not apply to an Inline field; "
+            f"mark the element class's fields instead"
+        )
 
-    spec = _resolve_unwrapped_field(cls, table_name, name, base, shape, optional, indexed, unique, derived)
+    spec = _resolve_unwrapped_field(cls, table_name, name, base, shape, optional, indexed, unique, derived, inline)
     if keep_stored and spec.shape is not None:
         raise SchemaError(f"{cls.__name__}.{name}: KeepStored does not apply to a Shape-annotated tensor field")
     if related is not None:
@@ -733,12 +775,21 @@ def _resolve_unwrapped_field(
     indexed: bool,
     unique: bool,
     derived: bool,
+    inline: bool = False,
 ) -> FieldSpec:
     if len(name.encode("utf-8")) > _MAX_IDENTIFIER_LENGTH:
         raise SchemaError(
             f"{cls.__name__}.{name}: a stored field name longer than {_MAX_IDENTIFIER_LENGTH} UTF-8 bytes is not "
             f"a portable column name; shorten it"
         )
+    origin = typing.get_origin(base)
+    if inline:
+        if shape is not None or origin not in (list, tuple):
+            raise SchemaError(
+                f"{cls.__name__}.{name}: Inline applies only to tuple[D, ...] or list[D] of a frozen dataclass D, "
+                f"not to {base!r}" + (" with a Shape marker" if shape is not None else "")
+            )
+        return _resolve_sequence_field(cls, table_name, name, base, origin, optional, derived, inline=True)
     if shape is not None:
         return _resolve_shape_field(cls, table_name, name, base, shape, optional, indexed, unique, derived)
 
@@ -771,7 +822,6 @@ def _resolve_unwrapped_field(
             optional=optional,
         )
 
-    origin = typing.get_origin(base)
     if origin is list or origin is tuple:
         return _resolve_sequence_field(cls, table_name, name, base, origin, optional, derived)
 
@@ -880,7 +930,15 @@ def _resolve_shape_field(
 
 
 def _resolve_sequence_field(
-    cls: type, table_name: str, name: str, base: Any, origin: type, optional: bool, derived: bool
+    cls: type,
+    table_name: str,
+    name: str,
+    base: Any,
+    origin: type,
+    optional: bool,
+    derived: bool,
+    *,
+    inline: bool = False,
 ) -> FieldSpec:
     arguments = typing.get_args(base)
     if origin is tuple:
@@ -903,6 +961,20 @@ def _resolve_sequence_field(
             )
         element_type = others[0]
         nullable = True
+
+    if inline:
+        if nullable:
+            raise SchemaError(f"{cls.__name__}.{name}: Inline elements cannot be None")
+        child_table = _child_table_name(table_name, name)
+        element_schema = _resolve_inline_element(
+            cls, name, element_type, child_table, (_parent_sid_column(table_name), _index_column(name))
+        )
+        child = ChildTableSpec(
+            table_name=child_table,
+            element_columns=tuple(column for spec in element_schema.fields for column in spec.columns),
+            inline=element_schema,
+        )
+        return FieldSpec(field=name, python_type=base, role="child", child=child, derived=derived, optional=optional)
 
     codec_name: str | None = None
     target: type | None = None
@@ -944,6 +1016,61 @@ def _resolve_sequence_field(
         derived=derived,
         optional=optional,
     )
+
+
+def _resolve_inline_element(
+    cls: type, name: str, element: Any, child_table: str, bookkeeping: tuple[str, str]
+) -> TableSchema:
+    """Resolve the element dataclass of an Inline field into its child-row schema.
+
+    Element fields are resolved exactly as record-table fields are; only the
+    scalar, encoded and fixed-array roles are accepted. ``element``'s own
+    ``__httk_storage__`` is not consulted.
+    """
+    where = f"{cls.__name__}.{name}"
+    if not (
+        isinstance(element, type)
+        and dataclasses.is_dataclass(element)
+        and typing.cast(Any, element).__dataclass_params__.frozen
+    ):
+        raise SchemaError(
+            f"{where}: Inline applies only to tuple[D, ...] or list[D] of a frozen dataclass D, "
+            f"got element type {element!r}"
+        )
+    properties = _stored_properties(element)
+    if properties:
+        raise SchemaError(
+            f"{where}: Inline element {element.__name__} declares stored properties "
+            f"{[prop for prop, _ in properties]}; inline rows store declared fields only"
+        )
+    hints = typing.get_type_hints(element, include_extras=True)
+    specs: list[FieldSpec] = []
+    for field in dataclasses.fields(element):
+        has_default = field.default is not dataclasses.MISSING or field.default_factory is not dataclasses.MISSING
+        spec = _resolve_field(
+            element,
+            child_table,
+            field.name,
+            hints[field.name],
+            derived=False,
+            has_default=has_default,
+            inline_element=True,
+        )
+        if spec is None:
+            continue
+        if spec.role not in ("scalar", "encoded", "fixed_array"):
+            raise SchemaError(
+                f"{where}: Inline element field {element.__name__}.{field.name} has role {spec.role!r}; inline rows "
+                f"hold only scalar, codec and fixed-shape tensor fields"
+            )
+        for column in spec.columns:
+            if column.name in bookkeeping:
+                raise SchemaError(
+                    f"{where}: Inline element field {element.__name__}.{field.name} column {column.name!r} collides "
+                    f"with a store-managed column of child table {child_table!r}"
+                )
+        specs.append(spec)
+    return TableSchema(cls=element, table_name=child_table, fields=tuple(specs), composite_indexes=(), dedup="none")
 
 
 def _is_mapping_type(base: Any, origin: Any) -> bool:

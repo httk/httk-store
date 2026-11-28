@@ -1,12 +1,12 @@
 """A structures record with its own sites table
 
 This module declares a user-defined `structures` record whose sites live in a
-table of their own, one row per site with the columns `x`, `y`, `z` and
-`symbol`. It is the record module of the guide
+table of their own, one row per site with the parent sid, the position and the
+columns `x`, `y`, `z` and `symbol`. It is the record module of the guide
 {doc}`../../details/db-redefine-format`, which explains each part.
 
-`SiteRecord` is one row of the site table. `SitesStructureRecord` holds the
-lattice basis and the ordered sites, projects itself from any httk
+`SiteRow` is one row of the site table. `SitesStructureRecord` holds the
+lattice basis and the ``Inline()`` sites, projects itself from any httk
 `UnitcellStructure`, and declares the OPTIMADE properties it serves. The call
 at the bottom registers it as the `structures` record
 `example-sites-structure`.
@@ -29,6 +29,7 @@ from httk.core.register import register_entry_record
 from httk.core.storage import (
     IdentitySkip,
     Indexed,
+    Inline,
     QueryContext,
     QueryExpression,
     QueryLiteralError,
@@ -47,7 +48,7 @@ HTTK_EXAMPLE_REQUIRES = ["httk.atomistic"]
 
 # [site-record]
 @dataclass(frozen=True)
-class SiteRecord:
+class SiteRow:
     """One site: reduced coordinates and the element symbol occupying it.
 
     :param x: The first reduced coordinate.
@@ -56,11 +57,9 @@ class SiteRecord:
     :param symbol: The chemical symbol of the atom at the site.
     """
 
-    # identity_name pins content identity, so moving the module keeps stored ids valid.
-    # dedup="none": every saved structure gets its own site rows.
-    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
-        storage_name="example_site", identity_name="example_site", dedup="none"
-    )
+    # Stored Inline(), so only identity_name matters: it pins content identity,
+    # and moving the module keeps stored ids valid.
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(identity_name="example_site")
 
     x: float
     y: float
@@ -220,7 +219,7 @@ class SitesStructureRecord:
     __httk_canonical_source__: ClassVar[type] = UnitcellStructure
 
     basis: Annotated[tuple[tuple[float, ...], ...], Shape(3, 3)]
-    sites: tuple[SiteRecord, ...]
+    sites: Annotated[tuple[SiteRow, ...], Inline()]  # one child table: parent sid, index, x, y, z, symbol
     id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
     immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
     last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
@@ -254,7 +253,7 @@ class SitesStructureRecord:
         return {
             # No __post_init__ runs on these values: they must already have the field types.
             "basis": float_matrix(structure.lattice_vectors, 3, rows=3),
-            "sites": tuple(SiteRecord(x, y, z, symbol_of[name]) for (x, y, z), name in positions),
+            "sites": tuple(SiteRow(x, y, z, symbol_of[name]) for (x, y, z), name in positions),
             # A projection names every field; the store mints the two ids.
             "id": None,
             "immutable_id": None,

@@ -947,11 +947,20 @@ def _field_fingerprint(spec: FieldSpec, annotation: Any) -> dict[str, Any]:
 
 
 def _child_fingerprint(child: ChildTableSpec) -> dict[str, Any]:
-    return {
+    document: dict[str, Any] = {
         "table_name": child.table_name,
         "element_columns": [_column_fingerprint(column) for column in child.element_columns],
         "target": None if child.target is None else resolve_schema(child.target).table_name,
     }
+    if child.inline is not None:
+        # Only present on Inline fields, so link-table and plain child fingerprints are unchanged.
+        element = child.inline
+        hints = typing.get_type_hints(element.cls, include_extras=True)
+        document["inline"] = {
+            "identity_name": storage_identity_name(element.cls),
+            "fields": {spec.field: _field_fingerprint(spec, hints.get(spec.field)) for spec in element.fields},
+        }
+    return document
 
 
 def _column_fingerprint(column: ColumnSpec) -> dict[str, Any]:

@@ -39,8 +39,12 @@ that matter here are short:
 - A scalar field (`float`, `int`, `str`) becomes one column.
 - A fixed-shape float tensor, `Annotated[tuple[tuple[float, ...], ...], Shape(3, 3)]`,
   becomes nine inline `DOUBLE` columns `basis_0` to `basis_8`.
-- A tuple of a storable dataclass, `tuple[SiteRecord, ...]`, becomes an element
-  table for `SiteRecord` plus a link table that keeps the order.
+- A tuple of a frozen dataclass marked `Inline()`,
+  `Annotated[tuple[SiteRow, ...], Inline()]`, becomes one child table. Each row
+  holds the parent's sid, the element's position and the element's own
+  columns.
+- Without `Inline()`, `tuple[SiteRow, ...]` becomes an element table for
+  `SiteRow` plus a link table that keeps the order.
 
 [Declaring, storing, and fetching records](db-records.md) has the full set of
 rules.
@@ -55,11 +59,10 @@ lineage of the row (see [Record replacement](db-revisions.md#record-replacement-
 [Alternatives](db-revisions.md#alternatives)). A content-deduplicated table
 also has a unique `content_id` column.
 
-Deduplication decides whether rows are shared. The structure table keeps the
-default `dedup="content_id"`, so saving an identical structure twice returns
-the existing row. The site table uses `dedup="none"`, so every structure gets
-its own site rows. With the default `"content_id"` on the site class,
-identical site rows would be shared between structures instead.
+The structure table keeps the default `dedup="content_id"`, so saving an
+identical structure twice returns the existing row. Inline site rows get none
+of the store's columns: they belong to their structure row, are written with
+it and are never shared.
 
 On SQLite the example produces these tables (indexes and constraints left out):
 
@@ -83,29 +86,26 @@ CREATE TABLE example_sites_structure (
 CREATE TABLE example_sites_structure_sites (
     example_sites_structure_sid INTEGER NOT NULL,
     sites_index INTEGER NOT NULL,
-    sites_sid INTEGER NOT NULL
-)
-CREATE TABLE example_site (
-    sid INTEGER NOT NULL,
-    _httk_role SMALLINT NOT NULL,
-    store_timestamp BIGINT NOT NULL,
-    logical_id BIGINT NOT NULL,
-    alt_id BIGINT NOT NULL,
-    alt_kind TEXT,
     x DOUBLE NOT NULL,
     y DOUBLE NOT NULL,
     z DOUBLE NOT NULL,
-    symbol TEXT NOT NULL,
-    PRIMARY KEY (sid)
+    symbol TEXT NOT NULL
 )
 ```
 
-DuckDB creates the same tables with `VARCHAR` in place of `TEXT`. The site
-table has no `content_id` column because it is not deduplicated. The link
-table row `(structure sid, sites_index, site sid)` places one site at one
-position of one structure.
+DuckDB creates the same tables with `VARCHAR` in place of `TEXT`. One row
+`(structure sid, sites_index, x, y, z, symbol)` is one site at one position of
+one structure. On MongoDB the sites are an embedded array of
+`{x, y, z, symbol}` subdocuments in the structure document.
 
-## 3. Declare the site record
+Use the link layout (no `Inline()`) instead when the elements are records in
+their own right: when the same element should be one shared row for many
+parents, when it needs its own revisions, links or entry id, or when its fields
+are references or sequences, which an inline element cannot hold. The search
+DSL and stored-property scopes below work the same in both layouts, but only
+the link layout lets you compare `s.sites` with stored element records.
+
+## 3. Declare the site row
 
 The record module starts with these imports, which the snippets below rely on:
 
@@ -115,9 +115,11 @@ The record module starts with these imports, which the snippets below rely on:
 :end-before: "# [/imports]"
 ```
 
-The site record is an ordinary frozen dataclass. `storage_name` sets the table
-name. `identity_name` pins its content identity, so moving the module later
-keeps stored content ids valid.
+The site row is an ordinary frozen dataclass. Its fields must be scalars,
+codec values (such as `Fraction`) or fixed-shape tensors; each becomes the same
+columns it would on a record table. An inline element's `StorageInfo` does not
+affect the layout, but its `identity_name` still pins content identity, so
+moving the module later keeps stored content ids valid.
 
 ```{literalinclude} ../../examples/custom_layout/sites_layout.py
 :language: python
@@ -127,7 +129,8 @@ keeps stored content ids valid.
 
 ## 4. Declare the structure record and its projection
 
-The structure record holds the lattice basis and the ordered sites. It also
+The structure record holds the lattice basis and the ordered sites, declared
+`Annotated[tuple[SiteRow, ...], Inline()]`. It also
 carries the two store-minted ids, `id` and `immutable_id`, and an optional
 `last_modified`. These three fields are marked `IdentitySkip()`, so they do
 not take part in content identity.
@@ -192,8 +195,8 @@ callable type takes `object`, so the example types the argument as
 ```
 
 The queries receive a {py:class}`~httk.core.storage.QueryContext`, the filter
-operator and its literal. `context.scope("sites")` reaches the site rows
-through the link table. On that scope, `context.count` counts the sites,
+operator and its literal. `context.scope("sites")` reaches the site rows. On
+that scope, `context.count` counts the sites,
 `context.distinct_count` counts distinct symbols, and `context.exists` and
 `context.filtered` express the `HAS`, `HAS ALL`, `HAS ANY` and `HAS ONLY`
 operators on `elements`. A query must handle or reject every operator it can
@@ -292,7 +295,7 @@ The example builds its two structures exactly in code:
 
 ## 8. Query it in Python
 
-The search DSL chains from the `sites` field into the site table.
+The search DSL chains from the `sites` field into the site rows.
 `s.sites.symbol == "Cl"` finds the structures that have a chlorine site.
 Conditions on one `s.sites` object apply to the same site, so the second search
 finds only the structures with a chlorine site near the origin. A fresh
@@ -305,7 +308,13 @@ finds only the structures with a chlorine site near the origin. A fresh
 :dedent: 12
 ```
 
-A reopened store finds the record class through its registration:
+A reopened store finds the record class through its registration. Reopening
+also checks that the record classes still match the stored layout. Any change
+to `SiteRow`, even adding a nullable field, is a changed `sites` field and
+needs a rebuild of the store (see [Entry families and schema layout](db-schema.md)).
+The structure record keeps the default `dedup="content_id"`; with
+`dedup="by_value"` it would compare only its own columns, so two structures
+that differ only in their sites would collapse onto the first.
 
 ```{literalinclude} ../../examples/custom_layout/build_sites_store.py
 :language: python
@@ -373,8 +382,8 @@ table. Without it, such a job reports a `storage_error` that names the missing
 
 ## 11. Limitations
 
-- A tuple of a storable dataclass always goes through a link table. Inline
-  multi-column child rows without a link table are not supported.
+- An inline element cannot hold references, sequences or stored properties,
+  and `s.sites` itself cannot be compared, only its fields.
 - A filter on a response-only property answers 501 "not implemented".
 - Every reopen needs the registration, whether from the module-level call,
   `httk serve --record-class` or a registration package.

@@ -225,7 +225,7 @@ class _SqlScope:
                 raise StoredPropertySqlConfigurationError(
                     "store_timestamp queries require SqlStore(store_timestamps=True)"
                 )
-            if self.scalar_child is not None:
+            if self.scalar_child is not None or STORE_TIMESTAMP_COLUMN not in self.alias.c:
                 raise StoredPropertySqlConfigurationError("store_timestamp is only available on parent scopes")
             return self.context._scoped_scalar(
                 self,
@@ -245,7 +245,7 @@ class _SqlScope:
         if name == LOGICAL_ID_COLUMN:
             # The store-managed lineage id, unconditional and unscaled (a plain
             # integer). Like store_timestamp it lives only on parent scopes.
-            if self.scalar_child is not None:
+            if self.scalar_child is not None or LOGICAL_ID_COLUMN not in self.alias.c:
                 raise StoredPropertySqlConfigurationError("logical_id is only available on parent scopes")
             return self.context._scoped_scalar(self, _SqlValue(self.alias.c[LOGICAL_ID_COLUMN], scope=self))
         if self.scalar_child is not None:
@@ -610,6 +610,19 @@ class _SqlQueryContext:
             )
         alias = self._searcher._store._table(spec.child.table_name).alias()
         condition = _bool_clause(alias.c[_parent_sid_column(parent.schema.table_name)] == parent.alias.c[SID_COLUMN])
+        if spec.child.inline is not None:
+            # Inline rows are the elements: the child alias is the element scope (no lineage columns).
+            return _SqlScope(
+                self,
+                spec.child.inline,
+                alias,
+                (*parent.froms, alias),
+                _scope_ancestors(parent),
+                (*parent.conditions, condition),
+                singleton=False,
+                correlation_depth=depth,
+                origin=(parent, spec),
+            )
         if spec.target is not None:
             schema = resolve_schema(spec.target)
             target = self._searcher._store._table(schema.table_name).alias()

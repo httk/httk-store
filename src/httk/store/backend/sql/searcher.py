@@ -72,7 +72,7 @@ the exact set semantics of the reference in-memory store.
 import dataclasses
 from array import array
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 
 import sqlalchemy
 from httk.core.storage import resolve_storage_record
@@ -86,6 +86,7 @@ from httk.store.backend.schema import (
     TableSchema,
     _bounded_identifier,
     _exact_column,
+    _index_column,
     _is_float_tensor,
     _parent_sid_column,
     _present_column,
@@ -773,10 +774,15 @@ class SqlChildRecords(SqlColumn):
     Scalar and encoded element fields chain; reference, child and tensor
     element fields raise :class:`~httk.store.query.UnsupportedQueryError`.
 
+    An ``Inline`` field's rows are the elements: its
+    element fields are columns of the one child-table alias, and the field
+    itself, having no element identity, refuses comparisons and set operations.
+
     :param searcher: The searcher that owns this column.
-    :param element: The link table's element-sid column.
+    :param element: The link table's element-sid column (an inline field's index column).
     :param variable: The variable owning the child field.
     :param spec: The stored child field specification.
+    :param inline_alias: The joined child-table alias of an Inline field, else None.
     """
 
     def __init__(
@@ -786,30 +792,45 @@ class SqlChildRecords(SqlColumn):
         *,
         variable: "SqlVariable",
         spec: FieldSpec,
+        inline_alias: sqlalchemy.FromClause | None = None,
     ) -> None:
         super().__init__(searcher, element, variable=variable, spec=spec, from_child=True)
-        self._target_alias: sqlalchemy.FromClause | None = None
+        self._target_alias: sqlalchemy.FromClause | None = inline_alias
+        self._inline = inline_alias is not None
         self._traversal = self
         # Element-sid conditions share an element with each other, not with field conditions (MongoDB reads
         # them from different arrays), so they get a merge key of their own.
         self._of(self, object())
 
+    def _use(self, selects: bool) -> _Shape | None:
+        if self._inline:
+            spec = cast(FieldSpec, self._spec)
+            raise UnsupportedQueryError(
+                f"{cast('SqlVariable', self._variable)._cls.__name__}.{spec.field} is an Inline field whose "
+                f"elements have no identity; query an element field instead, as in v.{spec.field}.<field> == value"
+            )
+        return super()._use(selects)
+
     def __getattr__(self, name: str) -> SqlColumn:  # type: ignore[override]
         if name.startswith("_"):
             raise AttributeError(name)
         variable, spec = cast("SqlVariable", self._variable), cast(FieldSpec, self._spec)
-        assert spec.target is not None
-        schema = resolve_schema(spec.target)
+        assert spec.child is not None
+        if spec.child.inline is not None:
+            schema = spec.child.inline
+        else:
+            assert spec.target is not None
+            schema = resolve_schema(spec.target)
         try:
             element_spec = schema.field(name)
         except SchemaError:
             raise AttributeError(
-                f"{spec.target.__name__} has no stored field {name!r} to query through "
+                f"{schema.cls.__name__} has no stored field {name!r} to query through "
                 f"{variable._cls.__name__}.{spec.field}"
             ) from None
         if element_spec.role not in ("scalar", "encoded"):
             raise UnsupportedQueryError(
-                f"child-record chaining reaches only scalar and encoded fields; {spec.target.__name__}.{name} "
+                f"child-record chaining reaches only scalar and encoded fields; {schema.cls.__name__}.{name} "
                 f"is a {element_spec.role} field"
             )
         if self._target_alias is None:
@@ -840,6 +861,18 @@ class SqlChildRecords(SqlColumn):
             )
         column._traversal = self
         return column._of(self)
+
+
+_INLINE_OUTPUT_REFUSAL: Final = (
+    "a field of child records is variable-length and cannot be a scalar output or sort key; child-record "
+    "traversals are usable only as search predicates, so project the variable and read its records instead"
+)
+"""The refusal of projecting or sorting by an ``Inline`` field itself (MongoDB's wording)."""
+
+
+def _is_inline_traversal(value: object) -> bool:
+    """Whether ``value`` is an ``Inline`` field itself (``v.sites``), not one of its element fields."""
+    return isinstance(value, SqlChildRecords) and value._inline
 
 
 def _is_child_record_field(column: SqlColumn) -> bool:
@@ -1562,6 +1595,10 @@ class SqlVariable:
         self._joins.append((alias, onclause, None))
         self._searcher._grouped = True
         codec: ValueCodec | None = None
+        if spec.child.inline is not None:
+            return SqlChildRecords(
+                self._searcher, alias.c[_index_column(spec.field)], variable=self, spec=spec, inline_alias=alias
+            )
         if spec.target is not None:
             column_name = _bounded_identifier(spec.field, "_sid")
         elif spec.codec_name is not None and not _is_float_tensor(spec):
@@ -1791,6 +1828,8 @@ class SqlSearcher:
         elif isinstance(variable, SqlVariable):
             self._outputs.append(_Output(name, variable._alias.c[SID_COLUMN], variable._cls, False))
         elif isinstance(variable, SqlColumn):
+            if _is_inline_traversal(variable):
+                raise UnsupportedQueryError(_INLINE_OUTPUT_REFUSAL)
             if variable._link_path:
                 # Weak-link traversals are variable-length set predicates, not
                 # single-valued projections — the same rule that rejects
@@ -1875,6 +1914,8 @@ class SqlSearcher:
         :raises httk.store.query.protocols.UnsupportedQueryError: If ``field`` is a weak-link path or a field of
             child records.
         """
+        if _is_inline_traversal(field):
+            raise UnsupportedQueryError(_INLINE_OUTPUT_REFUSAL)
         if field._link_path:
             # A weak-link traversal is a variable-length joined column; ordering
             # by it would ORDER BY an unaggregated joined column under grouped

@@ -75,6 +75,7 @@ from httk.store.store_common import (
     EntryReplacementError,
     IdentityCaches,
     SaveProjection,
+    _child_value_conflict,
     _keep_stored_fill,
     _keeps_stored,
     _LinksAccessor,
@@ -91,7 +92,7 @@ from httk.store.store_timestamp import (
 )
 
 from .database import MongoDatabase, TransactionConflictError, TransactionsUnavailableError
-from .documents import decode_record, encode_record, preflight_document
+from .documents import _decode_child, decode_record, encode_record, preflight_document
 from .fsck import FsckSummary, main_backing_documents
 from .leases import (
     DEFAULT_TIMING,
@@ -2140,6 +2141,7 @@ class MongoStore:
                 top_level=False,
                 id_series=id_series,
             ),
+            validate=projection.validate,
         )
         if schema.dedup == "by_value":
             query = self._by_value_query(schema, f_document)
@@ -3383,6 +3385,10 @@ class MongoStore:
                 return left.astimezone(datetime.UTC) == right.astimezone(datetime.UTC)
         return bool(left == right)
 
+    @staticmethod
+    def _no_inline_reference(target: type, sid: int) -> Any:
+        raise AssertionError("Inline elements hold no references")  # pragma: no cover
+
     def _metadata_value(self, spec: Any, document: Mapping[str, Any]) -> Any:
         embedded = document.get("f", {})
         if spec.role == "child":
@@ -3390,6 +3396,8 @@ class MongoStore:
                 return None
             entries = embedded.get(spec.field, [])
             assert spec.child is not None
+            if spec.child.inline is not None:
+                return _decode_child(spec, entries, self._no_inline_reference)
             if _is_float_tensor(spec):
                 return tuple(tuple(item[column.name] for column in spec.child.element_columns) for item in entries)
             if spec.shape is not None:
@@ -3530,10 +3538,9 @@ class MongoStore:
             self._check_metadata_target(spec.target, int(stored), incoming, projection, path, compare_content)
             return
         if spec.target is None:
-            if not self._metadata_scalar_equal(incoming, stored):
-                raise EntryMetadataConflictError(
-                    f"metadata conflict for {path}: stored {stored!r}, received {incoming!r}"
-                )
+            conflict = _child_value_conflict(spec, incoming, stored, path, self._metadata_scalar_equal)
+            if conflict is not None:
+                raise conflict
             return
         if incoming is None or stored is None:
             if incoming is not stored:

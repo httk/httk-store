@@ -508,4 +508,8 @@ def _build_child_table(
     ]
     for column_spec in child.element_columns:
         items.append(_column(column_spec))
+        # Only Inline element columns can request one (from an Indexed element field). The "ixe"
+        # prefix keeps it apart from a parent index: P.sites_symbol and P.sites[].symbol both read sites_symbol.
+        if column_spec.indexed:
+            items.append(sqlalchemy.Index(_index_name("ixe", child.table_name, (column_spec.name,)), column_spec.name))
     return sqlalchemy.Table(child.table_name, metadata, *items)

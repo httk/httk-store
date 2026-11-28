@@ -776,6 +776,7 @@ class _WorkerEncoder:
                 SqlStore._projected_value(record_type, source, projected, spec),
                 _field_path(path, spec.field),
                 resolve_sid,
+                validate=projection.validate,
             )
             for child_row in child_rows:
                 self._buffer(spec.child.table_name, child_row)

@@ -4,7 +4,7 @@
 
 Storability is non-intrusive: any frozen dataclass whose fields resolve is
 storable — there is no base class. The stdlib-only marker vocabulary lives in
-*httk-core* (`Indexed`, `Unique`, `Skip`, `Shape`, `StorageInfo`, `WeakLink`,
+*httk-core* (`Indexed`, `Unique`, `Skip`, `Shape`, `Inline`, `StorageInfo`, `WeakLink`,
 `StrongLink`, `stored_property`), so domain modules can declare storable classes without
 depending on httk-store:
 
@@ -56,6 +56,27 @@ recursively first). Classes you cannot modify can be described externally with
 `register_schema_override`. A class-level `StorageInfo(links=...)` declaration
 adds store-managed, lineage-following associations that live outside record
 fields (see [Weak links](db-relationships.md#weak-links)).
+
+A tuple or list of a frozen dataclass is by default a link table to the
+element class's own table. Declaring it
+`Annotated[tuple[SiteRow, ...], Inline()]` (or `list[SiteRow]`, optionally
+`| None`) instead stores one child table `<parent>_<field>` whose rows are
+`<parent>_sid`, `<field>_index` and the element's own columns, derived exactly
+as on a record table; there is no element table and no element identity, and
+content identity is the same in both layouts. Every element field must be a
+scalar, codec, or fixed-shape tensor field: references, sequences, stored
+properties, `Unique` and `KeepStored` are rejected, `Skip` omits a column,
+`Indexed` indexes it, and of the element's own `StorageInfo` only
+`identity_name` matters (for content identity). On MongoDB the elements are
+an embedded array of subdocuments. The search DSL chains through it
+(`v.sites.symbol == "Si"`) with the same one-object-one-element rule, but the
+field itself cannot be compared, sorted on or projected. `Indexed`, `Unique`
+and `KeepStored` on the field itself are rejected, as is an `Inline` field
+inside an inline element. Any change to the element class, even adding a
+nullable field, changes the parent's schema fingerprint, so the store must be
+rebuilt. A `dedup="by_value"` parent compares its own columns only, as for
+every child field, so two records that differ only in their inline rows
+collapse onto the first.
 
 For the distinction between exact storage and approximate SQL comparisons, see
 [Exact rationals, approximate comparisons](db-querying.md#exact-rationals-approximate-comparisons).

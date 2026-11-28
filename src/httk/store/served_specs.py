@@ -41,8 +41,8 @@ def _fulltype_of(spec: FieldSpec) -> str | None:
     if spec.role == "child":
         if spec.shape is not None:
             return "list of list of float"
-        if spec.target is not None:
-            return None
+        if spec.target is not None or (spec.child is not None and spec.child.inline is not None):
+            return None  # records: served as relationships (link layout) or not at all (Inline)
         if spec.codec_name is not None:
             element = _CODEC_FULLTYPES.get(spec.codec_name)
         else:

@@ -68,6 +68,7 @@ from httk.core.entry_ids import (
 from httk.core.storage import (
     Shape,
     StorageProjectionCycleError,
+    project_storage_record,
     resolve_storage_record,
 )
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -140,7 +141,14 @@ from httk.store.backend.sql.mapping import (
     identity_owner_tables,
     table_for,
 )
-from httk.store.backend.sql.rows import RowHydrator, StaleResultError, decode_field, is_lazy_row, lazy_row_identity
+from httk.store.backend.sql.rows import (
+    RowHydrator,
+    StaleResultError,
+    _decode_inline_element,
+    decode_field,
+    is_lazy_row,
+    lazy_row_identity,
+)
 from httk.store.backend.sql.searcher import SqlSearcher
 from httk.store.storage_layout import (
     ADDITIVE_DECLARATION_UPGRADE_HINT,
@@ -171,6 +179,7 @@ from httk.store.store_common import (
     EntryReplacementError,
     IdentityCaches,
     SaveProjection,
+    _child_value_conflict,
     _keep_stored_fill,
     _keeps_stored,
     _metadata_plan,
@@ -3845,7 +3854,7 @@ class SqlStore:
                 connection, record_type, element, projection, element_path, top_level=False, id_series=id_series
             )
 
-        rows = _encode_child_rows(schema, spec, sid, value, path, resolve_sid)
+        rows = _encode_child_rows(schema, spec, sid, value, path, resolve_sid, validate=projection.validate)
         if not self.backend_facts.stores_nan:
             _reject_nan(spec.child.table_name, rows)
         if rows:
@@ -5257,6 +5266,8 @@ class SqlStore:
     @staticmethod
     def _metadata_child_element(spec: FieldSpec, row: Mapping[str, Any]) -> Any:
         assert spec.child is not None
+        if spec.child.inline is not None:
+            return _decode_inline_element(spec.child.inline, row)
         if spec.target is not None:
             return int(row[spec.child.element_columns[0].name])
         if _is_float_tensor(spec):
@@ -5303,10 +5314,9 @@ class SqlStore:
 
         stored = self._metadata_child_value(connection, schema, sid, spec, parent_row, projection)
         if spec.target is None:
-            if not _metadata_scalar_equal(incoming, stored):
-                raise EntryMetadataConflictError(
-                    f"metadata conflict for {path}: stored {stored!r}, received {incoming!r}"
-                )
+            conflict = _child_value_conflict(spec, incoming, stored, path, _metadata_scalar_equal)
+            if conflict is not None:
+                raise conflict
             return
         if incoming is None or stored is None:
             if incoming is not stored:
@@ -5562,6 +5572,8 @@ def _encode_child_rows(
     value: Any,
     path: str,
     resolve_sid: SidResolver,
+    *,
+    validate: bool = False,
 ) -> list[dict[str, Any]]:
     """Build the child-table rows for one child field, resolving element records through ``resolve_sid``.
 
@@ -5576,6 +5588,8 @@ def _encode_child_rows(
     :param value: The child field value (a sequence, tensor, or ``None``).
     :param path: The projection path prefix used for diagnostics.
     :param resolve_sid: The callback assigning a sid to each referenced element record.
+    :param validate: Whether each Inline element's own ``__httk_validate__`` runs (record elements are
+        validated by their own save).
     :return: The encoded child-table rows in element order.
     """
     assert spec.child is not None
@@ -5598,6 +5612,20 @@ def _encode_child_rows(
             for i, part in enumerate(encode_fracvector_floats(row_tensor)):
                 row[_bounded_identifier(spec.field, f"_{i}")] = part
             row[_exact_column(spec.field)] = encode_fracvector_exact(row_tensor)
+            rows.append(row)
+    elif spec.child.inline is not None:
+        element_schema = spec.child.inline
+        for position, element in enumerate(value if value is not None else ()):
+            element_path = f"{path}[{position}]"
+            if element is None:
+                raise ValueError(f"{element_path} cannot be None; Inline elements are dataclass instances")
+            projected = project_storage_record(element_schema.cls, element)
+            # Like a record's own save: only an exact instance is validated, never a projection source.
+            validator = vars(element_schema.cls).get("__httk_validate__") if validate else None
+            if validator is not None and type(element) is element_schema.cls:
+                validator.__get__(None, element_schema.cls)(element)
+            row = {parent_column: sid, index_column: position}
+            row.update(_encode_parent_row(element_schema, element, projected, element_path, resolve_sid))
             rows.append(row)
     else:
         codec = codec_named(spec.codec_name) if spec.codec_name is not None else None

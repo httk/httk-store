@@ -259,6 +259,9 @@ class _MongoQueryContext:
             raise MongoStoredPropertyConfigurationError(
                 f"{parent.schema.cls.__name__}.{name} is not a child or reference scope"
             )
+        if spec.child.inline is not None:
+            # Inline elements are the scope's items, read like the fields of an element record.
+            return self._new_scope(spec.child.inline, parent, spec)
         return self._new_scope(
             resolve_schema(spec.target) if spec.target is not None else parent.schema,
             parent,

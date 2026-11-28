@@ -61,8 +61,10 @@ when `results()` is declared; reference-path projections are supported.
 
 On the SQL and MongoDB backends, a field such as
 `sites: tuple[SiteRecord, ...]`, whose elements are stored records, chains into
-the element fields, with the same correlation rule on both. The condition holds
-when some element matches it:
+the element fields, with the same correlation rule on both. An `Inline()` field
+chains the same way into its rows, but the field itself cannot be compared,
+because its elements have no identity. The condition holds when some element
+matches it:
 
 ```python
 search = store.searcher()

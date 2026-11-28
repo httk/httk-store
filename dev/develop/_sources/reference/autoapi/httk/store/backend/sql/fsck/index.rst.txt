@@ -1,0 +1,146 @@
+httk.store.backend.sql.fsck
+===========================
+
+.. py:module:: httk.store.backend.sql.fsck
+
+.. autoapi-nested-parse::
+
+   Integrity repair and dependency collection for SQL permanentization stores.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.fsck.FsckTableSummary
+   httk.store.backend.sql.fsck.FsckSummary
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.store.backend.sql.fsck.run_fsck
+   httk.store.backend.sql.fsck.dispatch_derivation
+
+
+Module Contents
+---------------
+
+.. py:class:: FsckTableSummary
+
+   Counters for one physical record, child, or dispatch table.
+
+
+   .. py:attribute:: examined
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: repaired
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: conflicts
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: deleted
+      :type:  int
+      :value: 0
+
+
+
+.. py:class:: FsckSummary
+
+   Immutable SQL fsck report, modeled after Mongo's public summary.
+
+   :param tables: Per-table repair and collection counters.
+   :param violations: Human-readable violations reported during the run.
+   :param files_checked: Stored ``FileRecord`` rows whose ``data/`` URL was
+       checked against ``data_dir`` (``0`` when no ``data_dir`` was given).
+   :param files_missing: ``(sid, url)`` of checked rows whose file is missing,
+       a symlink, or not a readable regular file.
+   :param files_mismatched: ``(sid, url)`` of checked rows whose file's
+       SHA-256 differs from the stored ``sha256``.
+   :param files_unchecked: Stored ``FileRecord`` rows whose URL is not a
+       relative ``data/`` path and so was not checked.
+   :param files_lost: Stored ``FileRecord`` rows with a null URL (bytes lost), never checked.
+
+
+   .. py:attribute:: tables
+      :type:  collections.abc.Mapping[str, FsckTableSummary]
+
+
+   .. py:attribute:: violations
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: files_checked
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: files_missing
+      :type:  tuple[tuple[int, str], ...]
+      :value: ()
+
+
+
+   .. py:attribute:: files_mismatched
+      :type:  tuple[tuple[int, str], ...]
+      :value: ()
+
+
+
+   .. py:attribute:: files_unchecked
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: files_lost
+      :type:  int
+      :value: 0
+
+
+
+.. py:function:: run_fsck(store, *, repair = True, collect_garbage = True, repair_conflicts = False, clamp_future_timestamps = False, known_types = (), exclusive = False, data_dir = None)
+
+   Repair dispatches, sweep incomplete residue, and report logical dangling references.
+
+   DuckDB does not serialize a read-then-delete fsck against concurrent
+   writers.  Callers must therefore pass ``exclusive=True`` there, explicitly
+   acknowledging that they have taken the database offline from all writers.
+   SQLite transactional stores instead issue ``BEGIN IMMEDIATE`` themselves.
+   With ``data_dir`` (the local directory that stored ``data/...`` URLs are
+   relative to, i.e. the directory published under serve's ``--data-path``),
+   every stored ``FileRecord`` row (top-level or referenced) left after the
+   sweep is verified read-only against its file; the rows are read under the
+   fsck lock and hashed after it is released.
+
+
+.. py:function:: dispatch_derivation(backings)
+
+   Derive an entry family's dispatch associations from its backing tables.
+
+   A dispatch row exists exactly for every *main* (``_httk_role = 1``) row of a
+   backing: a top-level save writes one, a dependency-only row has none.  This
+   derivation is the single definition shared by :func:`run_fsck`'s repair and
+   by the additive declaration upgrade, which rebuilds a family's dispatch
+   table set-wise from it.
+
+   :param backings: ``(stable record name, physical backing table)`` pairs of the
+       backings to derive from, in the family's record order.
+   :return: One ``(dispatch sid column, SELECT content_id, sid)`` pair per backing.
+
+
